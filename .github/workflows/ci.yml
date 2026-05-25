@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            shared/pyproject.toml
+
+      - name: Install shared package
+        run: pip install -e "./shared[dev]"
+
+      - name: Run pytest
+        run: pytest -q
+
+      - name: Build shared Lambda layer
+        run: bash scripts/build_shared_layer.sh
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Serverless package (delivery-api)
+        working-directory: services/delivery-api
+        run: |
+          npm install
+          npx serverless package --stage dev
+
+      - name: Serverless package (dogseeus-invoice)
+        working-directory: services/dogseeus-invoice
+        run: |
+          npm install
+          npx serverless package --stage dev

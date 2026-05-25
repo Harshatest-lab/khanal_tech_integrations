@@ -1,0 +1,13 @@
+{
+  "version": "2.0",
+  "routeKey": "POST /v1/dogseeus/invoices",
+  "rawPath": "/v1/dogseeus/invoices",
+  "body": "{\"order_id\": \"example-1\"}",
+  "requestContext": {
+    "http": {
+      "method": "POST",
+      "path": "/v1/dogseeus/invoices"
+    }
+  },
+  "isBase64Encoded": false
+}

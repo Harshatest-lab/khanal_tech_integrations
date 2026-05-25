@@ -1,0 +1,51 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "Target stage (dev, staging, prod)"
+        required: true
+        default: dev
+      service:
+        description: "Service folder: delivery-api | dogseeus-invoice"
+        required: true
+        default: delivery-api
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.stage }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build shared Lambda layer
+        run: bash scripts/build_shared_layer.sh
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Install & deploy
+        working-directory: services/${{ inputs.service }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FRAPPE_INGEST_API_KEY: ${{ secrets.FRAPPE_INGEST_API_KEY }}
+          DELHIVERY_WEBHOOK_SECRET: ${{ secrets.DELHIVERY_WEBHOOK_SECRET }}
+        run: |
+          npm install
+          npx serverless deploy --stage ${{ inputs.stage }}

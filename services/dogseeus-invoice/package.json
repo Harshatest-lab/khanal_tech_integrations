@@ -1,0 +1,7 @@
+{
+  "name": "dogseeus-invoice",
+  "private": true,
+  "devDependencies": {
+    "serverless": "^3.39.0"
+  }
+}

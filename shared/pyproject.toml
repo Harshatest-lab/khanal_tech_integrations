@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "khanal-shared"
+version = "0.1.0"
+description = "Shared libraries for Khanal Tech serverless services"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "pydantic>=2.6",
+]
+
+[project.optional-dependencies]
+db = [
+  "psycopg[binary,pool]>=3.2,<4",
+]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.4",
+  "psycopg[binary,pool]>=3.2,<4",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["khanal_shared*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
