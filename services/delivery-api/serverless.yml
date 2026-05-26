@@ -50,3 +50,11 @@ functions:
       - httpApi:
           path: /v1/webhooks/delhivery/shipment-status
           method: post
+  delhiveryPodWebhook:
+    handler: src.delhivery_pod_webhook.handler
+    layers:
+      - { Ref: SharedLambdaLayer }
+    events:
+      - httpApi:
+          path: /v1/webhooks/delhivery/pod
+          method: post

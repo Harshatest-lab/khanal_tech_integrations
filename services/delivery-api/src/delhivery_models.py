@@ -43,6 +43,41 @@ def normalize_shipment_webhook(payload: dict[str, Any]) -> dict[str, Any] | None
     }
 
 
+def normalize_pod_webhook(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Return flat fields for DB write; None if both lrnum and waybill are missing.
+
+    Delhivery sends:
+        { "waybill": "…", "EPOD": "<base64>", "orderID": "…", "lrnum": "…" }
+
+    Notes:
+      - lrnum is the canonical key; waybill is a fallback identifier.
+      - EPOD key name may also appear as 'EPOD' with different casing; we try both.
+      - Multiple POD pushes per LR are normal (revised PODs from audit team).
+    """
+    lrnum = payload.get("lrnum") or payload.get("lr_num")
+    lrnum_s = lrnum.strip() if isinstance(lrnum, str) else None
+
+    waybill = payload.get("waybill")
+    waybill_s = waybill.strip() if isinstance(waybill, str) else None
+
+    if not lrnum_s and not waybill_s:
+        return None
+
+    epod = payload.get("EPOD") or payload.get("epod") or payload.get("Epod")
+    epod_s = epod.strip() if isinstance(epod, str) else None
+
+    order_id = payload.get("orderID") or payload.get("order_id")
+    order_id_s = order_id.strip() if isinstance(order_id, str) else None
+
+    return {
+        "lrnum": lrnum_s or waybill_s,   # use waybill as fallback key
+        "waybill": waybill_s,
+        "order_id": order_id_s,
+        "epod_b64": epod_s,
+        "payload": payload,
+    }
+
+
 def body_json(event: dict[str, Any]) -> dict[str, Any]:
     raw = event.get("body") or "{}"
     if isinstance(raw, dict):
