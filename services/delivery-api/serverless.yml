@@ -13,6 +13,7 @@ provider:
     STAGE: ${self:provider.stage}
     LOG_LEVEL: INFO
     # Set at deploy time (CI secrets / shell); never commit real values.
+    DATABASE_URL: ${env:DATABASE_URL, ''}
     FRAPPE_INGEST_API_KEY: ${env:FRAPPE_INGEST_API_KEY, ''}
     DELHIVERY_WEBHOOK_SECRET: ${env:DELHIVERY_WEBHOOK_SECRET, ''}
   httpApi:
