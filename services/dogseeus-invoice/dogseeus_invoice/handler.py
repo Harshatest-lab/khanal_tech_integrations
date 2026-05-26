@@ -21,6 +21,12 @@ def _response(status: int, body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def health_handler(event: dict[str, Any], context: object) -> dict[str, Any]:
+    """GET /v1/dogseeus/health — simple liveness check for this service."""
+    configure_logging(get_settings().log_level)
+    return _response(200, {"service": "dogseeus-invoice", "status": "ok"})
+
+
 def invoice_handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     """POST /v1/dogseeus/invoices — extend with real invoicing."""
     configure_logging(get_settings().log_level)

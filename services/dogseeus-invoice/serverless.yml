@@ -31,6 +31,14 @@ package:
     - "dogseeus_invoice/**"
 
 functions:
+  health:
+    handler: dogseeus_invoice.handler.health_handler
+    layers:
+      - { Ref: SharedLambdaLayer }
+    events:
+      - httpApi:
+          path: /v1/dogseeus/health
+          method: get
   invoice:
     handler: dogseeus_invoice.handler.invoice_handler
     layers:
