@@ -34,24 +34,8 @@ package:
     - "src/**"
 
 functions:
-  createShipment:
-    handler: src.handler.create_shipment_handler
-    layers:
-      - { Ref: SharedLambdaLayer }
-    events:
-      - httpApi:
-          path: /v1/shipments
-          method: post
-  carrierWebhook:
-    handler: src.handler.carrier_webhook_handler
-    layers:
-      - { Ref: SharedLambdaLayer }
-    events:
-      - httpApi:
-          path: /v1/webhooks/carriers/{carrier}
-          method: post
   frappeDelhiveryTrackingSnapshot:
-    handler: src.handler.frappe_delhivery_tracking_snapshot_handler
+    handler: src.frappe_ingest.handler
     layers:
       - { Ref: SharedLambdaLayer }
     events:
@@ -59,7 +43,7 @@ functions:
           path: /v1/integrations/frappe/delhivery-tracking-snapshot
           method: post
   delhiveryShipmentStatusWebhook:
-    handler: src.handler.delhivery_shipment_status_webhook_handler
+    handler: src.delhivery_webhook.handler
     layers:
       - { Ref: SharedLambdaLayer }
     events:

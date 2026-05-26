@@ -44,9 +44,9 @@ def test_frappe_snapshot_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.delenv("FRAPPE_INGEST_API_KEY", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
     get_settings.cache_clear()
-    from src.handler import frappe_delhivery_tracking_snapshot_handler
+    from src.frappe_ingest import handler
 
-    resp = frappe_delhivery_tracking_snapshot_handler({"headers": {}}, object())
+    resp = handler({"headers": {}}, object())
     get_settings.cache_clear()
     assert resp["statusCode"] == 503
 
@@ -55,9 +55,9 @@ def test_frappe_snapshot_rejects_bad_key(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv("FRAPPE_INGEST_API_KEY", "good")
     monkeypatch.delenv("DATABASE_URL", raising=False)
     get_settings.cache_clear()
-    from src.handler import frappe_delhivery_tracking_snapshot_handler
+    from src.frappe_ingest import handler
 
-    resp = frappe_delhivery_tracking_snapshot_handler(
+    resp = handler(
         {"headers": {"x-api-key": "wrong"}, "body": "{}"},
         object(),
     )
