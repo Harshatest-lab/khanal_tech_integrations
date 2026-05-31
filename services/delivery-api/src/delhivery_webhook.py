@@ -11,7 +11,7 @@ import traceback
 from typing import Any
 
 from khanal_shared.config import get_settings
-from khanal_shared.db.pool import get_pool
+from khanal_shared.db.pool import ensure_warmed_for_lambda, get_pool
 from khanal_shared.logging import configure_logging, log_json
 
 from src.common import delhivery_secret_error_response, response
@@ -19,6 +19,8 @@ from src.delhivery_models import body_json, normalize_shipment_webhook
 from src.delhivery_store import apply_shipment_status_webhook
 
 logger = logging.getLogger(__name__)
+
+ensure_warmed_for_lambda()
 
 
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:

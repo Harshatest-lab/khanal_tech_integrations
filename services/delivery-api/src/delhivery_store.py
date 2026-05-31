@@ -5,6 +5,20 @@ from __future__ import annotations
 import json
 from typing import Any
 
+
+def _execute_one_statement(conn: Any, query: str, params: dict[str, Any]) -> None:
+    """Run a single atomic SQL statement without explicit BEGIN/COMMIT (fewer client↔server round-trips)."""
+    prev = conn.autocommit
+    conn.autocommit = True
+    try:
+        conn.execute(query, params)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.autocommit = prev
+
+
 # One statement = one client/server round-trip (lower latency than MERGE + INSERT separately).
 UPSERT_SHIPMENT_STATUS_AND_AUDIT = """
 WITH upserted AS (
@@ -39,18 +53,17 @@ VALUES (%(lrnum)s, %(waybill)s, %(order_id)s, %(epod_b64)s, %(raw_payload)s::jso
 
 def insert_pod_event(conn: Any, fields: dict[str, Any]) -> None:
     """Append a POD webhook row.  Multiple rows per lrnum are intentional."""
-    with conn.transaction():
-        with conn.cursor() as cur:
-            cur.execute(
-                INSERT_POD_EVENT,
-                {
-                    "lrnum": fields["lrnum"],
-                    "waybill": fields.get("waybill"),
-                    "order_id": fields.get("order_id"),
-                    "epod_b64": fields.get("epod_b64"),
-                    "raw_payload": json.dumps(fields["payload"]),
-                },
-            )
+    _execute_one_statement(
+        conn,
+        INSERT_POD_EVENT,
+        {
+            "lrnum": fields["lrnum"],
+            "waybill": fields.get("waybill"),
+            "order_id": fields.get("order_id"),
+            "epod_b64": fields.get("epod_b64"),
+            "raw_payload": json.dumps(fields["payload"]),
+        },
+    )
 
 
 def apply_shipment_status_webhook(conn: Any, fields: dict[str, Any]) -> None:
@@ -66,6 +79,4 @@ def apply_shipment_status_webhook(conn: Any, fields: dict[str, Any]) -> None:
         "waybill": fields.get("waybill"),
         "payload": payload_json,
     }
-    with conn.transaction():
-        with conn.cursor() as cur:
-            cur.execute(UPSERT_SHIPMENT_STATUS_AND_AUDIT, params)
+    _execute_one_statement(conn, UPSERT_SHIPMENT_STATUS_AND_AUDIT, params)
