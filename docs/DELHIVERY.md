@@ -1,15 +1,17 @@
-# Delhivery LRN integration (Frappe + Lambda + PostgreSQL)
+# Delhivery LRN integration (Frappe + PostgreSQL + Lambda webhooks)
 
-No Frappe UI or Delhivery **GET** calls live in this repo. **Frappe** calls Delhivery’s track API; this service **stores** the JSON and accepts **shipment status webhooks** from Delhivery.
+**Frappe** calls Delhivery’s track API and **writes the snapshot directly to PostgreSQL** (`delhivery_lr`). This repo’s **delivery-api** stack exposes only **Delhivery webhooks** (Lambda + API Gateway): shipment status and POD.
 
 ## Endpoints (after `delivery-api` deploy)
 
 | Method | Path | Caller | Purpose |
 |--------|------|--------|---------|
-| `POST` | `/v1/integrations/frappe/delhivery-tracking-snapshot` | **Frappe** (server-side) | Upsert full Delhivery **GET /lrn/track** JSON into Postgres |
-| `POST` | `/v1/webhooks/delhivery/shipment-status` | **Delhivery** | Update `delhivery_status` / fields by `lrnum` when status changes (e.g. `DELIVERED`) |
+| `POST` | `/v1/webhooks/delhivery/shipment-status` | **Delhivery** | Update `delhivery_status` / related fields by `lrnum`; append `delhivery_lr_status_events` |
+| `POST` | `/v1/webhooks/delhivery/pod` | **Delhivery** | Append POD row to `delhivery_lr_pod` |
 
-Base URL = API Gateway invoke URL for the `delivery-api` stage (shown in AWS console / `serverless info`).
+Base URL = API Gateway invoke URL for the `delivery-api` stage (AWS console / `serverless info`).
+
+There is **no** `POST /v1/integrations/frappe/delhivery-tracking-snapshot` in this service anymore.
 
 ## Database
 
@@ -21,35 +23,33 @@ psql "$DATABASE_URL" -f sql/delhivery_lr.sql
 
 Tables:
 
-- **`delhivery_lr`** — one row per `lrnum`: latest `delhivery_status`, optional `status_type`, last webhook payload, full **track** response in `raw_tracking` (from Frappe).
+- **`delhivery_lr`** — one row per `lrnum`: latest `delhivery_status`, optional `status_type`, last webhook payload, full **track** response in `raw_tracking` (**from Frappe**, not Lambda).
 - **`delhivery_lr_status_events`** — append-only audit of each shipment-status webhook.
+- **`delhivery_lr_pod`** — append-only POD pushes (revised PODs = multiple rows per `lrnum`).
 
-## Frappe → Lambda (tracking snapshot)
+## Frappe → PostgreSQL (tracking snapshot)
 
-After your server-side Delhivery GET succeeds, **POST** JSON:
+After your server-side Delhivery GET succeeds, **upsert** into `delhivery_lr` from Frappe using the same semantics the old Lambda used:
 
-```json
-{
-  "lrnum": "220256841",
-  "delhivery_track_response": {
-    "success": true,
-    "request_id": "...",
-    "data": {
-      "lrnum": "220256841",
-      "status": "MANIFESTED",
-      "wbns": []
-    }
-  }
-}
+- **`lrnum`** — primary key (from `delhivery_track_response.data.lrnum` or your Doc).
+- **`delhivery_status`** — e.g. from `delhivery_track_response.data.status` when present.
+- **`raw_tracking`** — full JSON body from Delhivery as `jsonb`.
+
+Example SQL (parameterize in Frappe / frappe.db.sql):
+
+```sql
+INSERT INTO delhivery_lr (
+  lrnum, delhivery_status, raw_tracking, updated_at, created_at
+) VALUES (
+  %(lrnum)s, %(delhivery_status)s, %(raw_tracking)s::jsonb, now(), now()
+)
+ON CONFLICT (lrnum) DO UPDATE SET
+  delhivery_status = EXCLUDED.delhivery_status,
+  raw_tracking = EXCLUDED.raw_tracking,
+  updated_at = now();
 ```
 
-`lrnum` may be omitted if it appears under `delhivery_track_response.data.lrnum`.
-
-**Headers**
-
-- `X-Api-Key: <same value as Lambda env FRAPPE_INGEST_API_KEY>`
-
-Set `FRAPPE_INGEST_API_KEY` when deploying (CI secret / shell env); never commit real keys.
+Optional columns on `delhivery_lr` (e.g. `doc_entry`, `doc_num`, `series`, `sap_response`) can be set in the same `INSERT`/`UPDATE` from Frappe if you need them.
 
 ## Delhivery → Lambda (shipment status webhook)
 
@@ -80,19 +80,31 @@ If Lambda env **`DELHIVERY_WEBHOOK_SECRET`** is set, requests must include:
 
 (Only if you can configure Delhivery to send that header; otherwise leave unset until they support it.)
 
+## Delhivery → Lambda (POD webhook)
+
+Register URL: `POST …/v1/webhooks/delhivery/pod`.
+
+Example body:
+
+```json
+{
+  "waybill": "1234567890",
+  "EPOD": "<base64>",
+  "orderID": "ORD-99",
+  "lrnum": "220256789"
+}
+```
+
+Each push appends one row to `delhivery_lr_pod` (revised PODs = multiple rows).
+
 ## Lambda configuration
 
 - **`DATABASE_URL`** — PostgreSQL DSN (RDS / RDS Proxy recommended).
-- **`FRAPPE_INGEST_API_KEY`** — required for the Frappe ingest route.
 - **`DELHIVERY_WEBHOOK_SECRET`** — optional; verifies webhook calls.
 
-`serverless.yml` passes `FRAPPE_INGEST_API_KEY` and `DELHIVERY_WEBHOOK_SECRET` from the shell environment at deploy time (`${env:...}`). Set them in GitHub Actions / your deploy shell.
+`serverless.yml` passes `DATABASE_URL` and `DELHIVERY_WEBHOOK_SECRET` from the shell environment at deploy time (`${env:...}`). Set them in GitHub Actions / your deploy shell.
 
 ## Security
 
 - **Never** paste Delhivery **Bearer JWT** tokens into this repo or docs; Frappe should keep tokens in its own secrets store.
 - Rotate any token that was exposed in chat or commits.
-
-## Next (POD webhook)
-
-A second webhook (S3 URL / base64 EPOD) can follow the same pattern: new path, new handler, new table (e.g. `delhivery_lr_pod_events`) — not implemented in this pass.

@@ -43,7 +43,6 @@ jobs:
         working-directory: services/${{ inputs.service }}
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          FRAPPE_INGEST_API_KEY: ${{ secrets.FRAPPE_INGEST_API_KEY }}
           DELHIVERY_WEBHOOK_SECRET: ${{ secrets.DELHIVERY_WEBHOOK_SECRET }}
         run: |
           npm install

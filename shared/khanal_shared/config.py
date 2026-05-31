@@ -12,7 +12,6 @@ class Settings:
     stage: str
     database_url: str | None
     log_level: str
-    frappe_ingest_api_key: str | None
     delhivery_webhook_secret: str | None
 
     @classmethod
@@ -21,7 +20,6 @@ class Settings:
             stage=os.getenv("STAGE", "dev"),
             database_url=os.getenv("DATABASE_URL"),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
-            frappe_ingest_api_key=os.getenv("FRAPPE_INGEST_API_KEY"),
             delhivery_webhook_secret=os.getenv("DELHIVERY_WEBHOOK_SECRET"),
         )
 

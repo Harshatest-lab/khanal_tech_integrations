@@ -41,3 +41,7 @@ CREATE INDEX IF NOT EXISTS idx_delhivery_lr_pod_lrnum_received
 
 -- Column additions (safe to re-run on every deploy via ALTER TABLE IF NOT EXISTS)
 ALTER TABLE delhivery_lr ADD COLUMN IF NOT EXISTS test text;
+ALTER TABLE delhivery_lr ADD COLUMN IF NOT EXISTS doc_entry text;
+ALTER TABLE delhivery_lr ADD COLUMN IF NOT EXISTS doc_num text;
+ALTER TABLE delhivery_lr ADD COLUMN IF NOT EXISTS series text;
+ALTER TABLE delhivery_lr ADD COLUMN IF NOT EXISTS sap_response jsonb;

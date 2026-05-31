@@ -1,15 +1,13 @@
 # delivery-api (AWS Lambda + API Gateway)
 
-Shipments and carrier webhooks. **Dogseeus_Invoice** is a **separate** stack: [../dogseeus-invoice](../dogseeus-invoice).
+**Delhivery** shipment status + POD webhooks only. **Dogseeus_Invoice** is a **separate** stack: [../dogseeus-invoice](../dogseeus-invoice).
 
-**Delhivery LRN** (Frappe snapshot + Delhivery shipment webhooks): [../../docs/DELHIVERY.md](../../docs/DELHIVERY.md).
+**Delhivery LRN** (Frappe writes tracking snapshots to Postgres; Lambdas handle Delhivery webhooks): [../../docs/DELHIVERY.md](../../docs/DELHIVERY.md).
 
 | Logical name in `serverless.yml` | Python |
 |----------------------------------|--------|
-| `createShipment` | `src/handler.py` → `create_shipment_handler` |
-| `carrierWebhook` | `src/handler.py` → `carrier_webhook_handler` |
-| `frappeDelhiveryTrackingSnapshot` | `src/handler.py` → `frappe_delhivery_tracking_snapshot_handler` |
-| `delhiveryShipmentStatusWebhook` | `src/handler.py` → `delhivery_shipment_status_webhook_handler` |
+| `delhiveryShipmentStatusWebhook` | `src.delhivery_webhook.handler` |
+| `delhiveryPodWebhook` | `src.delhivery_pod_webhook.handler` |
 
 ## Why `package.json` / Node?
 

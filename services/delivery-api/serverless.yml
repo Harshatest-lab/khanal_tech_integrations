@@ -14,7 +14,6 @@ provider:
     LOG_LEVEL: INFO
     # Set at deploy time (CI secrets / shell); never commit real values.
     DATABASE_URL: ${env:DATABASE_URL, ''}
-    FRAPPE_INGEST_API_KEY: ${env:FRAPPE_INGEST_API_KEY, ''}
     DELHIVERY_WEBHOOK_SECRET: ${env:DELHIVERY_WEBHOOK_SECRET, ''}
   httpApi:
     cors: true
@@ -35,14 +34,6 @@ package:
     - "src/**"
 
 functions:
-  frappeDelhiveryTrackingSnapshot:
-    handler: src.frappe_ingest.handler
-    layers:
-      - { Ref: SharedLambdaLayer }
-    events:
-      - httpApi:
-          path: /v1/integrations/frappe/delhivery-tracking-snapshot
-          method: post
   delhiveryShipmentStatusWebhook:
     handler: src.delhivery_webhook.handler
     layers:

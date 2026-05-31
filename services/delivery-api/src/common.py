@@ -28,23 +28,6 @@ def header_ci(headers: dict[str, Any] | None, name: str) -> str | None:
     return None
 
 
-def frappe_key_error_response(event: dict[str, Any]) -> dict[str, Any] | None:
-    """Return error response if X-Api-Key is missing/invalid; None if OK."""
-    expected = (get_settings().frappe_ingest_api_key or "").strip()
-    if not expected:
-        return response(
-            503,
-            {"error": {"code": "misconfigured", "message": "FRAPPE_INGEST_API_KEY is not set"}},
-        )
-    got = (header_ci(event.get("headers"), "x-api-key") or "").strip()
-    if not got or not hmac.compare_digest(got.encode("utf-8"), expected.encode("utf-8")):
-        return response(
-            401,
-            {"error": {"code": "unauthorized", "message": "Invalid or missing X-Api-Key"}},
-        )
-    return None
-
-
 def delhivery_secret_error_response(event: dict[str, Any]) -> dict[str, Any] | None:
     """Return error response if webhook secret header is wrong; None if OK."""
     expected = (get_settings().delhivery_webhook_secret or "").strip()

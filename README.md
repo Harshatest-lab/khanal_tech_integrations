@@ -19,7 +19,7 @@ Shared library: [shared/khanal_shared](shared/khanal_shared) (packaged as a **La
 ## Docs
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — layout, deployment, diagrams  
-- [docs/DELHIVERY.md](docs/DELHIVERY.md) — Delhivery LRN: Frappe snapshot ingest + shipment status webhooks  
+- [docs/DELHIVERY.md](docs/DELHIVERY.md) — Delhivery LRN: Frappe writes tracking snapshots to Postgres; Lambdas handle Delhivery webhooks  
 - [docs/DATABASE.md](docs/DATABASE.md) — PostgreSQL / RDS Proxy reference  
 - [docs/LOCAL_DEV.md](docs/LOCAL_DEV.md) — local workflow  
 

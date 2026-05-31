@@ -1,15 +1,18 @@
 # Architecture — two services (`delivery-api`, `dogseeus-invoice`)
 
-**delivery-api** handles shipments and carrier webhooks. **dogseeus-invoice** is a separate product surface (**Dogseeus_Invoice**) with its own HTTP API and Lambdas.
+**delivery-api** handles **Delhivery webhooks** (shipment status + POD). **dogseeus-invoice** is a separate product surface (**Dogseeus_Invoice**) with its own HTTP API and Lambdas.
 
 ```mermaid
 flowchart LR
+  FRAPPE[Frappe server]
+  PG[(PostgreSQL)]
   APIGW1[API Gateway — delivery]
   APIGW2[API Gateway — dogseeus]
   DEL[delivery-api Lambdas]
   INV[dogseeus-invoice Lambdas]
   LYR[Shared Lambda layer\nkhanal_shared]
 
+  FRAPPE -->|track snapshot UPSERT| PG
   APIGW1 --> DEL
   APIGW2 --> INV
   LYR -.-> DEL
@@ -19,7 +22,7 @@ flowchart LR
 ## Repository layout
 
 ```
-services/delivery-api/       # Stack: shipments + carrier webhooks
+services/delivery-api/       # Stack: Delhivery webhooks (status + POD)
 services/dogseeus-invoice/   # Stack: Dogseeus_Invoice (POST /v1/dogseeus/invoices)
   dogseeus_invoice/          # Python package (avoids clashing with delivery-api `src/`)
 shared/khanal_shared/        # db, http, logging, delivery helpers
@@ -30,7 +33,7 @@ layers/build/                # Built by scripts/build_shared_layer.sh
 
 | Stack | Responsibility | Routes (examples) |
 |-------|----------------|-------------------|
-| **delivery-api** | Labels / shipments; carrier callbacks; **Delhivery Frappe ingest + webhooks** | `POST /v1/shipments`, `POST /v1/webhooks/carriers/{carrier}`, `POST /v1/integrations/frappe/delhivery-tracking-snapshot`, `POST /v1/webhooks/delhivery/shipment-status` |
+| **delivery-api** | **Delhivery webhooks** (shipment status + POD) | `POST /v1/webhooks/delhivery/shipment-status`, `POST /v1/webhooks/delhivery/pod` |
 | **dogseeus-invoice** | Invoicing (stub) | `POST /v1/dogseeus/invoices` |
 
 ## Shared code

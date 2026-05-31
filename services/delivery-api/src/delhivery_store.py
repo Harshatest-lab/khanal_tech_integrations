@@ -1,21 +1,9 @@
-"""PostgreSQL persistence for Delhivery LRN tracking + status webhooks."""
+"""PostgreSQL persistence for Delhivery shipment status + POD webhooks."""
 
 from __future__ import annotations
 
 import json
 from typing import Any
-
-UPSERT_TRACKING_SNAPSHOT = """
-INSERT INTO delhivery_lr (
-  lrnum, delhivery_status, raw_tracking, updated_at, created_at
-) VALUES (
-  %(lrnum)s, %(delhivery_status)s, %(raw_tracking)s::jsonb, now(), now()
-)
-ON CONFLICT (lrnum) DO UPDATE SET
-  delhivery_status = EXCLUDED.delhivery_status,
-  raw_tracking = EXCLUDED.raw_tracking,
-  updated_at = now();
-"""
 
 MERGE_WEBHOOK = """
 INSERT INTO delhivery_lr (
@@ -39,26 +27,6 @@ ON CONFLICT (lrnum) DO UPDATE SET
 INSERT_STATUS_EVENT = """
 INSERT INTO delhivery_lr_status_events (lrnum, payload) VALUES (%(lrnum)s, %(payload)s::jsonb);
 """
-
-
-def upsert_tracking_snapshot(conn: Any, lrnum: str, track_response: dict[str, Any]) -> None:
-    """Store / replace Delhivery GET /lrn/track JSON for an lrnum (Frappe calls after submit)."""
-    status: str | None = None
-    data = track_response.get("data")
-    if isinstance(data, dict):
-        st = data.get("status")
-        if isinstance(st, str):
-            status = st
-    with conn.transaction():
-        with conn.cursor() as cur:
-            cur.execute(
-                UPSERT_TRACKING_SNAPSHOT,
-                {
-                    "lrnum": lrnum,
-                    "delhivery_status": status,
-                    "raw_tracking": json.dumps(track_response),
-                },
-            )
 
 
 INSERT_POD_EVENT = """
