@@ -7,7 +7,7 @@ provider:
   runtime: python3.12
   stage: ${opt:stage, 'dev'}
   region: ${opt:region, 'us-east-1'}
-  memorySize: 512
+  memorySize: 1024
   timeout: 20
   environment:
     STAGE: ${self:provider.stage}
