@@ -7,7 +7,7 @@ provider:
   runtime: python3.12
   stage: ${opt:stage, 'dev'}
   region: ${opt:region, 'us-east-1'}
-  memorySize: 256
+  memorySize: 512
   timeout: 20
   environment:
     STAGE: ${self:provider.stage}
@@ -37,7 +37,7 @@ functions:
   delhiveryShipmentStatusWebhook:
     handler: src.delhivery_webhook.handler
     # Keeps one warm execution env to cut cold starts (helps Delhivery ~500ms SLA). Extra AWS cost.
-   
+    provisionedConcurrency: 1
     layers:
       - { Ref: SharedLambdaLayer }
     events:
@@ -46,7 +46,7 @@ functions:
           method: post
   delhiveryPodWebhook:
     handler: src.delhivery_pod_webhook.handler
-    # provisionedConcurrency: 1
+    provisionedConcurrency: 1
     layers:
       - { Ref: SharedLambdaLayer }
     events:
