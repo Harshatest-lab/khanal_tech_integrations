@@ -12,7 +12,7 @@ from khanal_shared.config import get_settings
 from khanal_shared.db.pool import ensure_warmed_for_lambda, get_pool
 from khanal_shared.logging import configure_logging, log_json
 
-from src.common import delhivery_secret_error_response
+from src.common import delhivery_secret_error_response, header_ci
 from src.delhivery_models import normalize_pod_webhook, normalize_shipment_webhook
 from src.delhivery_store import apply_shipment_status_webhook, insert_pod_event
 
@@ -26,6 +26,9 @@ def _sqs_attr_str(message_attributes: dict[str, Any] | None, name: str) -> str |
     if not isinstance(entry, dict):
         return None
     val = entry.get("stringValue")
+    if isinstance(val, str):
+        return val
+    val = entry.get("StringValue")
     return val if isinstance(val, str) else None
 
 
@@ -71,7 +74,18 @@ def _process_one_record(pool: Any, record: dict[str, Any]) -> None:
 
     bad = delhivery_secret_error_response(synthetic_event)
     if bad is not None:
-        log_json(logger, logging.WARNING, "delhivery_sqs_drop_unauthorized", kind=kind)
+        got = (header_ci(synthetic_event.get("headers"), "x-delhivery-webhook-secret") or "").strip()
+        exp = (get_settings().delhivery_webhook_secret or "").strip()
+        attr_keys = sorted(message_attributes.keys()) if isinstance(message_attributes, dict) else []
+        log_json(
+            logger,
+            logging.WARNING,
+            "delhivery_sqs_drop_unauthorized",
+            kind=kind,
+            got_len=len(got),
+            expected_len=len(exp),
+            message_attribute_keys=attr_keys,
+        )
         return
 
     if kind == "shipment_status":

@@ -4,7 +4,7 @@ frameworkVersion: "3"
 
 # Bump when changing REST API integrations/methods so API Gateway gets a new Deployment.
 custom:
-  delhiveryApiDeploymentVersion: 15
+  delhiveryApiDeploymentVersion: 16
 
 provider:
   name: aws
@@ -156,7 +156,7 @@ resources:
             integration.request.header.Content-Type: "'application/x-www-form-urlencoded'"
           # Single-line only: YAML |- blocks can inject leading whitespace into the SQS form body and break invoke-URL (curl) while Test still works.
           RequestTemplates:
-            application/json: "#set($encBody=$util.urlEncode($input.body))#set($msg='Action=SendMessage&Version=2012-11-05&MessageBody='+ $encBody +'&MessageAttribute.1.Name=webhookKind&MessageAttribute.1.Value.StringValue=shipment_status&MessageAttribute.1.Value.DataType=String')#set($sec=$input.params('method.request.header.x-delhivery-webhook-secret'))#if($sec && $sec != '')#set($msg=$msg+'&MessageAttribute.2.Name=webhookSecret&MessageAttribute.2.Value.StringValue='+$util.urlEncode($sec)+'&MessageAttribute.2.Value.DataType=String')#end$msg"
+            application/json: "#set($encBody=$util.urlEncode($input.body))#set($msg='Action=SendMessage&Version=2012-11-05&MessageBody='+ $encBody +'&MessageAttribute.1.Name=webhookKind&MessageAttribute.1.Value.StringValue=shipment_status&MessageAttribute.1.Value.DataType=String')#set($sec=$input.params('method.request.header.x-delhivery-webhook-secret'))#if(!$sec || $sec == '')#set($hp=$input.params().get('header'))#if($hp)#set($sec=$hp.get('x-delhivery-webhook-secret'))#if(!$sec || $sec == '')#set($sec=$hp.get('X-Delhivery-Webhook-Secret'))#end#end#end#if($sec && $sec != '')#set($msg=$msg+'&MessageAttribute.2.Name=webhookSecret&MessageAttribute.2.Value.StringValue='+$util.urlEncode($sec)+'&MessageAttribute.2.Value.DataType=String')#end$msg"
           IntegrationResponses:
             # Tight error patterns only — broad "Code" substring matched SQS success JSON and broke invoke clients.
             - StatusCode: 502
@@ -188,7 +188,7 @@ resources:
           RequestParameters:
             integration.request.header.Content-Type: "'application/x-www-form-urlencoded'"
           RequestTemplates:
-            application/json: "#set($encBody=$util.urlEncode($input.body))#set($msg='Action=SendMessage&Version=2012-11-05&MessageBody='+ $encBody +'&MessageAttribute.1.Name=webhookKind&MessageAttribute.1.Value.StringValue=pod&MessageAttribute.1.Value.DataType=String')#set($sec=$input.params('method.request.header.x-delhivery-webhook-secret'))#if($sec && $sec != '')#set($msg=$msg+'&MessageAttribute.2.Name=webhookSecret&MessageAttribute.2.Value.StringValue='+$util.urlEncode($sec)+'&MessageAttribute.2.Value.DataType=String')#end$msg"
+            application/json: "#set($encBody=$util.urlEncode($input.body))#set($msg='Action=SendMessage&Version=2012-11-05&MessageBody='+ $encBody +'&MessageAttribute.1.Name=webhookKind&MessageAttribute.1.Value.StringValue=pod&MessageAttribute.1.Value.DataType=String')#set($sec=$input.params('method.request.header.x-delhivery-webhook-secret'))#if(!$sec || $sec == '')#set($hp=$input.params().get('header'))#if($hp)#set($sec=$hp.get('x-delhivery-webhook-secret'))#if(!$sec || $sec == '')#set($sec=$hp.get('X-Delhivery-Webhook-Secret'))#end#end#end#if($sec && $sec != '')#set($msg=$msg+'&MessageAttribute.2.Name=webhookSecret&MessageAttribute.2.Value.StringValue='+$util.urlEncode($sec)+'&MessageAttribute.2.Value.DataType=String')#end$msg"
           IntegrationResponses:
             - StatusCode: 502
               SelectionPattern: ".*(<ErrorResponse|\"__type\"|\"Code\":\\s*\").*"
