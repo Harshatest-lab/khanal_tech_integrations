@@ -8,7 +8,7 @@ provider:
   stage: ${opt:stage, 'dev'}
   region: ${opt:region, 'us-east-1'}
   # More vCPU during Init + handler; 512 MB noticeably slower for same code path.
-  memorySize: 512
+  memorySize: 1024
   timeout: 20
   environment:
     STAGE: ${self:provider.stage}
