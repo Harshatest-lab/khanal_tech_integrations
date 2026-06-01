@@ -4,7 +4,7 @@ frameworkVersion: "3"
 
 # Bump when changing REST API integrations/methods so API Gateway gets a new Deployment.
 custom:
-  delhiveryApiDeploymentVersion: 1
+  delhiveryApiDeploymentVersion: 2
 
 provider:
   name: aws
@@ -167,7 +167,8 @@ resources:
             - StatusCode: 200
               SelectionPattern: ".*SendMessageResponse.*"
               ResponseTemplates:
-                application/json: '{"ok":true,"lrnum":$input.json("$.lrnum")}'
+                # Velocity: use single-quoted JSONPath — double quotes make "$" interpolate and break mapping (500).
+                application/json: '{"ok":true,"lrnum":$input.json(''$.lrnum'')}'
         MethodResponses:
           - StatusCode: 200
 
@@ -201,7 +202,7 @@ resources:
             - StatusCode: 200
               SelectionPattern: ".*SendMessageResponse.*"
               ResponseTemplates:
-                application/json: '{"ok":true,"lrnum":$input.json("$.lrnum")}'
+                application/json: '{"ok":true,"lrnum":$input.json(''$.lrnum'')}'
         MethodResponses:
           - StatusCode: 200
 
