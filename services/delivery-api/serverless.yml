@@ -4,7 +4,7 @@ frameworkVersion: "3"
 
 # Bump when changing REST API integrations/methods so API Gateway gets a new Deployment.
 custom:
-  delhiveryApiDeploymentVersion: 4
+  delhiveryApiDeploymentVersion: 5
 
 provider:
   name: aws
@@ -162,8 +162,8 @@ resources:
             - StatusCode: 200
               SelectionPattern: ".*SendMessageResponse.*"
               ResponseTemplates:
-                application/json: |-
-                  #set($b = $util.parseJson($input.body))#set($lr = $b.get("lrnum"))#if($lr)#set($out = '{"ok":true,"lrnum":"' + $util.escapeJavaScript($lr) + '"}')#else#set($out = '{"ok":true,"lrnum":null}')#end$out
+                # Single-quoted JSONPath inside double-quoted YAML so Velocity does not interpolate "$".
+                application/json: "{\"ok\":true,\"lrnum\":$input.json('$.lrnum')}"
             - StatusCode: 502
               SelectionPattern: ".*ErrorResponse.*"
               ResponseTemplates:
@@ -196,8 +196,8 @@ resources:
             - StatusCode: 200
               SelectionPattern: ".*SendMessageResponse.*"
               ResponseTemplates:
-                application/json: |-
-                  #set($b = $util.parseJson($input.body))#set($lr = $b.get("lrnum"))#if($lr)#set($out = '{"ok":true,"lrnum":"' + $util.escapeJavaScript($lr) + '"}')#else#set($out = '{"ok":true,"lrnum":null}')#end$out
+                # Single-quoted JSONPath inside double-quoted YAML so Velocity does not interpolate "$".
+                application/json: "{\"ok\":true,\"lrnum\":$input.json('$.lrnum')}"
             - StatusCode: 502
               SelectionPattern: ".*ErrorResponse.*"
               ResponseTemplates:
