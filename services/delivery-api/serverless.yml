@@ -4,7 +4,7 @@ frameworkVersion: "3"
 
 # Bump when changing REST API integrations/methods so API Gateway gets a new Deployment.
 custom:
-  delhiveryApiDeploymentVersion: 2
+  delhiveryApiDeploymentVersion: 4
 
 provider:
   name: aws
@@ -155,22 +155,22 @@ resources:
           RequestParameters:
             integration.request.header.Content-Type: "'application/x-www-form-urlencoded'"
           RequestTemplates:
-            application/json: |
-              #set($encBody = $util.urlEncode($input.body))
-              #set($msg = "Action=SendMessage&Version=2012-11-05&MessageBody=" + $encBody + "&MessageAttribute.1.Name=webhookKind&MessageAttribute.1.Value.StringValue=shipment_status&MessageAttribute.1.Value.DataType=String")
-              #set($sec = $input.params('header.x-delhivery-webhook-secret'))
-              #if($sec && $sec != "")
-              #set($msg = $msg + "&MessageAttribute.2.Name=webhookSecret&MessageAttribute.2.Value.StringValue=" + $util.urlEncode($sec) + "&MessageAttribute.2.Value.DataType=String")
-              #end
-              $msg
+            # Single-line Velocity: multiline templates emit whitespace into the SQS form body and break SendMessage.
+            application/json: |-
+              #set($encBody = $util.urlEncode($input.body))#set($msg = "Action=SendMessage&Version=2012-11-05&MessageBody=" + $encBody + "&MessageAttribute.1.Name=webhookKind&MessageAttribute.1.Value.StringValue=shipment_status&MessageAttribute.1.Value.DataType=String")#set($sec = $input.params('header.x-delhivery-webhook-secret'))#if($sec && $sec != "")#set($msg = $msg + "&MessageAttribute.2.Name=webhookSecret&MessageAttribute.2.Value.StringValue=" + $util.urlEncode($sec) + "&MessageAttribute.2.Value.DataType=String")#end$msg
           IntegrationResponses:
             - StatusCode: 200
               SelectionPattern: ".*SendMessageResponse.*"
               ResponseTemplates:
-                # Velocity: use single-quoted JSONPath — double quotes make "$" interpolate and break mapping (500).
-                application/json: '{"ok":true,"lrnum":$input.json(''$.lrnum'')}'
+                application/json: |-
+                  #set($b = $util.parseJson($input.body))#set($lr = $b.get("lrnum"))#if($lr)#set($out = '{"ok":true,"lrnum":"' + $util.escapeJavaScript($lr) + '"}')#else#set($out = '{"ok":true,"lrnum":null}')#end$out
+            - StatusCode: 502
+              SelectionPattern: ".*ErrorResponse.*"
+              ResponseTemplates:
+                application/json: '{"message":"SQS SendMessage failed","hint":"Check ApiGatewaySqsRole sqs:SendMessage and queue name"}'
         MethodResponses:
           - StatusCode: 200
+          - StatusCode: 502
 
     DelhiveryMethodPod:
       Type: AWS::ApiGateway::Method
@@ -190,21 +190,21 @@ resources:
           RequestParameters:
             integration.request.header.Content-Type: "'application/x-www-form-urlencoded'"
           RequestTemplates:
-            application/json: |
-              #set($encBody = $util.urlEncode($input.body))
-              #set($msg = "Action=SendMessage&Version=2012-11-05&MessageBody=" + $encBody + "&MessageAttribute.1.Name=webhookKind&MessageAttribute.1.Value.StringValue=pod&MessageAttribute.1.Value.DataType=String")
-              #set($sec = $input.params('header.x-delhivery-webhook-secret'))
-              #if($sec && $sec != "")
-              #set($msg = $msg + "&MessageAttribute.2.Name=webhookSecret&MessageAttribute.2.Value.StringValue=" + $util.urlEncode($sec) + "&MessageAttribute.2.Value.DataType=String")
-              #end
-              $msg
+            application/json: |-
+              #set($encBody = $util.urlEncode($input.body))#set($msg = "Action=SendMessage&Version=2012-11-05&MessageBody=" + $encBody + "&MessageAttribute.1.Name=webhookKind&MessageAttribute.1.Value.StringValue=pod&MessageAttribute.1.Value.DataType=String")#set($sec = $input.params('header.x-delhivery-webhook-secret'))#if($sec && $sec != "")#set($msg = $msg + "&MessageAttribute.2.Name=webhookSecret&MessageAttribute.2.Value.StringValue=" + $util.urlEncode($sec) + "&MessageAttribute.2.Value.DataType=String")#end$msg
           IntegrationResponses:
             - StatusCode: 200
               SelectionPattern: ".*SendMessageResponse.*"
               ResponseTemplates:
-                application/json: '{"ok":true,"lrnum":$input.json(''$.lrnum'')}'
+                application/json: |-
+                  #set($b = $util.parseJson($input.body))#set($lr = $b.get("lrnum"))#if($lr)#set($out = '{"ok":true,"lrnum":"' + $util.escapeJavaScript($lr) + '"}')#else#set($out = '{"ok":true,"lrnum":null}')#end$out
+            - StatusCode: 502
+              SelectionPattern: ".*ErrorResponse.*"
+              ResponseTemplates:
+                application/json: '{"message":"SQS SendMessage failed","hint":"Check ApiGatewaySqsRole sqs:SendMessage and queue name"}'
         MethodResponses:
           - StatusCode: 200
+          - StatusCode: 502
 
     DelhiveryApiDeployment:
       Type: AWS::ApiGateway::Deployment
