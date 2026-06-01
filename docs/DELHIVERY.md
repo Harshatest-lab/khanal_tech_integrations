@@ -4,7 +4,7 @@
 
 ## Architecture (async, no Lambda on the HTTP ack path)
 
-1. **API Gateway (REST, regional)** — `POST` on each route integrates **directly** with **SQS `SendMessage`**. Mapping templates URL-encode the client body as the SQS message body and attach **`webhookKind`** (and optional **`webhookSecret`** from `X-Delhivery-Webhook-Secret`) as **message attributes**. The integration response returns **`{"ok": true, "lrnum": …}`** from the original request body (Velocity / JSON path). **No ingest Lambda** runs before Delhivery gets HTTP 200.
+1. **API Gateway (REST, regional)** — `POST` on each route integrates **directly** with **SQS `SendMessage`**. Mapping templates URL-encode the client body as the SQS message body and attach **`webhookKind`** (and optional **`webhookSecret`** from `X-Delhivery-Webhook-Secret`) as **message attributes**. The integration response is a fixed **`{"ok": true}`** (the integration response stage only sees the **SQS** reply, not the client JSON body, so echoing `lrnum` here is unreliable without a small Lambda). **No ingest Lambda** runs before Delhivery gets HTTP 200.
 2. **`DelhiveryWebhookQueue`** — buffers webhook payloads; failed processing retries then **DLQ** after 5 receives.
 3. **`delhiveryWebhookWorker`** (SQS trigger, **VPC** + shared layer) — reads **raw Delhivery JSON** from the message body and **`webhookKind`** / **`webhookSecret`** from message attributes; same DB logic as before: `delhivery_lr` / `delhivery_lr_status_events` / `delhivery_lr_pod`.
 
