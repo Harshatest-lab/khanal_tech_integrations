@@ -2,6 +2,10 @@ service: delivery-api
 
 frameworkVersion: "3"
 
+# Bump when changing REST API integrations/methods so API Gateway gets a new Deployment.
+custom:
+  delhiveryApiDeploymentVersion: 1
+
 provider:
   name: aws
   runtime: python3.12
@@ -14,13 +18,6 @@ provider:
     LOG_LEVEL: INFO
     DATABASE_URL: ${env:DATABASE_URL, ''}
     DELHIVERY_WEBHOOK_SECRET: ${env:DELHIVERY_WEBHOOK_SECRET, ''}
-  httpApi:
-    cors: true
-  iamRoleStatements:
-    - Effect: Allow
-      Action:
-        - sqs:SendMessage
-      Resource: !GetAtt DelhiveryWebhookQueue.Arn
 
 layers:
   shared:
@@ -38,23 +35,7 @@ package:
     - "src/**"
 
 functions:
-  # Fast path: no VPC, no layer — validates + SQS SendMessage only.
-  delhiveryWebhookIngest:
-    handler: src.delhivery_webhook_ingest.handler
-    memorySize: 256
-    timeout: 10
-    environment:
-      DELHIVERY_WEBHOOK_QUEUE_URL: !Ref DelhiveryWebhookQueue
-      DATABASE_URL: ""
-    events:
-      - httpApi:
-          path: /v1/webhooks/delhivery/shipment-status
-          method: post
-      - httpApi:
-          path: /v1/webhooks/delhivery/pod
-          method: post
-
-  # Background: VPC + layer + RDS (same logic as former synchronous handlers).
+  # SQS → VPC → RDS (unchanged semantics; message body = raw Delhivery JSON + webhookKind in messageAttributes).
   delhiveryWebhookWorker:
     handler: src.delhivery_sqs_worker.handler
     memorySize: 512
@@ -89,3 +70,159 @@ resources:
         RedrivePolicy:
           deadLetterTargetArn: !GetAtt DelhiveryWebhookDlq.Arn
           maxReceiveCount: 5
+
+    # --- REST API: POST → SQS SendMessage (no ingest Lambda) ---
+    ApiGatewaySqsRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: ${self:service}-${self:provider.stage}-apigw-sqs-send
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: apigateway.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: ApiGatewaySqsSendMessage
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - sqs:SendMessage
+                  Resource: !GetAtt DelhiveryWebhookQueue.Arn
+
+    DelhiveryRestApi:
+      Type: AWS::ApiGateway::RestApi
+      Properties:
+        Name: ${self:service}-${self:provider.stage}-delhivery-webhook
+        EndpointConfiguration:
+          Types:
+            - REGIONAL
+        Description: Delhivery webhooks → SQS (no Lambda on hot path)
+
+    DelhiveryResourceV1:
+      Type: AWS::ApiGateway::Resource
+      Properties:
+        RestApiId: !Ref DelhiveryRestApi
+        ParentId: !GetAtt DelhiveryRestApi.RootResourceId
+        PathPart: v1
+
+    DelhiveryResourceWebhooks:
+      Type: AWS::ApiGateway::Resource
+      Properties:
+        RestApiId: !Ref DelhiveryRestApi
+        ParentId: !Ref DelhiveryResourceV1
+        PathPart: webhooks
+
+    DelhiveryResourceDelhivery:
+      Type: AWS::ApiGateway::Resource
+      Properties:
+        RestApiId: !Ref DelhiveryRestApi
+        ParentId: !Ref DelhiveryResourceWebhooks
+        PathPart: delhivery
+
+    DelhiveryResourceShipmentStatus:
+      Type: AWS::ApiGateway::Resource
+      Properties:
+        RestApiId: !Ref DelhiveryRestApi
+        ParentId: !Ref DelhiveryResourceDelhivery
+        PathPart: shipment-status
+
+    DelhiveryResourcePod:
+      Type: AWS::ApiGateway::Resource
+      Properties:
+        RestApiId: !Ref DelhiveryRestApi
+        ParentId: !Ref DelhiveryResourceDelhivery
+        PathPart: pod
+
+    DelhiveryMethodShipmentStatus:
+      Type: AWS::ApiGateway::Method
+      Properties:
+        RestApiId: !Ref DelhiveryRestApi
+        ResourceId: !Ref DelhiveryResourceShipmentStatus
+        HttpMethod: POST
+        AuthorizationType: NONE
+        RequestParameters:
+          method.request.header.x-delhivery-webhook-secret: false
+        Integration:
+          Type: AWS
+          IntegrationHttpMethod: POST
+          PassthroughBehavior: NEVER
+          Uri: !Sub arn:aws:apigateway:${AWS::Region}:sqs:path/${AWS::AccountId}/${self:service}-${self:provider.stage}-delhivery-webhook
+          Credentials: !GetAtt ApiGatewaySqsRole.Arn
+          RequestParameters:
+            integration.request.header.Content-Type: "'application/x-www-form-urlencoded'"
+          RequestTemplates:
+            application/json: |
+              #set($encBody = $util.urlEncode($input.body))
+              #set($msg = "Action=SendMessage&Version=2012-11-05&MessageBody=" + $encBody + "&MessageAttribute.1.Name=webhookKind&MessageAttribute.1.Value.StringValue=shipment_status&MessageAttribute.1.Value.DataType=String")
+              #set($sec = $input.params('header.x-delhivery-webhook-secret'))
+              #if($sec && $sec != "")
+              #set($msg = $msg + "&MessageAttribute.2.Name=webhookSecret&MessageAttribute.2.Value.StringValue=" + $util.urlEncode($sec) + "&MessageAttribute.2.Value.DataType=String")
+              #end
+              $msg
+          IntegrationResponses:
+            - StatusCode: 200
+              SelectionPattern: ".*SendMessageResponse.*"
+              ResponseTemplates:
+                application/json: '{"ok":true,"lrnum":$input.json("$.lrnum")}'
+        MethodResponses:
+          - StatusCode: 200
+
+    DelhiveryMethodPod:
+      Type: AWS::ApiGateway::Method
+      Properties:
+        RestApiId: !Ref DelhiveryRestApi
+        ResourceId: !Ref DelhiveryResourcePod
+        HttpMethod: POST
+        AuthorizationType: NONE
+        RequestParameters:
+          method.request.header.x-delhivery-webhook-secret: false
+        Integration:
+          Type: AWS
+          IntegrationHttpMethod: POST
+          PassthroughBehavior: NEVER
+          Uri: !Sub arn:aws:apigateway:${AWS::Region}:sqs:path/${AWS::AccountId}/${self:service}-${self:provider.stage}-delhivery-webhook
+          Credentials: !GetAtt ApiGatewaySqsRole.Arn
+          RequestParameters:
+            integration.request.header.Content-Type: "'application/x-www-form-urlencoded'"
+          RequestTemplates:
+            application/json: |
+              #set($encBody = $util.urlEncode($input.body))
+              #set($msg = "Action=SendMessage&Version=2012-11-05&MessageBody=" + $encBody + "&MessageAttribute.1.Name=webhookKind&MessageAttribute.1.Value.StringValue=pod&MessageAttribute.1.Value.DataType=String")
+              #set($sec = $input.params('header.x-delhivery-webhook-secret'))
+              #if($sec && $sec != "")
+              #set($msg = $msg + "&MessageAttribute.2.Name=webhookSecret&MessageAttribute.2.Value.StringValue=" + $util.urlEncode($sec) + "&MessageAttribute.2.Value.DataType=String")
+              #end
+              $msg
+          IntegrationResponses:
+            - StatusCode: 200
+              SelectionPattern: ".*SendMessageResponse.*"
+              ResponseTemplates:
+                application/json: '{"ok":true,"lrnum":$input.json("$.lrnum")}'
+        MethodResponses:
+          - StatusCode: 200
+
+    DelhiveryApiDeployment:
+      Type: AWS::ApiGateway::Deployment
+      DependsOn:
+        - DelhiveryMethodShipmentStatus
+        - DelhiveryMethodPod
+      Properties:
+        RestApiId: !Ref DelhiveryRestApi
+        Description: ${self:service}-${self:provider.stage}-sqs-v${self:custom.delhiveryApiDeploymentVersion}
+
+    DelhiveryApiStage:
+      Type: AWS::ApiGateway::Stage
+      Properties:
+        RestApiId: !Ref DelhiveryRestApi
+        DeploymentId: !Ref DelhiveryApiDeployment
+        StageName: ${self:provider.stage}
+        TracingEnabled: true
+
+  Outputs:
+    DelhiveryWebhookRestApiUrl:
+      Description: Base invoke URL for Delhivery REST webhooks (append /v1/webhooks/delhivery/...)
+      Value: !Sub https://${DelhiveryRestApi}.execute-api.${AWS::Region}.amazonaws.com/${self:provider.stage}

@@ -4,9 +4,9 @@
 
 **Delhivery LRN** (Frappe writes tracking snapshots to Postgres; Lambdas handle Delhivery webhooks): [../../docs/DELHIVERY.md](../../docs/DELHIVERY.md).
 
-| Logical name in `serverless.yml` | Python |
-|----------------------------------|--------|
-| `delhiveryWebhookIngest` | `src.delhivery_webhook_ingest.handler` (both HTTP routes; no VPC) |
+| Logical name in `serverless.yml` | Role |
+|----------------------------------|------|
+| *(CloudFormation)* `DelhiveryRestApi` + methods | `POST` → SQS `SendMessage` (no Lambda) |
 | `delhiveryWebhookWorker` | `src.delhivery_sqs_worker.handler` (SQS → RDS; VPC + layer) |
 
 ## Why `package.json` / Node?

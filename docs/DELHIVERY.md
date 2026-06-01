@@ -1,14 +1,14 @@
 # Delhivery LRN integration (Frappe + PostgreSQL + Lambda webhooks)
 
-**Frappe** calls Delhivery’s track API and **writes the snapshot directly to PostgreSQL** (`delhivery_lr`). This repo’s **delivery-api** stack exposes only **Delhivery webhooks** (API Gateway + two Lambdas + SQS): shipment status and POD.
+**Frappe** calls Delhivery’s track API and **writes the snapshot directly to PostgreSQL** (`delhivery_lr`). This repo’s **delivery-api** stack exposes only **Delhivery webhooks** (API Gateway REST + SQS + one worker Lambda): shipment status and POD.
 
-## Architecture (async)
+## Architecture (async, no Lambda on the HTTP ack path)
 
-1. **`delhiveryWebhookIngest`** (HTTP API, **no VPC**) — validates optional `X-Delhivery-Webhook-Secret`, parses JSON, **`SendMessage`** to SQS, returns **`{"ok": true, "lrnum": "..."}`** quickly.
+1. **API Gateway (REST, regional)** — `POST` on each route integrates **directly** with **SQS `SendMessage`**. Mapping templates URL-encode the client body as the SQS message body and attach **`webhookKind`** (and optional **`webhookSecret`** from `X-Delhivery-Webhook-Secret`) as **message attributes**. The integration response returns **`{"ok": true, "lrnum": …}`** from the original request body (Velocity / JSON path). **No ingest Lambda** runs before Delhivery gets HTTP 200.
 2. **`DelhiveryWebhookQueue`** — buffers webhook payloads; failed processing retries then **DLQ** after 5 receives.
-3. **`delhiveryWebhookWorker`** (SQS trigger, **VPC** + shared layer) — same DB logic as before: `delhivery_lr` / `delhivery_lr_status_events` / `delhivery_lr_pod`.
+3. **`delhiveryWebhookWorker`** (SQS trigger, **VPC** + shared layer) — reads **raw Delhivery JSON** from the message body and **`webhookKind`** / **`webhookSecret`** from message attributes; same DB logic as before: `delhivery_lr` / `delhivery_lr_status_events` / `delhivery_lr_pod`.
 
-Delhivery’s HTTP wait time no longer includes VPC cold start or Postgres round-trips.
+Delhivery’s HTTP wait time no longer includes any Lambda cold start on receive (only API Gateway + SQS).
 
 ## Endpoints (after `delivery-api` deploy)
 
@@ -17,7 +17,7 @@ Delhivery’s HTTP wait time no longer includes VPC cold start or Postgres round
 | `POST` | `/v1/webhooks/delhivery/shipment-status` | **Delhivery** | Enqueue payload; worker updates `delhivery_lr` + `delhivery_lr_status_events` |
 | `POST` | `/v1/webhooks/delhivery/pod` | **Delhivery** | Enqueue payload; worker appends `delhivery_lr_pod` |
 
-Base URL = API Gateway invoke URL for the `delivery-api` stage (AWS console / `serverless info`). **URLs and paths are unchanged** from the old synchronous stack.
+**Base URL** is the **REST API** invoke URL for your stage (not the old HTTP API v2 URL). After deploy, copy it from the CloudFormation stack output **`DelhiveryWebhookRestApiUrl`** or run `cd services/delivery-api && npx serverless info --verbose` and use the REST invoke URL shown for this stack.
 
 There is **no** `POST /v1/integrations/frappe/delhivery-tracking-snapshot` in this service anymore.
 
@@ -82,11 +82,9 @@ Example body (fields may vary):
 
 **Optional shared secret**
 
-If Lambda env **`DELHIVERY_WEBHOOK_SECRET`** is set, requests must include:
+If Lambda env **`DELHIVERY_WEBHOOK_SECRET`** is set, the worker expects the same value in SQS message attribute **`webhookSecret`**, which API Gateway copies from the **`X-Delhivery-Webhook-Secret`** header when Delhivery sends it. If the header is absent, that attribute is omitted and the worker treats the call as unauthorized when a secret is configured.
 
-- `X-Delhivery-Webhook-Secret: <same value>`
-
-(Only if you can configure Delhivery to send that header; otherwise leave unset until they support it.)
+(Only if you can configure Delhivery to send that header; otherwise leave **`DELHIVERY_WEBHOOK_SECRET`** unset until they support it.)
 
 ## Delhivery → Lambda (POD webhook)
 
@@ -108,9 +106,20 @@ Each push appends one row to `delhivery_lr_pod` (revised PODs = multiple rows).
 ## Lambda configuration
 
 - **`DATABASE_URL`** — PostgreSQL DSN (RDS / RDS Proxy recommended).
-- **`DELHIVERY_WEBHOOK_SECRET`** — optional; verifies webhook calls.
+- **`DELHIVERY_WEBHOOK_SECRET`** — optional; verified in the **worker** using message attributes (see above).
 
 `serverless.yml` passes `DATABASE_URL` and `DELHIVERY_WEBHOOK_SECRET` from the shell environment at deploy time (`${env:...}`). Set them in GitHub Actions / your deploy shell.
+
+## After deploy — checklist in AWS / Delhivery
+
+1. **Deploy** the stack (`build_shared_layer.sh`, then `npx serverless deploy` from `services/delivery-api`) with valid AWS credentials.
+2. In **CloudFormation** → stack **`delivery-api-<stage>`** → **Outputs**, copy **`DelhiveryWebhookRestApiUrl`** (or equivalent from `serverless info`).
+3. In **Delhivery** (or your integration admin), set webhook URLs to:
+   - `{DelhiveryWebhookRestApiUrl}/v1/webhooks/delhivery/shipment-status`
+   - `{DelhiveryWebhookRestApiUrl}/v1/webhooks/delhivery/pod`
+4. **Retire** any old **HTTP API (v2)** invoke URLs so traffic is not split across two APIs.
+5. In **CloudWatch**, confirm **`delhiveryWebhookWorker`** invocations and logs; watch **`DelhiveryWebhookDlq`** for poison messages.
+6. Optionally enable **API Gateway execution access logging** or **X-Ray** on the stage (tracing is enabled in the template) for latency debugging.
 
 ## Security
 

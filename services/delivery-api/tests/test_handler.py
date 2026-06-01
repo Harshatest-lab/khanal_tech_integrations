@@ -3,85 +3,82 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from khanal_shared.config import get_settings
 from src.delhivery_models import normalize_pod_webhook
-from src.delhivery_webhook_ingest import handler as ingest_handler
+from src.delhivery_sqs_worker import _process_one_record
 
 
-def test_ingest_missing_lrnum(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_worker_raw_shipment_with_attributes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DELHIVERY_WEBHOOK_SECRET", raising=False)
-    monkeypatch.setenv("DELHIVERY_WEBHOOK_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123/queue")
-    mock_sqs = MagicMock()
-    with patch("src.delhivery_webhook_ingest.sqs_client", mock_sqs):
-        resp = ingest_handler(
-            {
-                "headers": {},
-                "rawPath": "/v1/webhooks/delhivery/shipment-status",
-                "body": '{"status": "DELIVERED"}',
-            },
-            object(),
-        )
-    assert resp["statusCode"] == 400
-    mock_sqs.send_message.assert_not_called()
+    get_settings.cache_clear()
+    pool = MagicMock()
+    conn_cm = MagicMock()
+    pool.connection.return_value.__enter__ = MagicMock(return_value=conn_cm)
+    pool.connection.return_value.__exit__ = MagicMock(return_value=False)
+
+    record = {
+        "body": json.dumps({"lrnum": "220260516", "status": "Pending"}),
+        "messageAttributes": {
+            "webhookKind": {"stringValue": "shipment_status", "dataType": "String"},
+        },
+    }
+    with patch("src.delhivery_sqs_worker.apply_shipment_status_webhook") as apply_fn:
+        _process_one_record(pool, record)
+    apply_fn.assert_called_once()
 
 
-def test_ingest_wrong_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_worker_legacy_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DELHIVERY_WEBHOOK_SECRET", raising=False)
+    get_settings.cache_clear()
+    pool = MagicMock()
+    conn_cm = MagicMock()
+    pool.connection.return_value.__enter__ = MagicMock(return_value=conn_cm)
+    pool.connection.return_value.__exit__ = MagicMock(return_value=False)
+
+    envelope = {
+        "kind": "shipment_status",
+        "headers": {},
+        "body": {"lrnum": "LR9", "status": "Pending"},
+    }
+    record = {"body": json.dumps(envelope), "messageAttributes": {}}
+    with patch("src.delhivery_sqs_worker.apply_shipment_status_webhook") as apply_fn:
+        _process_one_record(pool, record)
+    apply_fn.assert_called_once()
+
+
+def test_worker_wrong_secret_from_attribute(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DELHIVERY_WEBHOOK_SECRET", "correct-secret")
-    monkeypatch.setenv("DELHIVERY_WEBHOOK_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123/queue")
-    mock_sqs = MagicMock()
-    with patch("src.delhivery_webhook_ingest.sqs_client", mock_sqs):
-        resp = ingest_handler(
-            {
-                "headers": {"x-delhivery-webhook-secret": "wrong"},
-                "rawPath": "/v1/webhooks/delhivery/shipment-status",
-                "body": json.dumps({"lrnum": "LR1", "status": "Pending"}),
-            },
-            object(),
-        )
-    assert resp["statusCode"] == 401
-    mock_sqs.send_message.assert_not_called()
+    get_settings.cache_clear()
+    pool = MagicMock()
+    record = {
+        "body": json.dumps({"lrnum": "LR1", "status": "Pending"}),
+        "messageAttributes": {
+            "webhookKind": {"stringValue": "shipment_status", "dataType": "String"},
+            "webhookSecret": {"stringValue": "wrong", "dataType": "String"},
+        },
+    }
+    with patch("src.delhivery_sqs_worker.apply_shipment_status_webhook") as apply_fn:
+        _process_one_record(pool, record)
+    apply_fn.assert_not_called()
 
 
-def test_ingest_enqueues_shipment(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_worker_pod_from_attributes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DELHIVERY_WEBHOOK_SECRET", raising=False)
-    monkeypatch.setenv("DELHIVERY_WEBHOOK_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123/queue")
-    mock_sqs = MagicMock()
-    with patch("src.delhivery_webhook_ingest.sqs_client", mock_sqs):
-        resp = ingest_handler(
-            {
-                "headers": {},
-                "rawPath": "/v1/webhooks/delhivery/shipment-status",
-                "body": json.dumps({"lrnum": "220260516", "status": "Pending"}),
-            },
-            object(),
-        )
-    assert resp["statusCode"] == 200
-    body = json.loads(resp["body"])
-    assert body == {"ok": True, "lrnum": "220260516"}
-    mock_sqs.send_message.assert_called_once()
-    call_kw = mock_sqs.send_message.call_args[1]
-    envelope = json.loads(call_kw["MessageBody"])
-    assert envelope["kind"] == "shipment_status"
-    assert envelope["body"]["lrnum"] == "220260516"
+    get_settings.cache_clear()
+    pool = MagicMock()
+    conn_cm = MagicMock()
+    pool.connection.return_value.__enter__ = MagicMock(return_value=conn_cm)
+    pool.connection.return_value.__exit__ = MagicMock(return_value=False)
 
-
-def test_ingest_enqueues_pod(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("DELHIVERY_WEBHOOK_SECRET", raising=False)
-    monkeypatch.setenv("DELHIVERY_WEBHOOK_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123/queue")
-    mock_sqs = MagicMock()
-    body = json.dumps({"waybill": "WB1", "EPOD": "abc=", "lrnum": "LR1"})
-    with patch("src.delhivery_webhook_ingest.sqs_client", mock_sqs):
-        resp = ingest_handler(
-            {
-                "headers": {},
-                "rawPath": "/v1/webhooks/delhivery/pod",
-                "body": body,
-            },
-            object(),
-        )
-    assert resp["statusCode"] == 200
-    mock_sqs.send_message.assert_called_once()
-    envelope = json.loads(mock_sqs.send_message.call_args[1]["MessageBody"])
-    assert envelope["kind"] == "pod"
+    record = {
+        "body": json.dumps({"waybill": "WB1", "EPOD": "abc=", "lrnum": "LR1"}),
+        "messageAttributes": {
+            "webhookKind": {"stringValue": "pod", "dataType": "String"},
+        },
+    }
+    with patch("src.delhivery_sqs_worker.insert_pod_event") as insert_fn:
+        _process_one_record(pool, record)
+    insert_fn.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

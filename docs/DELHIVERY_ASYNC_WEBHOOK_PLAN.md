@@ -1,6 +1,6 @@
 # Plan: Async Delhivery webhooks (API → SQS → worker Lambda)
 
-**Status:** Implemented in `delivery-api` — HTTP ingest (`delhiveryWebhookIngest`) + SQS + worker (`delhiveryWebhookWorker`). Option B (minimal ingest Lambda), not API Gateway–only SQS.
+**Status:** Implemented in `delivery-api` — **REST API Gateway → SQS** (no ingest Lambda on the hot path) + worker (`delhiveryWebhookWorker`). Matches **Option A / C** from below (native SQS integration + VTL response).
 
 Goal: **Acknowledge Delhivery in &lt; 500 ms** (ideally &lt; 50 ms) without paying for always-warm VPC Lambda on the **synchronous** path. **DB work** runs in the background with cold starts acceptable.
 
@@ -141,7 +141,7 @@ Phase 2 — Worker (slow OK)
 
 ## References
 
-- **Implemented:** `services/delivery-api/src/delhivery_webhook_ingest.py` (HTTP) + `src/delhivery_sqs_worker.py` (SQS → RDS).
+- **Implemented:** `services/delivery-api/serverless.yml` (REST API → SQS + IAM role for API Gateway) + `src/delhivery_sqs_worker.py` (SQS → RDS; raw body + message attributes).
 - Store layer: `services/delivery-api/src/delhivery_store.py`
 - [AWS: API Gateway HTTP API AWS integrations](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-develop-integrations-aws-services.html)
 - [AWS: SQS + Lambda event source mapping](https://docs.aws.amazon.com/lambda/latest/dg/with-sqs.html)
