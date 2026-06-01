@@ -4,7 +4,7 @@ frameworkVersion: "3"
 
 # Bump when changing REST API integrations/methods so API Gateway gets a new Deployment.
 custom:
-  delhiveryApiDeploymentVersion: 5
+  delhiveryApiDeploymentVersion: 6
 
 provider:
   name: aws
@@ -162,10 +162,10 @@ resources:
             - StatusCode: 200
               SelectionPattern: ".*SendMessageResponse.*"
               ResponseTemplates:
-                # Single-quoted JSONPath inside double-quoted YAML so Velocity does not interpolate "$".
-                application/json: "{\"ok\":true,\"lrnum\":$input.json('$.lrnum')}"
+                # Use $input.path (not $input.json) — json() can throw in integration-response mapping and yield 500.
+                application/json: '{"ok":true,"lrnum":"$input.path(''$.lrnum'')"}'
             - StatusCode: 502
-              SelectionPattern: ".*ErrorResponse.*"
+              SelectionPattern: ".*(<ErrorResponse|<Error>).*"
               ResponseTemplates:
                 application/json: '{"message":"SQS SendMessage failed","hint":"Check ApiGatewaySqsRole sqs:SendMessage and queue name"}'
         MethodResponses:
@@ -196,10 +196,10 @@ resources:
             - StatusCode: 200
               SelectionPattern: ".*SendMessageResponse.*"
               ResponseTemplates:
-                # Single-quoted JSONPath inside double-quoted YAML so Velocity does not interpolate "$".
-                application/json: "{\"ok\":true,\"lrnum\":$input.json('$.lrnum')}"
+                # Use $input.path (not $input.json) — json() can throw in integration-response mapping and yield 500.
+                application/json: '{"ok":true,"lrnum":"$input.path(''$.lrnum'')"}'
             - StatusCode: 502
-              SelectionPattern: ".*ErrorResponse.*"
+              SelectionPattern: ".*(<ErrorResponse|<Error>).*"
               ResponseTemplates:
                 application/json: '{"message":"SQS SendMessage failed","hint":"Check ApiGatewaySqsRole sqs:SendMessage and queue name"}'
         MethodResponses:
