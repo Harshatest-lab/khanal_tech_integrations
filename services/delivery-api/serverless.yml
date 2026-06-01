@@ -4,7 +4,7 @@ frameworkVersion: "3"
 
 # Bump when changing REST API integrations/methods so API Gateway gets a new Deployment.
 custom:
-  delhiveryApiDeploymentVersion: 21
+  delhiveryApiDeploymentVersion: 22
 
 provider:
   name: aws
@@ -157,7 +157,6 @@ resources:
           Credentials: !GetAtt ApiGatewaySqsRole.Arn
           RequestParameters:
             integration.request.header.Content-Type: "'application/x-www-form-urlencoded'"
-            integration.request.header.x-delhivery-webhook-secret: method.request.header.x-delhivery-webhook-secret
           # Single-line only: YAML |- injects leading newlines into the SQS form body. Always emit webhookSecret (empty if no header); worker handles empty.
           RequestTemplates:
             application/json: "#set($encBody=$util.urlEncode($input.body))#set($sec=$input.params('x-delhivery-webhook-secret'))#set($msg='Action=SendMessage&Version=2012-11-05&MessageBody='+ $encBody +'&MessageAttribute.1.Name=webhookKind&MessageAttribute.1.Value.StringValue=shipment_status&MessageAttribute.1.Value.DataType=String&MessageAttribute.2.Name=webhookSecret&MessageAttribute.2.Value.StringValue='+$util.urlEncode($sec)+'&MessageAttribute.2.Value.DataType=String')$msg"
@@ -191,7 +190,6 @@ resources:
           Credentials: !GetAtt ApiGatewaySqsRole.Arn
           RequestParameters:
             integration.request.header.Content-Type: "'application/x-www-form-urlencoded'"
-            integration.request.header.x-delhivery-webhook-secret: method.request.header.x-delhivery-webhook-secret
           RequestTemplates:
             application/json: "#set($encBody=$util.urlEncode($input.body))#set($sec=$input.params('x-delhivery-webhook-secret'))#set($msg='Action=SendMessage&Version=2012-11-05&MessageBody='+ $encBody +'&MessageAttribute.1.Name=webhookKind&MessageAttribute.1.Value.StringValue=pod&MessageAttribute.1.Value.DataType=String&MessageAttribute.2.Name=webhookSecret&MessageAttribute.2.Value.StringValue='+$util.urlEncode($sec)+'&MessageAttribute.2.Value.DataType=String')$msg"
           IntegrationResponses:

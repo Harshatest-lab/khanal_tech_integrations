@@ -4,7 +4,7 @@
 
 ## Architecture (async, no Lambda on the HTTP ack path)
 
-1. **API Gateway (REST, regional)** — `POST` on each route integrates **directly** with **SQS `SendMessage`**. The client may send **`X-Delhivery-Webhook-Secret`** (optional method header, forwarded on the integration request so VTL can read it). Mapping templates URL-encode the JSON body and always set SQS message attributes **`webhookKind`** and **`webhookSecret`** (empty string if the header is absent). Response is fixed **`{"ok": true}`**. **No ingest Lambda** on the HTTP path.
+1. **API Gateway (REST, regional)** — `POST` on each route integrates **directly** with **SQS `SendMessage`**. The client may send **`X-Delhivery-Webhook-Secret`** (optional **`method.request`** header so VTL can read it via **`$input.params`**; do **not** map it as an **`integration.request`** header — SQS rejects arbitrary headers). Mapping templates URL-encode the JSON body and always set SQS message attributes **`webhookKind`** and **`webhookSecret`** (empty string if the header is absent). Response is fixed **`{"ok": true}`**. **No ingest Lambda** on the HTTP path.
 2. **`DelhiveryWebhookQueue`** — buffers webhook payloads; failed processing retries then **DLQ** after 5 receives.
 3. **`delhiveryWebhookWorker`** (SQS trigger, **VPC** + shared layer) — reads **raw Delhivery JSON** from the message body and **`webhookKind`** from message attributes; validates **`X-Delhivery-Webhook-Secret`** when **`DELHIVERY_WEBHOOK_SECRET`** is set and **`DELHIVERY_SKIP_WEBHOOK_SECRET`** is not enabled (via synthetic headers from **`webhookSecret`** attribute when present). Same DB logic as before: `delhivery_lr` / `delhivery_lr_status_events` / `delhivery_lr_pod`.
 
