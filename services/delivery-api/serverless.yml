@@ -4,7 +4,7 @@ frameworkVersion: "3"
 
 # Bump when changing REST API integrations/methods so API Gateway gets a new Deployment.
 custom:
-  delhiveryApiDeploymentVersion: 20
+  delhiveryApiDeploymentVersion: 21
 
 provider:
   name: aws
@@ -146,9 +146,9 @@ resources:
         ResourceId: !Ref DelhiveryResourceShipmentStatus
         HttpMethod: POST
         AuthorizationType: NONE
-        # Required so API Gateway binds the header for $input.params('x-delhivery-webhook-secret') in the mapping template.
+        # false = optional header; still declare so API Gateway can bind it; forward to integration for mapping.
         RequestParameters:
-          method.request.header.x-delhivery-webhook-secret: true
+          method.request.header.x-delhivery-webhook-secret: false
         Integration:
           Type: AWS
           IntegrationHttpMethod: POST
@@ -157,10 +157,10 @@ resources:
           Credentials: !GetAtt ApiGatewaySqsRole.Arn
           RequestParameters:
             integration.request.header.Content-Type: "'application/x-www-form-urlencoded'"
-          # Single-line only: YAML |- injects leading newlines into the SQS form body.
-          # Secret: $input.params('name') uses the short header name (AWS doc); required method.request header helps binding.
+            integration.request.header.x-delhivery-webhook-secret: method.request.header.x-delhivery-webhook-secret
+          # Single-line only: YAML |- injects leading newlines into the SQS form body. Always emit webhookSecret (empty if no header); worker handles empty.
           RequestTemplates:
-            application/json: "#set($encBody=$util.urlEncode($input.body))#set($msg='Action=SendMessage&Version=2012-11-05&MessageBody='+ $encBody +'&MessageAttribute.1.Name=webhookKind&MessageAttribute.1.Value.StringValue=shipment_status&MessageAttribute.1.Value.DataType=String')#set($sec=$input.params('x-delhivery-webhook-secret'))#if(!$sec || $sec == '')#set($sec=$input.params('X-Delhivery-Webhook-Secret'))#end#if($sec && $sec != '')#set($msg=$msg+'&MessageAttribute.2.Name=webhookSecret&MessageAttribute.2.Value.StringValue='+$util.urlEncode($sec)+'&MessageAttribute.2.Value.DataType=String')#end$msg"
+            application/json: "#set($encBody=$util.urlEncode($input.body))#set($sec=$input.params('x-delhivery-webhook-secret'))#set($msg='Action=SendMessage&Version=2012-11-05&MessageBody='+ $encBody +'&MessageAttribute.1.Name=webhookKind&MessageAttribute.1.Value.StringValue=shipment_status&MessageAttribute.1.Value.DataType=String&MessageAttribute.2.Name=webhookSecret&MessageAttribute.2.Value.StringValue='+$util.urlEncode($sec)+'&MessageAttribute.2.Value.DataType=String')$msg"
           IntegrationResponses:
             # Tight error patterns only — broad "Code" substring matched SQS success JSON and broke invoke clients.
             - StatusCode: 502
@@ -182,7 +182,7 @@ resources:
         HttpMethod: POST
         AuthorizationType: NONE
         RequestParameters:
-          method.request.header.x-delhivery-webhook-secret: true
+          method.request.header.x-delhivery-webhook-secret: false
         Integration:
           Type: AWS
           IntegrationHttpMethod: POST
@@ -191,8 +191,9 @@ resources:
           Credentials: !GetAtt ApiGatewaySqsRole.Arn
           RequestParameters:
             integration.request.header.Content-Type: "'application/x-www-form-urlencoded'"
+            integration.request.header.x-delhivery-webhook-secret: method.request.header.x-delhivery-webhook-secret
           RequestTemplates:
-            application/json: "#set($encBody=$util.urlEncode($input.body))#set($msg='Action=SendMessage&Version=2012-11-05&MessageBody='+ $encBody +'&MessageAttribute.1.Name=webhookKind&MessageAttribute.1.Value.StringValue=pod&MessageAttribute.1.Value.DataType=String')#set($sec=$input.params('x-delhivery-webhook-secret'))#if(!$sec || $sec == '')#set($sec=$input.params('X-Delhivery-Webhook-Secret'))#end#if($sec && $sec != '')#set($msg=$msg+'&MessageAttribute.2.Name=webhookSecret&MessageAttribute.2.Value.StringValue='+$util.urlEncode($sec)+'&MessageAttribute.2.Value.DataType=String')#end$msg"
+            application/json: "#set($encBody=$util.urlEncode($input.body))#set($sec=$input.params('x-delhivery-webhook-secret'))#set($msg='Action=SendMessage&Version=2012-11-05&MessageBody='+ $encBody +'&MessageAttribute.1.Name=webhookKind&MessageAttribute.1.Value.StringValue=pod&MessageAttribute.1.Value.DataType=String&MessageAttribute.2.Name=webhookSecret&MessageAttribute.2.Value.StringValue='+$util.urlEncode($sec)+'&MessageAttribute.2.Value.DataType=String')$msg"
           IntegrationResponses:
             - StatusCode: 502
               SelectionPattern: ".*(<ErrorResponse|\"__type\"|\"Code\":\\s*\").*"

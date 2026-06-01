@@ -4,7 +4,7 @@
 
 ## Architecture (async, no Lambda on the HTTP ack path)
 
-1. **API Gateway (REST, regional)** — `POST` on each route integrates **directly** with **SQS `SendMessage`**. The client **must** send **`X-Delhivery-Webhook-Secret`** (declared as a **required** method header so API Gateway exposes it to VTL). Mapping templates URL-encode the JSON body and set SQS message attributes **`webhookKind`** and **`webhookSecret`**. Response is fixed **`{"ok": true}`**. **No ingest Lambda** on the HTTP path.
+1. **API Gateway (REST, regional)** — `POST` on each route integrates **directly** with **SQS `SendMessage`**. The client may send **`X-Delhivery-Webhook-Secret`** (optional method header, forwarded on the integration request so VTL can read it). Mapping templates URL-encode the JSON body and always set SQS message attributes **`webhookKind`** and **`webhookSecret`** (empty string if the header is absent). Response is fixed **`{"ok": true}`**. **No ingest Lambda** on the HTTP path.
 2. **`DelhiveryWebhookQueue`** — buffers webhook payloads; failed processing retries then **DLQ** after 5 receives.
 3. **`delhiveryWebhookWorker`** (SQS trigger, **VPC** + shared layer) — reads **raw Delhivery JSON** from the message body and **`webhookKind`** from message attributes; validates **`X-Delhivery-Webhook-Secret`** when **`DELHIVERY_WEBHOOK_SECRET`** is set and **`DELHIVERY_SKIP_WEBHOOK_SECRET`** is not enabled (via synthetic headers from **`webhookSecret`** attribute when present). Same DB logic as before: `delhivery_lr` / `delhivery_lr_status_events` / `delhivery_lr_pod`.
 
@@ -28,7 +28,7 @@ For local/dev debugging when API Gateway cannot attach **`webhookSecret`** to SQ
 1. Set Lambda env **`DELHIVERY_SKIP_WEBHOOK_SECRET`** to **`true`** (deploy with `DELHIVERY_SKIP_WEBHOOK_SECRET=true` in CI or edit the function in the console).
 2. **`curl`** without the `X-Delhivery-Webhook-Secret` header is enough; the worker will still write to RDS if DB connectivity works.
 
-**Do not** enable this on a **public** production URL: anyone who can `POST` to your webhook can enqueue payloads. Turn **`DELHIVERY_SKIP_WEBHOOK_SECRET`** off and keep **`DELHIVERY_WEBHOOK_SECRET`** aligned with Delhivery’s **`X-Delhivery-Webhook-Secret`** before prod. The REST API **requires** that header on every `POST` (API Gateway returns **400** if it is missing).
+**Do not** enable this on a **public** production URL: anyone who can `POST` to your webhook can enqueue payloads. Turn **`DELHIVERY_SKIP_WEBHOOK_SECRET`** off and keep **`DELHIVERY_WEBHOOK_SECRET`** aligned with Delhivery’s **`X-Delhivery-Webhook-Secret`** before prod. The REST API does **not** require that header for `POST` (missing header yields an empty **`webhookSecret`** attribute; the worker rejects unless skip is enabled or the secret matches).
 
 ## Database
 
