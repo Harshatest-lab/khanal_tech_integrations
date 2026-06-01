@@ -48,6 +48,7 @@ def test_worker_legacy_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_worker_wrong_secret_from_attribute(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DELHIVERY_WEBHOOK_SECRET", "correct-secret")
+    monkeypatch.delenv("DELHIVERY_SKIP_WEBHOOK_SECRET", raising=False)
     get_settings.cache_clear()
     pool = MagicMock()
     record = {
@@ -60,6 +61,29 @@ def test_worker_wrong_secret_from_attribute(monkeypatch: pytest.MonkeyPatch) -> 
     with patch("src.delhivery_sqs_worker.apply_shipment_status_webhook") as apply_fn:
         _process_one_record(pool, record)
     apply_fn.assert_not_called()
+
+
+def test_worker_skip_secret_allows_without_webhook_secret_attribute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When DELHIVERY_SKIP_WEBHOOK_SECRET is set, missing webhookSecret on SQS must not block DB write."""
+    monkeypatch.setenv("DELHIVERY_WEBHOOK_SECRET", "correct-secret")
+    monkeypatch.setenv("DELHIVERY_SKIP_WEBHOOK_SECRET", "true")
+    get_settings.cache_clear()
+    pool = MagicMock()
+    conn_cm = MagicMock()
+    pool.connection.return_value.__enter__ = MagicMock(return_value=conn_cm)
+    pool.connection.return_value.__exit__ = MagicMock(return_value=False)
+
+    record = {
+        "body": json.dumps({"lrnum": "LR-SKIP", "status": "Pending"}),
+        "messageAttributes": {
+            "webhookKind": {"stringValue": "shipment_status", "dataType": "String"},
+        },
+    }
+    with patch("src.delhivery_sqs_worker.apply_shipment_status_webhook") as apply_fn:
+        _process_one_record(pool, record)
+    apply_fn.assert_called_once()
 
 
 def test_worker_pod_from_attributes(monkeypatch: pytest.MonkeyPatch) -> None:

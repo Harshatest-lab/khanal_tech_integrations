@@ -19,6 +19,11 @@ from src.delhivery_store import apply_shipment_status_webhook, insert_pod_event
 logger = logging.getLogger(__name__)
 
 
+def _skip_webhook_secret_check() -> bool:
+    v = (os.environ.get("DELHIVERY_SKIP_WEBHOOK_SECRET") or "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
 def _sqs_attr_str(message_attributes: dict[str, Any] | None, name: str) -> str | None:
     if not message_attributes:
         return None
@@ -72,7 +77,7 @@ def _process_one_record(pool: Any, record: dict[str, Any]) -> None:
             headers["x-delhivery-webhook-secret"] = sec
         synthetic_event = {"headers": headers}
 
-    bad = delhivery_secret_error_response(synthetic_event)
+    bad = None if _skip_webhook_secret_check() else delhivery_secret_error_response(synthetic_event)
     if bad is not None:
         got = (header_ci(synthetic_event.get("headers"), "x-delhivery-webhook-secret") or "").strip()
         exp = (get_settings().delhivery_webhook_secret or "").strip()

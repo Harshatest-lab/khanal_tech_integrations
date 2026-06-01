@@ -4,7 +4,7 @@ frameworkVersion: "3"
 
 # Bump when changing REST API integrations/methods so API Gateway gets a new Deployment.
 custom:
-  delhiveryApiDeploymentVersion: 18
+  delhiveryApiDeploymentVersion: 19
 
 provider:
   name: aws
@@ -18,6 +18,8 @@ provider:
     LOG_LEVEL: INFO
     DATABASE_URL: ${env:DATABASE_URL, ''}
     DELHIVERY_WEBHOOK_SECRET: ${env:DELHIVERY_WEBHOOK_SECRET, ''}
+    # Dev only: when true/1/yes, worker does not enforce X-Delhivery-Webhook-Secret (public webhook URL — do not use in prod).
+    DELHIVERY_SKIP_WEBHOOK_SECRET: ${env:DELHIVERY_SKIP_WEBHOOK_SECRET, 'false'}
 
 layers:
   shared:
@@ -144,8 +146,6 @@ resources:
         ResourceId: !Ref DelhiveryResourceShipmentStatus
         HttpMethod: POST
         AuthorizationType: NONE
-        RequestParameters:
-          method.request.header.x-delhivery-webhook-secret: false
         Integration:
           Type: AWS
           IntegrationHttpMethod: POST
@@ -155,8 +155,9 @@ resources:
           RequestParameters:
             integration.request.header.Content-Type: "'application/x-www-form-urlencoded'"
           # Single-line only: YAML |- blocks can inject leading whitespace into the SQS form body and break invoke-URL (curl) while Test still works.
+          # webhookKind only (no X-Delhivery-Webhook-Secret in VTL). Enforce secret in worker via DELHIVERY_WEBHOOK_SECRET unless DELHIVERY_SKIP_WEBHOOK_SECRET is set.
           RequestTemplates:
-            application/json: "#set($encBody=$util.urlEncode($input.body))#set($msg='Action=SendMessage&Version=2012-11-05&MessageBody='+ $encBody +'&MessageAttribute.1.Name=webhookKind&MessageAttribute.1.Value.StringValue=shipment_status&MessageAttribute.1.Value.DataType=String')#set($sec=$input.params('x-delhivery-webhook-secret'))#if(!$sec || $sec == '')#set($sec=$input.params('X-Delhivery-Webhook-Secret'))#end#if(!$sec || $sec == '')#set($sec=$input.params('method.request.header.x-delhivery-webhook-secret'))#end#if($sec && $sec != '')#set($msg=$msg+'&MessageAttribute.2.Name=webhookSecret&MessageAttribute.2.Value.StringValue='+$util.urlEncode($sec)+'&MessageAttribute.2.Value.DataType=String')#end$msg"
+            application/json: "#set($encBody=$util.urlEncode($input.body))#set($msg='Action=SendMessage&Version=2012-11-05&MessageBody='+ $encBody +'&MessageAttribute.1.Name=webhookKind&MessageAttribute.1.Value.StringValue=shipment_status&MessageAttribute.1.Value.DataType=String')$msg"
           IntegrationResponses:
             # Tight error patterns only — broad "Code" substring matched SQS success JSON and broke invoke clients.
             - StatusCode: 502
@@ -177,8 +178,6 @@ resources:
         ResourceId: !Ref DelhiveryResourcePod
         HttpMethod: POST
         AuthorizationType: NONE
-        RequestParameters:
-          method.request.header.x-delhivery-webhook-secret: false
         Integration:
           Type: AWS
           IntegrationHttpMethod: POST
@@ -188,7 +187,7 @@ resources:
           RequestParameters:
             integration.request.header.Content-Type: "'application/x-www-form-urlencoded'"
           RequestTemplates:
-            application/json: "#set($encBody=$util.urlEncode($input.body))#set($msg='Action=SendMessage&Version=2012-11-05&MessageBody='+ $encBody +'&MessageAttribute.1.Name=webhookKind&MessageAttribute.1.Value.StringValue=pod&MessageAttribute.1.Value.DataType=String')#set($sec=$input.params('x-delhivery-webhook-secret'))#if(!$sec || $sec == '')#set($sec=$input.params('X-Delhivery-Webhook-Secret'))#end#if(!$sec || $sec == '')#set($sec=$input.params('method.request.header.x-delhivery-webhook-secret'))#end#if($sec && $sec != '')#set($msg=$msg+'&MessageAttribute.2.Name=webhookSecret&MessageAttribute.2.Value.StringValue='+$util.urlEncode($sec)+'&MessageAttribute.2.Value.DataType=String')#end$msg"
+            application/json: "#set($encBody=$util.urlEncode($input.body))#set($msg='Action=SendMessage&Version=2012-11-05&MessageBody='+ $encBody +'&MessageAttribute.1.Name=webhookKind&MessageAttribute.1.Value.StringValue=pod&MessageAttribute.1.Value.DataType=String')$msg"
           IntegrationResponses:
             - StatusCode: 502
               SelectionPattern: ".*(<ErrorResponse|\"__type\"|\"Code\":\\s*\").*"

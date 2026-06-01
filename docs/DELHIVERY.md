@@ -4,9 +4,9 @@
 
 ## Architecture (async, no Lambda on the HTTP ack path)
 
-1. **API Gateway (REST, regional)** — `POST` on each route integrates **directly** with **SQS `SendMessage`**. Mapping templates URL-encode the client body as the SQS message body and attach **`webhookKind`** (and optional **`webhookSecret`** from `X-Delhivery-Webhook-Secret`) as **message attributes**. The integration response is a fixed **`{"ok": true}`** (the integration response stage only sees the **SQS** reply, not the client JSON body, so echoing `lrnum` here is unreliable without a small Lambda). **No ingest Lambda** runs before Delhivery gets HTTP 200.
+1. **API Gateway (REST, regional)** — `POST` on each route integrates **directly** with **SQS `SendMessage`**. Mapping templates URL-encode the client body as the SQS message body and attach **`webhookKind`** as a **message attribute**. The integration response is a fixed **`{"ok": true}`**. **No ingest Lambda** runs before Delhivery gets HTTP 200. (Optional **`webhookSecret`** on the message + **`X-Delhivery-Webhook-Secret`** is not configured in VTL here; use **`DELHIVERY_SKIP_WEBHOOK_SECRET`** for short-lived dev testing only, or add an ingest Lambda / fix mapping when you need production header validation.)
 2. **`DelhiveryWebhookQueue`** — buffers webhook payloads; failed processing retries then **DLQ** after 5 receives.
-3. **`delhiveryWebhookWorker`** (SQS trigger, **VPC** + shared layer) — reads **raw Delhivery JSON** from the message body and **`webhookKind`** / **`webhookSecret`** from message attributes; same DB logic as before: `delhivery_lr` / `delhivery_lr_status_events` / `delhivery_lr_pod`.
+3. **`delhiveryWebhookWorker`** (SQS trigger, **VPC** + shared layer) — reads **raw Delhivery JSON** from the message body and **`webhookKind`** from message attributes; validates **`X-Delhivery-Webhook-Secret`** when **`DELHIVERY_WEBHOOK_SECRET`** is set and **`DELHIVERY_SKIP_WEBHOOK_SECRET`** is not enabled (via synthetic headers from **`webhookSecret`** attribute when present). Same DB logic as before: `delhivery_lr` / `delhivery_lr_status_events` / `delhivery_lr_pod`.
 
 Delhivery’s HTTP wait time no longer includes any Lambda cold start on receive (only API Gateway + SQS).
 
@@ -20,6 +20,15 @@ Delhivery’s HTTP wait time no longer includes any Lambda cold start on receive
 **Base URL** is the **REST API** invoke URL for your stage (not the old HTTP API v2 URL). After deploy, copy it from the CloudFormation stack output **`DelhiveryWebhookRestApiUrl`** or run `cd services/delivery-api && npx serverless info --verbose` and use the REST invoke URL shown for this stack.
 
 There is **no** `POST /v1/integrations/frappe/delhivery-tracking-snapshot` in this service anymore.
+
+## Temporary dev: skip webhook secret (no `X-Delhivery-Webhook-Secret`)
+
+For local/dev debugging when API Gateway cannot attach **`webhookSecret`** to SQS:
+
+1. Set Lambda env **`DELHIVERY_SKIP_WEBHOOK_SECRET`** to **`true`** (deploy with `DELHIVERY_SKIP_WEBHOOK_SECRET=true` in CI or edit the function in the console).
+2. **`curl`** without the `X-Delhivery-Webhook-Secret` header is enough; the worker will still write to RDS if DB connectivity works.
+
+**Do not** enable this on a **public** production URL: anyone who can `POST` to your webhook can enqueue payloads. Turn **`DELHIVERY_SKIP_WEBHOOK_SECRET`** off and restore **`DELHIVERY_WEBHOOK_SECRET`** validation (and/or an ingest Lambda + header) before prod.
 
 ## Database
 
