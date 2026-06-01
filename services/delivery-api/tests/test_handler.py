@@ -11,7 +11,7 @@ def test_ingest_missing_lrnum(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DELHIVERY_WEBHOOK_SECRET", raising=False)
     monkeypatch.setenv("DELHIVERY_WEBHOOK_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123/queue")
     mock_sqs = MagicMock()
-    with patch("src.delhivery_webhook_ingest._sqs", return_value=mock_sqs):
+    with patch("src.delhivery_webhook_ingest.sqs_client", mock_sqs):
         resp = ingest_handler(
             {
                 "headers": {},
@@ -28,7 +28,7 @@ def test_ingest_wrong_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DELHIVERY_WEBHOOK_SECRET", "correct-secret")
     monkeypatch.setenv("DELHIVERY_WEBHOOK_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123/queue")
     mock_sqs = MagicMock()
-    with patch("src.delhivery_webhook_ingest._sqs", return_value=mock_sqs):
+    with patch("src.delhivery_webhook_ingest.sqs_client", mock_sqs):
         resp = ingest_handler(
             {
                 "headers": {"x-delhivery-webhook-secret": "wrong"},
@@ -45,7 +45,7 @@ def test_ingest_enqueues_shipment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DELHIVERY_WEBHOOK_SECRET", raising=False)
     monkeypatch.setenv("DELHIVERY_WEBHOOK_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123/queue")
     mock_sqs = MagicMock()
-    with patch("src.delhivery_webhook_ingest._sqs", return_value=mock_sqs):
+    with patch("src.delhivery_webhook_ingest.sqs_client", mock_sqs):
         resp = ingest_handler(
             {
                 "headers": {},
@@ -69,7 +69,7 @@ def test_ingest_enqueues_pod(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DELHIVERY_WEBHOOK_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123/queue")
     mock_sqs = MagicMock()
     body = json.dumps({"waybill": "WB1", "EPOD": "abc=", "lrnum": "LR1"})
-    with patch("src.delhivery_webhook_ingest._sqs", return_value=mock_sqs):
+    with patch("src.delhivery_webhook_ingest.sqs_client", mock_sqs):
         resp = ingest_handler(
             {
                 "headers": {},

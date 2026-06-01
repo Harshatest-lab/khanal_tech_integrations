@@ -19,14 +19,9 @@ from src.delhivery_models import body_json, normalize_pod_webhook, normalize_shi
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
 
-_sqs_client: Any | None = None
-
-
-def _sqs() -> Any:
-    global _sqs_client
-    if _sqs_client is None:
-        _sqs_client = boto3.client("sqs")
-    return _sqs_client
+# Build the client at import time so work runs during Lambda INIT, not inside
+# START→END Duration (lazy client in-handler was inflating Duration ~1s on cold).
+sqs_client: Any = boto3.client("sqs")
 
 
 def _api_response(status: int, body: dict[str, Any]) -> dict[str, Any]:
@@ -130,7 +125,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     }
 
     try:
-        _sqs().send_message(QueueUrl=queue_url, MessageBody=json.dumps(envelope))
+        sqs_client.send_message(QueueUrl=queue_url, MessageBody=json.dumps(envelope))
     except Exception as exc:
         logger.exception("SQS send_message failed: %s", exc)
         return _api_response(503, {"error": {"code": "queue_error", "message": "Failed to enqueue webhook"}})
