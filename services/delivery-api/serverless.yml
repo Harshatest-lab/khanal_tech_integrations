@@ -4,7 +4,7 @@ frameworkVersion: "3"
 
 # Bump when changing REST API integrations/methods so API Gateway gets a new Deployment.
 custom:
-  delhiveryApiDeploymentVersion: 8
+  delhiveryApiDeploymentVersion: 9
 
 provider:
   name: aws
@@ -167,8 +167,8 @@ resources:
                 application/json: '{"message":"SQS SendMessage failed","hint":"Check ApiGatewaySqsRole sqs:SendMessage and queue name"}'
             - StatusCode: 200
               ResponseTemplates:
-                # In integration-response mapping, $input refers to the SQS response — use method.request.body for the client JSON.
-                application/json: '#set($req=$util.parseJson($method.request.body))#if($req && $req.lrnum){"ok":true,"lrnum":"$util.escapeJavaScript($req.lrnum)"}#else{"ok":true,"lrnum":null}#end'
+                # $input = method request (per AWS mapping docs). Use json() with single-quoted JSONPath (Velocity-safe).
+                application/json: "{\"ok\":true,\"lrnum\":$input.json('$.lrnum')}"
         MethodResponses:
           - StatusCode: 200
           - StatusCode: 502
@@ -202,8 +202,8 @@ resources:
                 application/json: '{"message":"SQS SendMessage failed","hint":"Check ApiGatewaySqsRole sqs:SendMessage and queue name"}'
             - StatusCode: 200
               ResponseTemplates:
-                # In integration-response mapping, $input refers to the SQS response — use method.request.body for the client JSON.
-                application/json: '#set($req=$util.parseJson($method.request.body))#if($req && $req.lrnum){"ok":true,"lrnum":"$util.escapeJavaScript($req.lrnum)"}#else{"ok":true,"lrnum":null}#end'
+                # $input = method request (per AWS mapping docs). Use json() with single-quoted JSONPath (Velocity-safe).
+                application/json: "{\"ok\":true,\"lrnum\":$input.json('$.lrnum')}"
         MethodResponses:
           - StatusCode: 200
           - StatusCode: 502
