@@ -121,6 +121,46 @@ Each push appends one row to `delhivery_lr_pod` (revised PODs = multiple rows).
 5. In **CloudWatch**, confirm **`delhiveryWebhookWorker`** invocations and logs; watch **`DelhiveryWebhookDlq`** for poison messages.
 6. Optionally enable **API Gateway execution access logging** or **X-Ray** on the stage (tracing is enabled in the template) for latency debugging.
 
+## Troubleshooting: console Test = 200 but `curl` = 500
+
+**Your `curl` is fine** if it matches:
+
+```bash
+curl -sS -i -X POST \
+  'https://{restApiId}.execute-api.us-east-1.amazonaws.com/dev/v1/webhooks/delhivery/shipment-status' \
+  -H 'Content-Type: application/json' \
+  -H 'X-Delhivery-Webhook-Secret: {secret}' \
+  --data-binary '{"lrnum":"...","status":"Completed",...}'
+```
+
+API Gateway **Test** runs against the **latest saved API definition**. The **invoke URL** (`curl`, Delhivery) runs whatever is **deployed to the stage** (`dev`). If those differ, Test can be 200 while `curl` returns `500 Internal server error`.
+
+**Fix (pick one):**
+
+1. **IaC (preferred):** redeploy so stage picks up the new deployment (check description `delivery-api-dev-sqs-v14` or later):
+
+   ```bash
+   cd services/delivery-api && npx serverless deploy --stage dev
+   ```
+
+2. **Console (immediate):** API Gateway → your REST API → **Resources** → **Actions** → **Deploy API** → stage **`dev`**.
+
+3. **CLI (immediate, same as console deploy):**
+
+   ```bash
+   aws apigateway create-deployment \
+     --rest-api-id x0rrkiom5b \
+     --stage-name dev \
+     --description 'manual deploy after mapping fix'
+   ```
+
+After deploy, repeat `curl` — it should return `200` and `{"ok":true}` like Test.
+
+**Sanity checks:**
+
+- `Content-Type: text/plain` → **415** (expected; only `application/json` is mapped).
+- Stage **Deployments** tab: active deployment timestamp should match your last deploy.
+
 ## Security
 
 - **Never** paste Delhivery **Bearer JWT** tokens into this repo or docs; Frappe should keep tokens in its own secrets store.
