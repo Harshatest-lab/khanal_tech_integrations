@@ -1,26 +1,93 @@
 import json
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from khanal_shared.config import get_settings
-
 from src.delhivery_models import normalize_pod_webhook
-from src.delhivery_webhook import handler as webhook_handler
-from src.delhivery_pod_webhook import handler as pod_handler
+from src.delhivery_webhook_ingest import handler as ingest_handler
 
 
-def test_delhivery_webhook_missing_lrnum(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ingest_missing_lrnum(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DELHIVERY_WEBHOOK_SECRET", raising=False)
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    get_settings.cache_clear()
-    resp = webhook_handler({"headers": {}, "body": '{"status": "DELIVERED"}'}, object())
-    get_settings.cache_clear()
-    assert resp["statusCode"] in (400, 503)
+    monkeypatch.setenv("DELHIVERY_WEBHOOK_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123/queue")
+    mock_sqs = MagicMock()
+    with patch("src.delhivery_webhook_ingest._sqs", return_value=mock_sqs):
+        resp = ingest_handler(
+            {
+                "headers": {},
+                "rawPath": "/v1/webhooks/delhivery/shipment-status",
+                "body": '{"status": "DELIVERED"}',
+            },
+            object(),
+        )
+    assert resp["statusCode"] == 400
+    mock_sqs.send_message.assert_not_called()
+
+
+def test_ingest_wrong_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DELHIVERY_WEBHOOK_SECRET", "correct-secret")
+    monkeypatch.setenv("DELHIVERY_WEBHOOK_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123/queue")
+    mock_sqs = MagicMock()
+    with patch("src.delhivery_webhook_ingest._sqs", return_value=mock_sqs):
+        resp = ingest_handler(
+            {
+                "headers": {"x-delhivery-webhook-secret": "wrong"},
+                "rawPath": "/v1/webhooks/delhivery/shipment-status",
+                "body": json.dumps({"lrnum": "LR1", "status": "Pending"}),
+            },
+            object(),
+        )
+    assert resp["statusCode"] == 401
+    mock_sqs.send_message.assert_not_called()
+
+
+def test_ingest_enqueues_shipment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DELHIVERY_WEBHOOK_SECRET", raising=False)
+    monkeypatch.setenv("DELHIVERY_WEBHOOK_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123/queue")
+    mock_sqs = MagicMock()
+    with patch("src.delhivery_webhook_ingest._sqs", return_value=mock_sqs):
+        resp = ingest_handler(
+            {
+                "headers": {},
+                "rawPath": "/v1/webhooks/delhivery/shipment-status",
+                "body": json.dumps({"lrnum": "220260516", "status": "Pending"}),
+            },
+            object(),
+        )
+    assert resp["statusCode"] == 200
+    body = json.loads(resp["body"])
+    assert body == {"ok": True, "lrnum": "220260516"}
+    mock_sqs.send_message.assert_called_once()
+    call_kw = mock_sqs.send_message.call_args[1]
+    envelope = json.loads(call_kw["MessageBody"])
+    assert envelope["kind"] == "shipment_status"
+    assert envelope["body"]["lrnum"] == "220260516"
+
+
+def test_ingest_enqueues_pod(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DELHIVERY_WEBHOOK_SECRET", raising=False)
+    monkeypatch.setenv("DELHIVERY_WEBHOOK_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123/queue")
+    mock_sqs = MagicMock()
+    body = json.dumps({"waybill": "WB1", "EPOD": "abc=", "lrnum": "LR1"})
+    with patch("src.delhivery_webhook_ingest._sqs", return_value=mock_sqs):
+        resp = ingest_handler(
+            {
+                "headers": {},
+                "rawPath": "/v1/webhooks/delhivery/pod",
+                "body": body,
+            },
+            object(),
+        )
+    assert resp["statusCode"] == 200
+    mock_sqs.send_message.assert_called_once()
+    envelope = json.loads(mock_sqs.send_message.call_args[1]["MessageBody"])
+    assert envelope["kind"] == "pod"
 
 
 # ---------------------------------------------------------------------------
 # normalize_pod_webhook unit tests (pure, no I/O)
 # ---------------------------------------------------------------------------
+
 
 def test_normalize_pod_webhook_full_payload() -> None:
     payload = {
@@ -59,39 +126,3 @@ def test_normalize_pod_webhook_strips_whitespace() -> None:
     assert fields["lrnum"] == "LR123"
     assert fields["waybill"] == "WB456"
     assert fields["epod_b64"] == "b64"
-
-
-# ---------------------------------------------------------------------------
-# POD webhook handler integration tests (no real DB — checks early exits)
-# ---------------------------------------------------------------------------
-
-def test_pod_webhook_no_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("DELHIVERY_WEBHOOK_SECRET", raising=False)
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    get_settings.cache_clear()
-    body = json.dumps({"waybill": "WB1", "EPOD": "abc=", "lrnum": "LR1"})
-    resp = pod_handler({"headers": {}, "body": body}, object())
-    get_settings.cache_clear()
-    assert resp["statusCode"] == 503
-
-
-def test_pod_webhook_rejects_wrong_secret(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DELHIVERY_WEBHOOK_SECRET", "correct-secret")
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    get_settings.cache_clear()
-    body = json.dumps({"waybill": "WB1", "EPOD": "abc=", "lrnum": "LR1"})
-    resp = pod_handler(
-        {"headers": {"x-delhivery-webhook-secret": "wrong"}, "body": body},
-        object(),
-    )
-    get_settings.cache_clear()
-    assert resp["statusCode"] == 401
-
-
-def test_pod_webhook_missing_identifiers(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("DELHIVERY_WEBHOOK_SECRET", raising=False)
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    get_settings.cache_clear()
-    resp = pod_handler({"headers": {}, "body": '{"EPOD": "abc="}'}, object())
-    get_settings.cache_clear()
-    assert resp["statusCode"] in (400, 503)

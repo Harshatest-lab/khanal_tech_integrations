@@ -1,15 +1,23 @@
 # Delhivery LRN integration (Frappe + PostgreSQL + Lambda webhooks)
 
-**Frappe** calls Delhivery’s track API and **writes the snapshot directly to PostgreSQL** (`delhivery_lr`). This repo’s **delivery-api** stack exposes only **Delhivery webhooks** (Lambda + API Gateway): shipment status and POD.
+**Frappe** calls Delhivery’s track API and **writes the snapshot directly to PostgreSQL** (`delhivery_lr`). This repo’s **delivery-api** stack exposes only **Delhivery webhooks** (API Gateway + two Lambdas + SQS): shipment status and POD.
+
+## Architecture (async)
+
+1. **`delhiveryWebhookIngest`** (HTTP API, **no VPC**) — validates optional `X-Delhivery-Webhook-Secret`, parses JSON, **`SendMessage`** to SQS, returns **`{"ok": true, "lrnum": "..."}`** quickly.
+2. **`DelhiveryWebhookQueue`** — buffers webhook payloads; failed processing retries then **DLQ** after 5 receives.
+3. **`delhiveryWebhookWorker`** (SQS trigger, **VPC** + shared layer) — same DB logic as before: `delhivery_lr` / `delhivery_lr_status_events` / `delhivery_lr_pod`.
+
+Delhivery’s HTTP wait time no longer includes VPC cold start or Postgres round-trips.
 
 ## Endpoints (after `delivery-api` deploy)
 
 | Method | Path | Caller | Purpose |
 |--------|------|--------|---------|
-| `POST` | `/v1/webhooks/delhivery/shipment-status` | **Delhivery** | Update `delhivery_status` / related fields by `lrnum`; append `delhivery_lr_status_events` |
-| `POST` | `/v1/webhooks/delhivery/pod` | **Delhivery** | Append POD row to `delhivery_lr_pod` |
+| `POST` | `/v1/webhooks/delhivery/shipment-status` | **Delhivery** | Enqueue payload; worker updates `delhivery_lr` + `delhivery_lr_status_events` |
+| `POST` | `/v1/webhooks/delhivery/pod` | **Delhivery** | Enqueue payload; worker appends `delhivery_lr_pod` |
 
-Base URL = API Gateway invoke URL for the `delivery-api` stage (AWS console / `serverless info`).
+Base URL = API Gateway invoke URL for the `delivery-api` stage (AWS console / `serverless info`). **URLs and paths are unchanged** from the old synchronous stack.
 
 There is **no** `POST /v1/integrations/frappe/delhivery-tracking-snapshot` in this service anymore.
 

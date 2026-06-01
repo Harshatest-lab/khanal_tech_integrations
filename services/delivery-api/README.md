@@ -6,8 +6,8 @@
 
 | Logical name in `serverless.yml` | Python |
 |----------------------------------|--------|
-| `delhiveryShipmentStatusWebhook` | `src.delhivery_webhook.handler` |
-| `delhiveryPodWebhook` | `src.delhivery_pod_webhook.handler` |
+| `delhiveryWebhookIngest` | `src.delhivery_webhook_ingest.handler` (both HTTP routes; no VPC) |
+| `delhiveryWebhookWorker` | `src.delhivery_sqs_worker.handler` (SQS → RDS; VPC + layer) |
 
 ## Why `package.json` / Node?
 

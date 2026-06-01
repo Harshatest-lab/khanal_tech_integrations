@@ -7,24 +7,20 @@ provider:
   runtime: python3.12
   stage: ${opt:stage, 'dev'}
   region: ${opt:region, 'us-east-1'}
-  # More vCPU during Init + handler; 512 MB noticeably slower for same code path.
-  memorySize: 1024
+  memorySize: 512
   timeout: 20
   environment:
     STAGE: ${self:provider.stage}
     LOG_LEVEL: INFO
-    # Set at deploy time (CI secrets / shell); never commit real values.
     DATABASE_URL: ${env:DATABASE_URL, ''}
     DELHIVERY_WEBHOOK_SECRET: ${env:DELHIVERY_WEBHOOK_SECRET, ''}
   httpApi:
     cors: true
-  # VPC: khanal-db-dev in vpc-01450e83233d29d0c (see docs/LAMBDA_VPC_SETUP.md).
-  vpc:
-    securityGroupIds:
-      - sg-054440547aa97218e   # delivery-api-lambda
-    subnetIds:
-      - subnet-0723a5f0183b06da4   # us-east-1a
-      - subnet-0d282e4d768e260cb   # us-east-1d (same AZ as khanal-db-dev)
+  iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - sqs:SendMessage
+      Resource: !GetAtt DelhiveryWebhookQueue.Arn
 
 layers:
   shared:
@@ -42,19 +38,54 @@ package:
     - "src/**"
 
 functions:
-  delhiveryShipmentStatusWebhook:
-    handler: src.delhivery_webhook.handler
-    layers:
-      - { Ref: SharedLambdaLayer }
+  # Fast path: no VPC, no layer — validates + SQS SendMessage only.
+  delhiveryWebhookIngest:
+    handler: src.delhivery_webhook_ingest.handler
+    memorySize: 256
+    timeout: 10
+    environment:
+      DELHIVERY_WEBHOOK_QUEUE_URL: !Ref DelhiveryWebhookQueue
+      DATABASE_URL: ""
     events:
       - httpApi:
           path: /v1/webhooks/delhivery/shipment-status
           method: post
-  delhiveryPodWebhook:
-    handler: src.delhivery_pod_webhook.handler
-    layers:
-      - { Ref: SharedLambdaLayer }
-    events:
       - httpApi:
           path: /v1/webhooks/delhivery/pod
           method: post
+
+  # Background: VPC + layer + RDS (same logic as former synchronous handlers).
+  delhiveryWebhookWorker:
+    handler: src.delhivery_sqs_worker.handler
+    memorySize: 512
+    timeout: 30
+    vpc:
+      securityGroupIds:
+        - sg-054440547aa97218e   # delivery-api-lambda
+      subnetIds:
+        - subnet-0723a5f0183b06da4   # us-east-1a
+        - subnet-0d282e4d768e260cb   # us-east-1d (same AZ as khanal-db-dev)
+    layers:
+      - { Ref: SharedLambdaLayer }
+    events:
+      - sqs:
+          arn: !GetAtt DelhiveryWebhookQueue.Arn
+          batchSize: 1
+
+resources:
+  Resources:
+    DelhiveryWebhookDlq:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-${self:provider.stage}-delhivery-webhook-dlq
+        MessageRetentionPeriod: 1209600
+
+    DelhiveryWebhookQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-${self:provider.stage}-delhivery-webhook
+        VisibilityTimeout: 90
+        MessageRetentionPeriod: 345600
+        RedrivePolicy:
+          deadLetterTargetArn: !GetAtt DelhiveryWebhookDlq.Arn
+          maxReceiveCount: 5
