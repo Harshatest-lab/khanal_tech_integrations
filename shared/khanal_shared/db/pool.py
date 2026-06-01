@@ -57,13 +57,16 @@ def get_pool() -> "ConnectionPool | None":
 
 
 def ensure_warmed_for_lambda() -> None:
-    """Open one pooled connection during cold start (INIT), not inside the first request.
+    """Prime the pool during INIT so the first request does not pay connect in Duration.
 
-    Lambda REPORT Duration includes work done after INIT. Moving TCP/TLS + pool
-    checkout to import time reduces wall-clock latency on the first webhook after
-    a new execution environment is created (including under provisioned concurrency).
+    We only **check out** the first pooled connection (``min_size=1``) and return it.
+    Skipping ``SELECT 1`` avoids an extra DB round-trip; TCP/TLS/auth still run once.
 
     No-op outside Lambda (``AWS_EXECUTION_ENV`` unset) or when ``DATABASE_URL`` is missing.
+
+    Note: Init time is dominated by network RTT to Postgres; more Lambda **memory**
+    speeds CPU-bound parts of init. Sub-500 ms cold init without a low-latency DB path
+    is often not realistic.
     """
     if not os.environ.get("AWS_EXECUTION_ENV"):
         return
@@ -71,7 +74,7 @@ def ensure_warmed_for_lambda() -> None:
     if pool is None:
         return
     try:
-        with pool.connection() as conn:
-            conn.execute("SELECT 1")
+        with pool.connection():
+            pass
     except Exception as exc:
         logger.warning("Lambda DB warm failed (first request will retry connect): %s", exc)

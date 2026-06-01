@@ -7,6 +7,7 @@ provider:
   runtime: python3.12
   stage: ${opt:stage, 'dev'}
   region: ${opt:region, 'us-east-1'}
+  # More vCPU during Init + handler; 512 MB noticeably slower for same code path.
   memorySize: 512
   timeout: 20
   environment:
@@ -17,6 +18,13 @@ provider:
     DELHIVERY_WEBHOOK_SECRET: ${env:DELHIVERY_WEBHOOK_SECRET, ''}
   httpApi:
     cors: true
+  # VPC: khanal-db-dev in vpc-01450e83233d29d0c (see docs/LAMBDA_VPC_SETUP.md).
+  vpc:
+    securityGroupIds:
+      - sg-054440547aa97218e   # delivery-api-lambda
+    subnetIds:
+      - subnet-0723a5f0183b06da4   # us-east-1a
+      - subnet-0d282e4d768e260cb   # us-east-1d (same AZ as khanal-db-dev)
 
 layers:
   shared:
@@ -36,8 +44,6 @@ package:
 functions:
   delhiveryShipmentStatusWebhook:
     handler: src.delhivery_webhook.handler
-    # Keeps one warm execution env to cut cold starts (helps Delhivery ~500ms SLA). Extra AWS cost.
-    # provisionedConcurrency: 1  # commented out to test without PC (expect cold starts / higher p99)
     layers:
       - { Ref: SharedLambdaLayer }
     events:
@@ -46,7 +52,6 @@ functions:
           method: post
   delhiveryPodWebhook:
     handler: src.delhivery_pod_webhook.handler
-    # provisionedConcurrency: 1  # commented out to test without PC (expect cold starts / higher p99)
     layers:
       - { Ref: SharedLambdaLayer }
     events:
