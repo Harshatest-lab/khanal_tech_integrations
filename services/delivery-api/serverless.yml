@@ -4,7 +4,7 @@ frameworkVersion: "3"
 
 # Bump when changing REST API integrations/methods so API Gateway gets a new Deployment.
 custom:
-  delhiveryApiDeploymentVersion: 6
+  delhiveryApiDeploymentVersion: 7
 
 provider:
   name: aws
@@ -159,15 +159,15 @@ resources:
             application/json: |-
               #set($encBody = $util.urlEncode($input.body))#set($msg = "Action=SendMessage&Version=2012-11-05&MessageBody=" + $encBody + "&MessageAttribute.1.Name=webhookKind&MessageAttribute.1.Value.StringValue=shipment_status&MessageAttribute.1.Value.DataType=String")#set($sec = $input.params('header.x-delhivery-webhook-secret'))#if($sec && $sec != "")#set($msg = $msg + "&MessageAttribute.2.Name=webhookSecret&MessageAttribute.2.Value.StringValue=" + $util.urlEncode($sec) + "&MessageAttribute.2.Value.DataType=String")#end$msg
           IntegrationResponses:
-            - StatusCode: 200
-              SelectionPattern: ".*SendMessageResponse.*"
-              ResponseTemplates:
-                # Use $input.path (not $input.json) — json() can throw in integration-response mapping and yield 500.
-                application/json: '{"ok":true,"lrnum":"$input.path(''$.lrnum'')"}'
+            # SQS SendMessage now returns JSON (not XML). The old .*SendMessageResponse.* pattern does not match
+            # the integration output mapping pass → "No match for output mapping". List errors first, then default 200.
             - StatusCode: 502
-              SelectionPattern: ".*(<ErrorResponse|<Error>).*"
+              SelectionPattern: ".*(\"Code\"|ErrorResponse|<Error>).*"
               ResponseTemplates:
                 application/json: '{"message":"SQS SendMessage failed","hint":"Check ApiGatewaySqsRole sqs:SendMessage and queue name"}'
+            - StatusCode: 200
+              ResponseTemplates:
+                application/json: '{"ok":true,"lrnum":"$input.path(''$.lrnum'')"}'
         MethodResponses:
           - StatusCode: 200
           - StatusCode: 502
@@ -193,15 +193,15 @@ resources:
             application/json: |-
               #set($encBody = $util.urlEncode($input.body))#set($msg = "Action=SendMessage&Version=2012-11-05&MessageBody=" + $encBody + "&MessageAttribute.1.Name=webhookKind&MessageAttribute.1.Value.StringValue=pod&MessageAttribute.1.Value.DataType=String")#set($sec = $input.params('header.x-delhivery-webhook-secret'))#if($sec && $sec != "")#set($msg = $msg + "&MessageAttribute.2.Name=webhookSecret&MessageAttribute.2.Value.StringValue=" + $util.urlEncode($sec) + "&MessageAttribute.2.Value.DataType=String")#end$msg
           IntegrationResponses:
-            - StatusCode: 200
-              SelectionPattern: ".*SendMessageResponse.*"
-              ResponseTemplates:
-                # Use $input.path (not $input.json) — json() can throw in integration-response mapping and yield 500.
-                application/json: '{"ok":true,"lrnum":"$input.path(''$.lrnum'')"}'
+            # SQS SendMessage now returns JSON (not XML). The old .*SendMessageResponse.* pattern does not match
+            # the integration output mapping pass → "No match for output mapping". List errors first, then default 200.
             - StatusCode: 502
-              SelectionPattern: ".*(<ErrorResponse|<Error>).*"
+              SelectionPattern: ".*(\"Code\"|ErrorResponse|<Error>).*"
               ResponseTemplates:
                 application/json: '{"message":"SQS SendMessage failed","hint":"Check ApiGatewaySqsRole sqs:SendMessage and queue name"}'
+            - StatusCode: 200
+              ResponseTemplates:
+                application/json: '{"ok":true,"lrnum":"$input.path(''$.lrnum'')"}'
         MethodResponses:
           - StatusCode: 200
           - StatusCode: 502
