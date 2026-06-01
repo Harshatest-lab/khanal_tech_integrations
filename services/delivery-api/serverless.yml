@@ -4,7 +4,7 @@ frameworkVersion: "3"
 
 # Bump when changing REST API integrations/methods so API Gateway gets a new Deployment.
 custom:
-  delhiveryApiDeploymentVersion: 10
+  delhiveryApiDeploymentVersion: 12
 
 provider:
   name: aws
@@ -155,9 +155,10 @@ resources:
           RequestParameters:
             integration.request.header.Content-Type: "'application/x-www-form-urlencoded'"
           RequestTemplates:
-            # Single-line Velocity: multiline templates emit whitespace into the SQS form body and break SendMessage.
-            application/json: |-
-              #set($context.requestOverride.path.body=$input.body)#set($encBody = $util.urlEncode($input.body))#set($msg = "Action=SendMessage&Version=2012-11-05&MessageBody=" + $encBody + "&MessageAttribute.1.Name=webhookKind&MessageAttribute.1.Value.StringValue=shipment_status&MessageAttribute.1.Value.DataType=String")#set($sec = $input.params('header.x-delhivery-webhook-secret'))#if($sec && $sec != "")#set($msg = $msg + "&MessageAttribute.2.Name=webhookSecret&MessageAttribute.2.Value.StringValue=" + $util.urlEncode($sec) + "&MessageAttribute.2.Value.DataType=String")#end$msg
+              # requestOverride.path.body breaks some invoke-URL clients (curl) while Test still works — do not use it here.
+              # Optional: echo lrnum only when sent as ?lrnum=... (Delhivery typically POSTs JSON only → {"ok":true}).
+              application/json: |-
+                #set($encBody = $util.urlEncode($input.body))#set($msg = "Action=SendMessage&Version=2012-11-05&MessageBody=" + $encBody + "&MessageAttribute.1.Name=webhookKind&MessageAttribute.1.Value.StringValue=shipment_status&MessageAttribute.1.Value.DataType=String")#set($sec = $input.params('header.x-delhivery-webhook-secret'))#if($sec && $sec != "")#set($msg = $msg + "&MessageAttribute.2.Name=webhookSecret&MessageAttribute.2.Value.StringValue=" + $util.urlEncode($sec) + "&MessageAttribute.2.Value.DataType=String")#end$msg
           IntegrationResponses:
             # SQS SendMessage now returns JSON (not XML). The old .*SendMessageResponse.* pattern does not match
             # the integration output mapping pass → "No match for output mapping". List errors first, then default 200.
@@ -167,8 +168,7 @@ resources:
                 application/json: '{"message":"SQS SendMessage failed","hint":"Check ApiGatewaySqsRole sqs:SendMessage and queue name"}'
             - StatusCode: 200
               ResponseTemplates:
-                # Integration-response $input is the SQS payload — stash client JSON on the request (see AWS community pattern).
-                application/json: '#set($raw=$context.requestOverride.path.body)#set($req=$util.parseJson($raw))#if($req && $req.lrnum){"ok":true,"lrnum":"$util.escapeJavaScript($req.lrnum)"}#else{"ok":true,"lrnum":null}#end'
+                application/json: '#set($lr=$input.params(''querystring.lrnum''))#if($lr && $lr != ""){"ok":true,"lrnum":"$util.escapeJavaScript($lr)"}#else{"ok":true}#end'
         MethodResponses:
           - StatusCode: 200
           - StatusCode: 502
@@ -191,8 +191,8 @@ resources:
           RequestParameters:
             integration.request.header.Content-Type: "'application/x-www-form-urlencoded'"
           RequestTemplates:
-            application/json: |-
-              #set($context.requestOverride.path.body=$input.body)#set($encBody = $util.urlEncode($input.body))#set($msg = "Action=SendMessage&Version=2012-11-05&MessageBody=" + $encBody + "&MessageAttribute.1.Name=webhookKind&MessageAttribute.1.Value.StringValue=pod&MessageAttribute.1.Value.DataType=String")#set($sec = $input.params('header.x-delhivery-webhook-secret'))#if($sec && $sec != "")#set($msg = $msg + "&MessageAttribute.2.Name=webhookSecret&MessageAttribute.2.Value.StringValue=" + $util.urlEncode($sec) + "&MessageAttribute.2.Value.DataType=String")#end$msg
+              application/json: |-
+                #set($encBody = $util.urlEncode($input.body))#set($msg = "Action=SendMessage&Version=2012-11-05&MessageBody=" + $encBody + "&MessageAttribute.1.Name=webhookKind&MessageAttribute.1.Value.StringValue=pod&MessageAttribute.1.Value.DataType=String")#set($sec = $input.params('header.x-delhivery-webhook-secret'))#if($sec && $sec != "")#set($msg = $msg + "&MessageAttribute.2.Name=webhookSecret&MessageAttribute.2.Value.StringValue=" + $util.urlEncode($sec) + "&MessageAttribute.2.Value.DataType=String")#end$msg
           IntegrationResponses:
             # SQS SendMessage now returns JSON (not XML). The old .*SendMessageResponse.* pattern does not match
             # the integration output mapping pass → "No match for output mapping". List errors first, then default 200.
@@ -202,7 +202,7 @@ resources:
                 application/json: '{"message":"SQS SendMessage failed","hint":"Check ApiGatewaySqsRole sqs:SendMessage and queue name"}'
             - StatusCode: 200
               ResponseTemplates:
-                application/json: '#set($raw=$context.requestOverride.path.body)#set($req=$util.parseJson($raw))#set($lr=$req.lrnum)#if(!$lr)#set($lr=$req.waybill)#end#if($lr){"ok":true,"lrnum":"$util.escapeJavaScript($lr)"}#else{"ok":true,"lrnum":null}#end'
+                application/json: '#set($lr=$input.params(''querystring.lrnum''))#if($lr && $lr != ""){"ok":true,"lrnum":"$util.escapeJavaScript($lr)"}#else{"ok":true}#end'
         MethodResponses:
           - StatusCode: 200
           - StatusCode: 502
