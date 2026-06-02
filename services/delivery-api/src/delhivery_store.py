@@ -94,14 +94,21 @@ def apply_pod_webhook(conn: Any, fields: dict[str, Any]) -> int | None:
 
     Returns new ``delhivery_lr_pod.id``, or ``None`` if no matching LR (unknown lrnum / waybill).
     """
+    # Never pass None for lrnum/waybill placeholders: ``btrim(NULL)`` makes Postgres unable to
+    # infer parameter types (psycopg ``AmbiguousParameter`` on ``WHEN %(lrnum)s IS NOT NULL ...``).
+    lr_raw = fields.get("lrnum")
+    lr_val = "" if lr_raw is None else str(lr_raw).strip()
+    wb_raw = fields.get("waybill")
+    wb_val = "" if wb_raw is None else str(wb_raw).strip()
+
     prev = conn.autocommit
     conn.autocommit = True
     try:
         cur = conn.execute(
             APPLY_POD_WEBHOOK,
             {
-                "lrnum": fields.get("lrnum"),
-                "waybill": fields.get("waybill"),
+                "lrnum": lr_val,
+                "waybill": wb_val,
                 "order_id": fields.get("order_id"),
                 "epod_b64": fields.get("epod_b64"),
                 "pod_url": fields.get("pod_url"),
