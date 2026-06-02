@@ -77,7 +77,7 @@ Phase 2 — Worker (slow OK)
 
    Worker branches on `kind` and calls existing logic:
    - `shipment_status` → `normalize_shipment_webhook` → `apply_shipment_status_webhook`
-   - `pod` → `normalize_pod_webhook` → `insert_pod_event`
+   - `pod` → `normalize_pod_webhook` → `apply_pod_webhook`
 
 4. **Secret validation:** If ingest did not validate, worker runs the same `delhivery_secret_error_response` rules: if secret is configured and wrong, **do not** write DB; send message to **DLQ** or delete with log (define policy — avoid infinite retries on bad secret).
 

@@ -45,25 +45,79 @@ SELECT upserted.lrnum, %(payload)s::jsonb FROM upserted;
 """
 
 
-INSERT_POD_EVENT = """
-INSERT INTO delhivery_lr_pod (lrnum, waybill, order_id, epod_b64, raw_payload)
-VALUES (%(lrnum)s, %(waybill)s, %(order_id)s, %(epod_b64)s, %(raw_payload)s::jsonb);
+# Resolve lrnum from payload or waybill lookup; insert POD only when parent LR exists;
+# set delhivery_lr.latest_pod_id + pod_received (independent of shipment status / Delivered).
+APPLY_POD_WEBHOOK = """
+WITH resolved AS (
+  SELECT
+    CASE
+      WHEN %(lrnum)s IS NOT NULL AND btrim(%(lrnum)s) <> '' THEN btrim(%(lrnum)s)
+      WHEN %(waybill)s IS NOT NULL AND btrim(%(waybill)s) <> '' THEN (
+        SELECT d.lrnum FROM delhivery_lr d WHERE d.waybill = btrim(%(waybill)s) LIMIT 1
+      )
+      ELSE NULL
+    END AS lrnum
+),
+exists_ok AS (
+  SELECT r.lrnum FROM resolved r
+  INNER JOIN delhivery_lr d ON d.lrnum = r.lrnum
+),
+ins AS (
+  INSERT INTO delhivery_lr_pod (lrnum, waybill, order_id, epod_b64, pod_url, pod_format, raw_payload)
+  SELECT
+    e.lrnum,
+    %(waybill)s,
+    %(order_id)s,
+    %(epod_b64)s,
+    %(pod_url)s,
+    %(pod_format)s,
+    %(raw_payload)s::jsonb
+  FROM exists_ok e
+  RETURNING id, lrnum
+),
+upd AS (
+  UPDATE delhivery_lr l
+  SET
+    latest_pod_id = i.id,
+    pod_received = true,
+    updated_at = now()
+  FROM ins i
+  WHERE l.lrnum = i.lrnum
+  RETURNING i.id
+)
+SELECT id FROM upd;
 """
 
 
-def insert_pod_event(conn: Any, fields: dict[str, Any]) -> None:
-    """Append a POD webhook row.  Multiple rows per lrnum are intentional."""
-    _execute_one_statement(
-        conn,
-        INSERT_POD_EVENT,
-        {
-            "lrnum": fields["lrnum"],
-            "waybill": fields.get("waybill"),
-            "order_id": fields.get("order_id"),
-            "epod_b64": fields.get("epod_b64"),
-            "raw_payload": json.dumps(fields["payload"]),
-        },
-    )
+def apply_pod_webhook(conn: Any, fields: dict[str, Any]) -> int | None:
+    """Append a POD row when ``delhivery_lr`` exists; update ``latest_pod_id`` + ``pod_received``.
+
+    Returns new ``delhivery_lr_pod.id``, or ``None`` if no matching LR (unknown lrnum / waybill).
+    """
+    prev = conn.autocommit
+    conn.autocommit = True
+    try:
+        cur = conn.execute(
+            APPLY_POD_WEBHOOK,
+            {
+                "lrnum": fields.get("lrnum"),
+                "waybill": fields.get("waybill"),
+                "order_id": fields.get("order_id"),
+                "epod_b64": fields.get("epod_b64"),
+                "pod_url": fields.get("pod_url"),
+                "pod_format": fields.get("pod_format") or "raw",
+                "raw_payload": json.dumps(fields["payload"]),
+            },
+        )
+        row = cur.fetchone()
+        if row is None or row[0] is None:
+            return None
+        return int(row[0])
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.autocommit = prev
 
 
 def apply_shipment_status_webhook(conn: Any, fields: dict[str, Any]) -> None:

@@ -100,9 +100,9 @@ def test_worker_pod_from_attributes(monkeypatch: pytest.MonkeyPatch) -> None:
             "webhookKind": {"stringValue": "pod", "dataType": "String"},
         },
     }
-    with patch("src.delhivery_sqs_worker.insert_pod_event") as insert_fn:
+    with patch("src.delhivery_sqs_worker.apply_pod_webhook") as apply_fn:
         _process_one_record(pool, record)
-    insert_fn.assert_called_once()
+    apply_fn.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -123,16 +123,40 @@ def test_normalize_pod_webhook_full_payload() -> None:
     assert fields["waybill"] == "1234567890"
     assert fields["order_id"] == "ORD-99"
     assert fields["epod_b64"] == "base64encodedstring=="
+    assert fields["pod_url"] is None
+    assert fields["pod_format"] == "base64"
     assert fields["payload"] is payload
 
 
-def test_normalize_pod_webhook_uses_waybill_as_fallback() -> None:
-    """If lrnum is absent, waybill becomes the identifier."""
+def test_normalize_pod_webhook_pod_url_only() -> None:
+    payload = {"lrnum": "LR9", "PODUrl": "https://example.com/signed-pod"}
+    fields = normalize_pod_webhook(payload)
+    assert fields is not None
+    assert fields["lrnum"] == "LR9"
+    assert fields["pod_url"] == "https://example.com/signed-pod"
+    assert fields["pod_format"] == "url"
+    assert fields["epod_b64"] is None
+
+
+def test_normalize_pod_webhook_waybill_only_for_lr_lookup() -> None:
+    """If lrnum is absent, worker resolves parent ``delhivery_lr`` via waybill; ``lrnum`` stays unset here."""
     payload = {"waybill": "WB001", "EPOD": "abc="}
     fields = normalize_pod_webhook(payload)
     assert fields is not None
-    assert fields["lrnum"] == "WB001"
+    assert fields["lrnum"] is None
     assert fields["waybill"] == "WB001"
+    assert fields["epod_b64"] == "abc="
+
+
+def test_normalize_pod_webhook_mixed_epod_and_url() -> None:
+    payload = {
+        "lrnum": "L1",
+        "EPOD": "AAA",
+        "pod_url": "https://x/y",
+    }
+    fields = normalize_pod_webhook(payload)
+    assert fields is not None
+    assert fields["pod_format"] == "mixed"
 
 
 def test_normalize_pod_webhook_rejects_empty_payload() -> None:
@@ -147,3 +171,4 @@ def test_normalize_pod_webhook_strips_whitespace() -> None:
     assert fields["lrnum"] == "LR123"
     assert fields["waybill"] == "WB456"
     assert fields["epod_b64"] == "b64"
+    assert fields["pod_format"] == "base64"

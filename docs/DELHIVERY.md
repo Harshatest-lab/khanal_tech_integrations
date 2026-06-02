@@ -4,9 +4,9 @@
 
 ## Architecture (async, no Lambda on the HTTP ack path)
 
-1. **API Gateway (REST, regional)** — `POST` on each route integrates **directly** with **SQS `SendMessage`**. The client may send **`X-Delhivery-Webhook-Secret`** (optional **`method.request`** header so VTL can read it via **`$input.params`**; do **not** map it as an **`integration.request`** header — SQS rejects arbitrary headers). Mapping templates URL-encode the JSON body and always set SQS message attributes **`webhookKind`** and **`webhookSecret`** (empty string if the header is absent). Response is fixed **`{"ok": true}`**. **No ingest Lambda** on the HTTP path.
+1. **API Gateway (REST, regional)** — `POST` on each route integrates **directly** with **SQS `SendMessage`**. The client may send **`X-Delhivery-Webhook-Secret`** (optional **`method.request`** header for VTL **`$input.params`**). Mapping templates URL-encode the JSON body, set **`webhookKind`**, and add **`webhookSecret`** only when the header is non-empty (SQS rejects empty string message attribute values). Response is fixed **`{"ok": true}`**. **No ingest Lambda** on the HTTP path.
 2. **`DelhiveryWebhookQueue`** — buffers webhook payloads; failed processing retries then **DLQ** after 5 receives.
-3. **`delhiveryWebhookWorker`** (SQS trigger, **VPC** + shared layer) — reads **raw Delhivery JSON** from the message body and **`webhookKind`** from message attributes; validates **`X-Delhivery-Webhook-Secret`** when **`DELHIVERY_WEBHOOK_SECRET`** is set and **`DELHIVERY_SKIP_WEBHOOK_SECRET`** is not enabled (via synthetic headers from **`webhookSecret`** attribute when present). Same DB logic as before: `delhivery_lr` / `delhivery_lr_status_events` / `delhivery_lr_pod`.
+3. **`delhiveryWebhookWorker`** (SQS trigger, **VPC** + shared layer) — reads **raw Delhivery JSON** from the message body and **`webhookKind`** from message attributes; validates **`X-Delhivery-Webhook-Secret`** when **`DELHIVERY_WEBHOOK_SECRET`** is set and **`DELHIVERY_SKIP_WEBHOOK_SECRET`** is not enabled (via synthetic headers from **`webhookSecret`** attribute when present). Writes **`delhivery_lr`** + **`delhivery_lr_status_events`** for shipment status; for POD, appends **`delhivery_lr_pod`** and sets **`delhivery_lr.latest_pod_id`** + **`pod_received`** when a matching **`delhivery_lr`** row exists (no dependency on **Delivered** status).
 
 Delhivery’s HTTP wait time no longer includes any Lambda cold start on receive (only API Gateway + SQS).
 
@@ -15,7 +15,7 @@ Delhivery’s HTTP wait time no longer includes any Lambda cold start on receive
 | Method | Path | Caller | Purpose |
 |--------|------|--------|---------|
 | `POST` | `/v1/webhooks/delhivery/shipment-status` | **Delhivery** | Enqueue payload; worker updates `delhivery_lr` + `delhivery_lr_status_events` |
-| `POST` | `/v1/webhooks/delhivery/pod` | **Delhivery** | Enqueue payload; worker appends `delhivery_lr_pod` |
+| `POST` | `/v1/webhooks/delhivery/pod` | **Delhivery** | Enqueue payload; worker appends **`delhivery_lr_pod`**, updates **`delhivery_lr.latest_pod_id`** + **`pod_received`** when LR exists |
 
 **Base URL** is the **REST API** invoke URL for your stage (not the old HTTP API v2 URL). After deploy, copy it from the CloudFormation stack output **`DelhiveryWebhookRestApiUrl`** or run `cd services/delivery-api && npx serverless info --verbose` and use the REST invoke URL shown for this stack.
 
@@ -28,7 +28,7 @@ For local/dev debugging when API Gateway cannot attach **`webhookSecret`** to SQ
 1. Set Lambda env **`DELHIVERY_SKIP_WEBHOOK_SECRET`** to **`true`** (deploy with `DELHIVERY_SKIP_WEBHOOK_SECRET=true` in CI or edit the function in the console).
 2. **`curl`** without the `X-Delhivery-Webhook-Secret` header is enough; the worker will still write to RDS if DB connectivity works.
 
-**Do not** enable this on a **public** production URL: anyone who can `POST` to your webhook can enqueue payloads. Turn **`DELHIVERY_SKIP_WEBHOOK_SECRET`** off and keep **`DELHIVERY_WEBHOOK_SECRET`** aligned with Delhivery’s **`X-Delhivery-Webhook-Secret`** before prod. The REST API does **not** require that header for `POST` (missing header yields an empty **`webhookSecret`** attribute; the worker rejects unless skip is enabled or the secret matches).
+**Do not** enable this on a **public** production URL: anyone who can `POST` to your webhook can enqueue payloads. Turn **`DELHIVERY_SKIP_WEBHOOK_SECRET`** off and keep **`DELHIVERY_WEBHOOK_SECRET`** aligned with Delhivery’s **`X-Delhivery-Webhook-Secret`** before prod. If the header is omitted, **`webhookSecret`** is not sent on the SQS message (empty values are invalid for SQS); the worker treats missing secret like an unauthorized payload unless skip is enabled.
 
 ## Database
 
@@ -40,9 +40,9 @@ psql "$DATABASE_URL" -f sql/delhivery_lr.sql
 
 Tables:
 
-- **`delhivery_lr`** — one row per `lrnum`: latest `delhivery_status`, optional `status_type`, last webhook payload, full **track** response in `raw_tracking` (**from Frappe**, not Lambda).
+- **`delhivery_lr`** — one row per `lrnum`: latest `delhivery_status`, optional `status_type`, last webhook payload, full **track** response in `raw_tracking` (**from Frappe**, not Lambda). **`latest_pod_id`** points at the newest **`delhivery_lr_pod`** row; **`pod_received`** is set when at least one POD has been stored for that LR.
 - **`delhivery_lr_status_events`** — append-only audit of each shipment-status webhook.
-- **`delhivery_lr_pod`** — append-only POD pushes (revised PODs = multiple rows per `lrnum`).
+- **`delhivery_lr_pod`** — append-only POD history (re-triggers / revised PODs = multiple rows per `lrnum`). Columns include **`epod_b64`**, optional **`pod_url`** (e.g. time-limited S3 link), and **`pod_format`** (`base64` \| `url` \| `mixed` \| `raw`). Inserts require a matching **`delhivery_lr`** row (by **`lrnum`** in the payload, or **`waybill`** matching **`delhivery_lr.waybill`**); otherwise the message is acknowledged and **`delhivery_pod_skipped`** is logged.
 
 ## Frappe → PostgreSQL (tracking snapshot)
 
@@ -99,7 +99,7 @@ If Lambda env **`DELHIVERY_WEBHOOK_SECRET`** is set, the worker expects the same
 
 Register URL: `POST …/v1/webhooks/delhivery/pod`.
 
-Example body:
+Example bodies (Delhivery may send base64 **and/or** a signed URL; form-style fields are kept in **`raw_payload`**):
 
 ```json
 {
@@ -110,7 +110,14 @@ Example body:
 }
 ```
 
-Each push appends one row to `delhivery_lr_pod` (revised PODs = multiple rows).
+```json
+{
+  "lrnum": "220256789",
+  "PODUrl": "https://…signed-s3-or-cdn-url…"
+}
+```
+
+Each accepted push appends **`delhivery_lr_pod`** and moves **`delhivery_lr.latest_pod_id`** to that row’s **`id`** (history preserved for re-triggered PODs).
 
 ## Lambda configuration
 

@@ -16,6 +16,14 @@ def lrnum_from_track_response(body: dict[str, Any]) -> str | None:
     return None
 
 
+def _first_non_empty_str(payload: dict[str, Any], *keys: str) -> str | None:
+    for k in keys:
+        v = payload.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return None
+
+
 def normalize_shipment_webhook(payload: dict[str, Any]) -> dict[str, Any] | None:
     """Return flat fields for DB write; None if lrnum missing."""
     lrnum = payload.get("lrnum")
@@ -44,36 +52,61 @@ def normalize_shipment_webhook(payload: dict[str, Any]) -> dict[str, Any] | None
 
 
 def normalize_pod_webhook(payload: dict[str, Any]) -> dict[str, Any] | None:
-    """Return flat fields for DB write; None if both lrnum and waybill are missing.
+    """Return flat fields for DB write; None if identifiers and POD content are unusable.
 
-    Delhivery sends:
-        { "waybill": "…", "EPOD": "<base64>", "orderID": "…", "lrnum": "…" }
+    Delhivery may send:
+      - Base64 EPOD, and/or
+      - A time-limited S3 (or other) URL, and/or
+      - Other fields (treated as ``raw`` / form-like JSON).
 
-    Notes:
-      - lrnum is the canonical key; waybill is a fallback identifier.
-      - EPOD key name may also appear as 'EPOD' with different casing; we try both.
-      - Multiple POD pushes per LR are normal (revised PODs from audit team).
+    ``lrnum`` is only taken from the payload (not copied from waybill). If ``lrnum`` is
+    absent, the worker resolves the parent row via ``delhivery_lr.waybill`` before insert.
+
+    Multiple POD pushes per LR (re-triggers / revised PODs) are normal.
     """
     lrnum = payload.get("lrnum") or payload.get("lr_num")
-    lrnum_s = lrnum.strip() if isinstance(lrnum, str) else None
+    lrnum_s = lrnum.strip() if isinstance(lrnum, str) and lrnum.strip() else None
 
     waybill = payload.get("waybill")
-    waybill_s = waybill.strip() if isinstance(waybill, str) else None
+    waybill_s = waybill.strip() if isinstance(waybill, str) and waybill.strip() else None
 
     if not lrnum_s and not waybill_s:
         return None
 
     epod = payload.get("EPOD") or payload.get("epod") or payload.get("Epod")
-    epod_s = epod.strip() if isinstance(epod, str) else None
+    epod_s = epod.strip() if isinstance(epod, str) and epod.strip() else None
+
+    pod_url_s = _first_non_empty_str(
+        payload,
+        "pod_url",
+        "PODUrl",
+        "podURL",
+        "s3_url",
+        "download_url",
+        "epod_url",
+        "EPODUrl",
+        "pod_link",
+    )
 
     order_id = payload.get("orderID") or payload.get("order_id")
-    order_id_s = order_id.strip() if isinstance(order_id, str) else None
+    order_id_s = order_id.strip() if isinstance(order_id, str) and order_id.strip() else None
+
+    if epod_s and pod_url_s:
+        pod_format = "mixed"
+    elif epod_s:
+        pod_format = "base64"
+    elif pod_url_s:
+        pod_format = "url"
+    else:
+        pod_format = "raw"
 
     return {
-        "lrnum": lrnum_s or waybill_s,   # use waybill as fallback key
+        "lrnum": lrnum_s,
         "waybill": waybill_s,
         "order_id": order_id_s,
         "epod_b64": epod_s,
+        "pod_url": pod_url_s,
+        "pod_format": pod_format,
         "payload": payload,
     }
 

@@ -14,7 +14,7 @@ from khanal_shared.logging import configure_logging, log_json
 
 from src.common import delhivery_secret_error_response, header_ci
 from src.delhivery_models import normalize_pod_webhook, normalize_shipment_webhook
-from src.delhivery_store import apply_shipment_status_webhook, insert_pod_event
+from src.delhivery_store import apply_pod_webhook, apply_shipment_status_webhook
 
 logger = logging.getLogger(__name__)
 
@@ -115,16 +115,29 @@ def _process_one_record(pool: Any, record: dict[str, Any]) -> None:
             log_json(logger, logging.WARNING, "delhivery_sqs_skip", reason="missing_pod_identifiers")
             return
         with pool.connection() as conn:
-            insert_pod_event(conn, fields)
-        log_json(
-            logger,
-            logging.INFO,
-            "delhivery_pod_received",
-            lrnum=fields["lrnum"],
-            waybill=fields.get("waybill"),
-            order_id=fields.get("order_id"),
-            has_epod=bool(fields.get("epod_b64")),
-        )
+            new_pod_id = apply_pod_webhook(conn, fields)
+        if new_pod_id is None:
+            log_json(
+                logger,
+                logging.INFO,
+                "delhivery_pod_skipped",
+                lrnum=fields.get("lrnum"),
+                waybill=fields.get("waybill"),
+                reason="no_matching_delhivery_lr",
+            )
+        else:
+            log_json(
+                logger,
+                logging.INFO,
+                "delhivery_pod_received",
+                lrnum=fields.get("lrnum"),
+                waybill=fields.get("waybill"),
+                order_id=fields.get("order_id"),
+                pod_id=new_pod_id,
+                pod_format=fields.get("pod_format"),
+                has_epod=bool(fields.get("epod_b64")),
+                has_pod_url=bool(fields.get("pod_url")),
+            )
         return
 
     log_json(logger, logging.WARNING, "delhivery_sqs_unknown_kind", kind=kind)

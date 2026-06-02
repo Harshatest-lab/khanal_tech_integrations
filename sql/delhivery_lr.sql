@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS delhivery_lr_pod (
   waybill     text,
   order_id    text,
   epod_b64    text,                          -- raw base64 string from Delhivery
+  pod_url     text,                          -- time-limited S3 (or other) URL when Delhivery sends URL mode
+  pod_format  text,                          -- base64 | url | mixed | raw (hint for clients)
   raw_payload jsonb       NOT NULL DEFAULT '{}'::jsonb,
   received_at timestamptz NOT NULL DEFAULT now()
 );
@@ -45,3 +47,21 @@ ALTER TABLE delhivery_lr ADD COLUMN IF NOT EXISTS doc_entry text;
 ALTER TABLE delhivery_lr ADD COLUMN IF NOT EXISTS doc_num text;
 ALTER TABLE delhivery_lr ADD COLUMN IF NOT EXISTS series text;
 ALTER TABLE delhivery_lr ADD COLUMN IF NOT EXISTS sap_response jsonb;
+
+-- POD: latest pointer on parent LR (history stays in delhivery_lr_pod).
+ALTER TABLE delhivery_lr ADD COLUMN IF NOT EXISTS latest_pod_id bigint;
+ALTER TABLE delhivery_lr ADD COLUMN IF NOT EXISTS pod_received boolean NOT NULL DEFAULT false;
+
+ALTER TABLE delhivery_lr_pod ADD COLUMN IF NOT EXISTS pod_url text;
+ALTER TABLE delhivery_lr_pod ADD COLUMN IF NOT EXISTS pod_format text;
+
+-- FK from parent → latest pod row (idempotent add).
+DO $$
+BEGIN
+  ALTER TABLE delhivery_lr
+    ADD CONSTRAINT fk_delhivery_lr_latest_pod_id
+    FOREIGN KEY (latest_pod_id) REFERENCES delhivery_lr_pod (id) ON DELETE SET NULL;
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END
+$$;
