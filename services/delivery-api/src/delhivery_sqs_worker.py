@@ -80,7 +80,7 @@ def _process_one_record(pool: Any, record: dict[str, Any]) -> None:
     bad = None if _skip_webhook_secret_check() else delhivery_secret_error_response(synthetic_event)
     if bad is not None:
         got = (header_ci(synthetic_event.get("headers"), "x-delhivery-webhook-secret") or "").strip()
-        exp = (get_settings().delhivery_webhook_secret or "").strip()
+        exp = (os.environ.get("DELHIVERY_WEBHOOK_SECRET") or "").strip()
         attr_keys = sorted(message_attributes.keys()) if isinstance(message_attributes, dict) else []
         log_json(
             logger,

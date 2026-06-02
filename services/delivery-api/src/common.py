@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import hmac
 import json
+import os
 from typing import Any
-
-from khanal_shared.config import get_settings
 
 
 def response(status: int, body: dict[str, Any]) -> dict[str, Any]:
@@ -29,8 +28,13 @@ def header_ci(headers: dict[str, Any] | None, name: str) -> str | None:
 
 
 def delhivery_secret_error_response(event: dict[str, Any]) -> dict[str, Any] | None:
-    """Return error response if webhook secret header is wrong; None if OK."""
-    expected = (get_settings().delhivery_webhook_secret or "").strip()
+    """Return error response if webhook secret header is wrong; None if OK.
+
+    Read ``DELHIVERY_WEBHOOK_SECRET`` from ``os.environ`` (not ``get_settings()``) so
+    updates take effect on every invoke. ``get_settings()`` is LRU-cached and would
+    keep a stale secret in warm Lambda execution environments after a console/CI change.
+    """
+    expected = (os.environ.get("DELHIVERY_WEBHOOK_SECRET") or "").strip()
     if not expected:
         return None
     got = (header_ci(event.get("headers"), "x-delhivery-webhook-secret") or "").strip()
