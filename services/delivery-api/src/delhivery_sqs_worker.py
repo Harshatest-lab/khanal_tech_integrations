@@ -55,7 +55,17 @@ def _process_one_record(pool: Any, record: dict[str, Any]) -> None:
         and isinstance(parsed.get("body"), dict)
     ):
         kind = parsed.get("kind")
-        headers = parsed.get("headers") or {}
+        if isinstance(kind, str):
+            kln = kind.strip().lower()
+            if kln == "shipment_status":
+                kind = "shipment_status"
+            elif kln == "pod":
+                kind = "pod"
+        headers = dict(parsed.get("headers") or {})
+        # Same as non-legacy path: secret may live only on SQS message attributes.
+        sec = _sqs_attr_str(message_attributes, "webhookSecret")
+        if sec:
+            headers["x-delhivery-webhook-secret"] = sec
         payload = parsed["body"]
         synthetic_event: dict[str, Any] = {"headers": headers}
     else:
@@ -63,9 +73,10 @@ def _process_one_record(pool: Any, record: dict[str, Any]) -> None:
             log_json(logger, logging.WARNING, "delhivery_sqs_skip", reason="expected_object_json")
             return
         kind_raw = (_sqs_attr_str(message_attributes, "webhookKind") or "").strip()
-        if kind_raw == "shipment_status":
+        kind_lower = kind_raw.lower()
+        if kind_lower == "shipment_status":
             kind = "shipment_status"
-        elif kind_raw == "pod":
+        elif kind_lower == "pod":
             kind = "pod"
         else:
             log_json(logger, logging.WARNING, "delhivery_sqs_unknown_kind", kind=kind_raw or None)
