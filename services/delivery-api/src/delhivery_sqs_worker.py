@@ -15,6 +15,7 @@ from khanal_shared.logging import configure_logging, log_json
 from src.common import delhivery_secret_error_response, header_ci
 from src.delhivery_models import normalize_pod_webhook, normalize_shipment_webhook
 from src.delhivery_store import apply_pod_webhook, apply_shipment_status_webhook
+from src.pod_epod_s3 import maybe_upload_epod_clear_b64
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +126,8 @@ def _process_one_record(pool: Any, record: dict[str, Any]) -> None:
         if fields is None:
             log_json(logger, logging.WARNING, "delhivery_sqs_skip", reason="missing_pod_identifiers")
             return
+        # Optional: decode EPOD → object in S3; DB stores HTTPS ``pod_url`` (not ``epod_b64``).
+        maybe_upload_epod_clear_b64(fields)
         with pool.connection() as conn:
             new_pod_id = apply_pod_webhook(conn, fields)
         if new_pod_id is None:

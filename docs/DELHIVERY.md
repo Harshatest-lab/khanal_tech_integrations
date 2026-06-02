@@ -6,7 +6,7 @@
 
 1. **API Gateway (REST, regional)** — `POST` on each route integrates **directly** with **SQS `SendMessage`**. The client may send **`X-Delhivery-Webhook-Secret`** (optional **`method.request`** header for VTL **`$input.params`**). Mapping templates URL-encode the JSON body, set **`webhookKind`**, and add **`webhookSecret`** only when the header is non-empty (SQS rejects empty string message attribute values). Response is fixed **`{"ok": true}`**. **No ingest Lambda** on the HTTP path.
 2. **`DelhiveryWebhookQueue`** — buffers webhook payloads; failed processing retries then **DLQ** after 5 receives.
-3. **`delhiveryWebhookWorker`** (SQS trigger, **VPC** + shared layer) — reads **raw Delhivery JSON** from the message body and **`webhookKind`** from message attributes; validates **`X-Delhivery-Webhook-Secret`** when **`DELHIVERY_WEBHOOK_SECRET`** is set and **`DELHIVERY_SKIP_WEBHOOK_SECRET`** is not enabled (via synthetic headers from **`webhookSecret`** attribute when present). Writes **`delhivery_lr`** + **`delhivery_lr_status_events`** for shipment status; for POD, appends **`delhivery_lr_pod`** and sets **`delhivery_lr.latest_pod_id`** + **`pod_received`** when a matching **`delhivery_lr`** row exists (no dependency on **Delivered** status).
+3. **`delhiveryWebhookWorker`** (SQS trigger, **VPC** + shared layer) — reads **raw Delhivery JSON** from the message body and **`webhookKind`** from message attributes; validates **`X-Delhivery-Webhook-Secret`** when **`DELHIVERY_WEBHOOK_SECRET`** is set and **`DELHIVERY_SKIP_WEBHOOK_SECRET`** is not enabled (via synthetic headers from **`webhookSecret`** attribute when present). Writes **`delhivery_lr`** + **`delhivery_lr_status_events`** for shipment status; for POD, optionally decodes base64 **EPOD** to **`POD_S3_BUCKET`**, then appends **`delhivery_lr_pod`** and sets **`delhivery_lr.latest_pod_id`** + **`pod_received`** when a matching **`delhivery_lr`** row exists (no dependency on **Delivered** status).
 
 Delhivery’s HTTP wait time no longer includes any Lambda cold start on receive (only API Gateway + SQS).
 
@@ -42,7 +42,7 @@ Tables:
 
 - **`delhivery_lr`** — one row per `lrnum`: latest `delhivery_status`, optional `status_type`, last webhook payload, full **track** response in `raw_tracking` (**from Frappe**, not Lambda). **`latest_pod_id`** points at the newest **`delhivery_lr_pod`** row; **`pod_received`** is set when at least one POD has been stored for that LR.
 - **`delhivery_lr_status_events`** — append-only audit of each shipment-status webhook.
-- **`delhivery_lr_pod`** — append-only POD history (re-triggers / revised PODs = multiple rows per `lrnum`). Columns include **`epod_b64`**, optional **`pod_url`** (e.g. time-limited S3 link), and **`pod_format`** (`base64` \| `url` \| `mixed` \| `raw`). Inserts require a matching **`delhivery_lr`** row (by **`lrnum`** in the payload, or **`waybill`** matching **`delhivery_lr.waybill`**); otherwise the message is acknowledged and **`delhivery_pod_skipped`** is logged.
+- **`delhivery_lr_pod`** — append-only POD history (re-triggers / revised PODs = multiple rows per `lrnum`). Columns include **`epod_b64`** (only when S3 upload is disabled), optional **`pod_url`** (HTTPS object URL in your bucket, or a time-limited URL from Delhivery), and **`pod_format`** (`base64` \| `url` \| `mixed` \| `raw`). When **`POD_S3_BUCKET`** is configured, base64 **EPOD** is decoded in Lambda, written to S3, and the row stores **`pod_url`** with **`epod_b64`** left null (full webhook JSON remains in **`raw_payload`**). Inserts require a matching **`delhivery_lr`** row (by **`lrnum`** in the payload, or **`waybill`** matching **`delhivery_lr.waybill`**); otherwise the message is acknowledged and **`delhivery_pod_skipped`** is logged.
 
 ## Frappe → PostgreSQL (tracking snapshot)
 
@@ -123,8 +123,31 @@ Each accepted push appends **`delhivery_lr_pod`** and moves **`delhivery_lr.late
 
 - **`DATABASE_URL`** — PostgreSQL DSN (RDS / RDS Proxy recommended).
 - **`DELHIVERY_WEBHOOK_SECRET`** — optional; verified in the **worker** using message attributes (see above).
+- **`POD_S3_BUCKET`** — optional; when set, POD webhooks that include base64 **EPOD** are decoded and stored in this bucket, and Postgres gets a stable HTTPS **`pod_url`** (see below). Default at deploy time if unset: **`delivery-api-<stage>-delhivery-epod`** (IAM is scoped to that name unless you override **`POD_S3_BUCKET`**).
+- **`POD_S3_PREFIX`** — optional object key prefix (default **`delhivery-pod`**). Objects look like **`{prefix}/{lrnum-or-waybill}/{uuid}.pdf`** (or **`.jpg`** / **`.png`** / **`.bin`** from content sniffing).
 
-`serverless.yml` passes `DATABASE_URL` and `DELHIVERY_WEBHOOK_SECRET` from the shell environment at deploy time (`${env:...}`). Set them in GitHub Actions / your deploy shell.
+`serverless.yml` passes these from the shell environment at deploy time (`${env:...}`). Set them in GitHub Actions / your deploy shell.
+
+## AWS: S3 bucket + VPC for POD uploads
+
+**`delhiveryWebhookWorker`** runs in a **VPC** to reach RDS. S3 is reached over the AWS network, not the public internet from the function’s subnets.
+
+1. **Create an S3 bucket** (same region as the stack, e.g. `us-east-1`):
+   - Name it either the **default** expected by deploy (**`delivery-api-<stage>-delhivery-epod`**) **or** any name you prefer; if you use a custom name, set **`POD_S3_BUCKET=<that-name>`** when you run **`serverless deploy`** so Lambda env and IAM match the bucket.
+   - **Block Public Access** on (recommended). The worker stores a **virtual-hosted HTTPS URL** in **`pod_url`**; objects stay private unless you add CloudFront or presigned GET logic in your app.
+   - Default encryption (SSE-S3 or SSE-KMS) is fine; the worker uses ordinary **`PutObject`** (no extra KMS IAM in the template yet — if you enforce KMS on the bucket, add **`kms:Encrypt`/`kms:GenerateDataKey`** on the key to the Lambda role).
+
+2. **VPC connectivity to S3** (required for private subnets without a NAT gateway):
+   - VPC → **Endpoints** → **Create endpoint** → service **`com.amazonaws.<region>.s3`** → type **Gateway**.
+   - Attach it to the **route tables** used by the Lambda subnets (same subnets as in **`serverless.yml`**). Without this (and without NAT), **`PutObject`** will time out.
+
+3. **IAM**: the Serverless stack grants **`s3:PutObject`** on **`arn:aws:s3:::<POD_S3_BUCKET>/*`**. No change needed in the console if you deploy after the bucket exists and names align.
+
+4. **Redeploy** `delivery-api` after **`POD_S3_BUCKET`** / bucket creation / VPC endpoint changes.
+
+5. **Optional GitHub Actions**: add repository secrets **`POD_S3_BUCKET`** and **`POD_S3_PREFIX`** and pass them in the deploy workflow `env` block so prod/staging use the right bucket.
+
+**Note:** Delhivery **EPOD** is usually PDF bytes after base64 decode; it can be image data. Unknown binary is uploaded as **`application/octet-stream`** with a **`.bin`** suffix. If decode or upload fails, the worker logs **`delhivery_pod_s3_upload_failed`** and **re-raises** so SQS retries (then DLQ after max receives).
 
 ## After deploy — checklist in AWS / Delhivery
 

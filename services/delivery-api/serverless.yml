@@ -5,6 +5,9 @@ frameworkVersion: "3"
 # Bump when changing REST API integrations/methods so API Gateway gets a new Deployment.
 custom:
   delhiveryApiDeploymentVersion: 24
+  # Default IAM + Lambda env bucket name (override with POD_S3_BUCKET at deploy).
+  podS3BucketDefault: ${self:service}-${self:provider.stage}-delhivery-epod
+  podS3Bucket: ${env:POD_S3_BUCKET, self:custom.podS3BucketDefault}
 
 provider:
   name: aws
@@ -13,6 +16,13 @@ provider:
   region: ${opt:region, 'us-east-1'}
   memorySize: 512
   timeout: 20
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+          Resource: arn:aws:s3:::${self:custom.podS3Bucket}/*
   environment:
     STAGE: ${self:provider.stage}
     LOG_LEVEL: INFO
@@ -20,6 +30,9 @@ provider:
     DELHIVERY_WEBHOOK_SECRET: ${env:DELHIVERY_WEBHOOK_SECRET, ''}
     # Dev only: when true/1/yes, worker does not enforce X-Delhivery-Webhook-Secret (public webhook URL — do not use in prod).
     DELHIVERY_SKIP_WEBHOOK_SECRET: ${env:DELHIVERY_SKIP_WEBHOOK_SECRET, 'false'}
+    # When set, POD webhooks with base64 EPOD are decoded and stored in this bucket; DB keeps HTTPS pod_url only.
+    POD_S3_BUCKET: ${self:custom.podS3Bucket}
+    POD_S3_PREFIX: ${env:POD_S3_PREFIX, 'delhivery-pod'}
 
 layers:
   shared:

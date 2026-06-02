@@ -23,6 +23,8 @@ npm install
 npx serverless deploy --stage dev
 ```
 
+Optional at deploy: **`POD_S3_BUCKET`** (defaults to **`delivery-api-<stage>-delhivery-epod`**) and **`POD_S3_PREFIX`** for base64 EPOD → S3 + **`pod_url`** in Postgres. See [DELHIVERY.md](../../docs/DELHIVERY.md) (S3 + VPC endpoint checklist).
+
 ## Tests
 
 From repo root: `pytest -q` (includes `services/delivery-api/tests`).

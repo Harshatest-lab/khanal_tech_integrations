@@ -44,6 +44,9 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DELHIVERY_WEBHOOK_SECRET: ${{ secrets.DELHIVERY_WEBHOOK_SECRET }}
+          # Optional: S3 bucket for base64 EPOD → object; must match IAM bucket name at deploy.
+          POD_S3_BUCKET: ${{ secrets.POD_S3_BUCKET }}
+          POD_S3_PREFIX: ${{ secrets.POD_S3_PREFIX }}
         run: |
           npm install
           npx serverless deploy --stage ${{ inputs.stage }}
