@@ -16,6 +16,26 @@ def lrnum_from_track_response(body: dict[str, Any]) -> str | None:
     return None
 
 
+def _normalize_lr_key(raw: Any) -> str | None:
+    """Strip whitespace and invisible Unicode so ``lrnum`` matches ``delhivery_lr.lrnum`` (Postgres ``btrim`` won't remove ZWSP/BOM)."""
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        s = str(raw)
+    elif isinstance(raw, float) and raw == int(raw):
+        s = str(int(raw))
+    elif isinstance(raw, str):
+        s = raw
+    else:
+        return None
+    for ch in ("\ufeff", "\u200b", "\u200c", "\u200d"):
+        s = s.replace(ch, "")
+    s = s.strip()
+    return s if s else None
+
+
 def _first_non_empty_str(payload: dict[str, Any], *keys: str) -> str | None:
     for k in keys:
         v = payload.get(k)
@@ -64,11 +84,12 @@ def normalize_pod_webhook(payload: dict[str, Any]) -> dict[str, Any] | None:
 
     Multiple POD pushes per LR (re-triggers / revised PODs) are normal.
     """
-    lrnum = payload.get("lrnum") or payload.get("lr_num")
-    lrnum_s = lrnum.strip() if isinstance(lrnum, str) and lrnum.strip() else None
+    lr_raw = payload.get("lrnum")
+    if lr_raw is None:
+        lr_raw = payload.get("lr_num")
+    lrnum_s = _normalize_lr_key(lr_raw)
 
-    waybill = payload.get("waybill")
-    waybill_s = waybill.strip() if isinstance(waybill, str) and waybill.strip() else None
+    waybill_s = _normalize_lr_key(payload.get("waybill"))
 
     if not lrnum_s and not waybill_s:
         return None

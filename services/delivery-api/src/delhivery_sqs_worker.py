@@ -119,7 +119,7 @@ def _process_one_record(pool: Any, record: dict[str, Any]) -> None:
         if new_pod_id is None:
             log_json(
                 logger,
-                logging.INFO,
+                logging.WARNING,
                 "delhivery_pod_skipped",
                 lrnum=fields.get("lrnum"),
                 waybill=fields.get("waybill"),

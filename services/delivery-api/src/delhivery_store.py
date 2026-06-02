@@ -53,14 +53,14 @@ WITH resolved AS (
     CASE
       WHEN %(lrnum)s IS NOT NULL AND btrim(%(lrnum)s) <> '' THEN btrim(%(lrnum)s)
       WHEN %(waybill)s IS NOT NULL AND btrim(%(waybill)s) <> '' THEN (
-        SELECT d.lrnum FROM delhivery_lr d WHERE d.waybill = btrim(%(waybill)s) LIMIT 1
+        SELECT d.lrnum FROM delhivery_lr d WHERE btrim(d.waybill) = btrim(%(waybill)s) LIMIT 1
       )
       ELSE NULL
     END AS lrnum
 ),
 exists_ok AS (
   SELECT r.lrnum FROM resolved r
-  INNER JOIN delhivery_lr d ON d.lrnum = r.lrnum
+  INNER JOIN delhivery_lr d ON btrim(d.lrnum) = r.lrnum
 ),
 ins AS (
   INSERT INTO delhivery_lr_pod (lrnum, waybill, order_id, epod_b64, pod_url, pod_format, raw_payload)

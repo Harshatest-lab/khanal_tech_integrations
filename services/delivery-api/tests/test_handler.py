@@ -148,6 +148,20 @@ def test_normalize_pod_webhook_waybill_only_for_lr_lookup() -> None:
     assert fields["epod_b64"] == "abc="
 
 
+def test_normalize_pod_webhook_accepts_int_lrnum() -> None:
+    payload = {"lrnum": 220256789, "EPOD": "x"}
+    fields = normalize_pod_webhook(payload)
+    assert fields is not None
+    assert fields["lrnum"] == "220256789"
+
+
+def test_normalize_pod_webhook_strips_zero_width_in_lrnum() -> None:
+    payload = {"lrnum": "\u200b220256789", "EPOD": "x"}
+    fields = normalize_pod_webhook(payload)
+    assert fields is not None
+    assert fields["lrnum"] == "220256789"
+
+
 def test_normalize_pod_webhook_mixed_epod_and_url() -> None:
     payload = {
         "lrnum": "L1",
