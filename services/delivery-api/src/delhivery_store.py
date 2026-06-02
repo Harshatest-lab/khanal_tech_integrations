@@ -48,15 +48,21 @@ SELECT upserted.lrnum, %(payload)s::jsonb FROM upserted;
 # Resolve lrnum from payload or waybill lookup; insert POD only when parent LR exists;
 # set delhivery_lr.latest_pod_id + pod_received (independent of shipment status / Delivered).
 APPLY_POD_WEBHOOK = """
-WITH resolved AS (
+WITH bound AS (
+  SELECT
+    CAST(%(lrnum)s AS text) AS lrnum_in,
+    CAST(%(waybill)s AS text) AS waybill_in
+),
+resolved AS (
   SELECT
     CASE
-      WHEN %(lrnum)s IS NOT NULL AND btrim(%(lrnum)s) <> '' THEN btrim(%(lrnum)s)
-      WHEN %(waybill)s IS NOT NULL AND btrim(%(waybill)s) <> '' THEN (
-        SELECT d.lrnum FROM delhivery_lr d WHERE btrim(d.waybill) = btrim(%(waybill)s) LIMIT 1
+      WHEN btrim(b.lrnum_in) <> '' THEN btrim(b.lrnum_in)
+      WHEN btrim(b.waybill_in) <> '' THEN (
+        SELECT d.lrnum FROM delhivery_lr d WHERE btrim(d.waybill) = btrim(b.waybill_in) LIMIT 1
       )
       ELSE NULL
     END AS lrnum
+  FROM bound b
 ),
 exists_ok AS (
   SELECT r.lrnum FROM resolved r
@@ -66,13 +72,14 @@ ins AS (
   INSERT INTO delhivery_lr_pod (lrnum, waybill, order_id, epod_b64, pod_url, pod_format, raw_payload)
   SELECT
     e.lrnum,
-    %(waybill)s,
+    b.waybill_in,
     %(order_id)s,
     %(epod_b64)s,
     %(pod_url)s,
     %(pod_format)s,
     %(raw_payload)s::jsonb
   FROM exists_ok e
+  CROSS JOIN bound b
   RETURNING id, lrnum
 ),
 upd AS (
