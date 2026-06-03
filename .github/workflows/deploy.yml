@@ -47,6 +47,10 @@ jobs:
           # Optional: S3 bucket for base64 EPOD → object; must match IAM bucket name at deploy.
           POD_S3_BUCKET: ${{ secrets.POD_S3_BUCKET }}
           POD_S3_PREFIX: ${{ secrets.POD_S3_PREFIX }}
+          SAP_SL_BASE_URL: ${{ secrets.SAP_SL_BASE_URL }}
+          SAP_SL_COMPANYDB: ${{ secrets.SAP_SL_COMPANYDB }}
+          SAP_SL_USERNAME: ${{ secrets.SAP_SL_USERNAME }}
+          SAP_SL_PASSWORD: ${{ secrets.SAP_SL_PASSWORD }}
         run: |
           npm install
           npx serverless deploy --stage ${{ inputs.stage }}

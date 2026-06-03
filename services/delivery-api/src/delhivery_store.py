@@ -69,7 +69,7 @@ exists_ok AS (
   INNER JOIN delhivery_lr d ON btrim(d.lrnum) = r.lrnum
 ),
 ins AS (
-  INSERT INTO delhivery_lr_pod (lrnum, waybill, order_id, epod_b64, pod_url, pod_format, raw_payload)
+  INSERT INTO delhivery_lr_pod (lrnum, waybill, order_id, epod_b64, pod_url, pod_format, pod_date, raw_payload)
   SELECT
     e.lrnum,
     b.waybill_in,
@@ -77,6 +77,7 @@ ins AS (
     %(epod_b64)s,
     %(pod_url)s,
     %(pod_format)s,
+    %(pod_date)s::date,
     %(raw_payload)s::jsonb
   FROM exists_ok e
   CROSS JOIN bound b
@@ -90,16 +91,51 @@ upd AS (
     updated_at = now()
   FROM ins i
   WHERE l.lrnum = i.lrnum
-  RETURNING i.id
+  RETURNING i.id, i.lrnum
 )
-SELECT id FROM upd;
+SELECT id, lrnum FROM upd;
 """
 
 
-def apply_pod_webhook(conn: Any, fields: dict[str, Any]) -> int | None:
+FETCH_DOC_ENTRY_FOR_LR = """
+SELECT NULLIF(btrim(doc_entry), '') AS doc_entry
+FROM delhivery_lr
+WHERE btrim(lrnum) = btrim(%(lrnum)s)
+LIMIT 1
+"""
+
+
+UPDATE_POD_SAP_AUDIT = """
+UPDATE delhivery_lr_pod SET sap_pod_response = (%(doc)s)::jsonb WHERE id = %(pod_id)s
+"""
+
+
+def save_pod_sap_sl_audit(conn: Any, pod_id: int, audit: dict[str, Any]) -> None:
+    """Persist SAP Service Layer POD sync outcome on the POD row (does not touch ``delhivery_lr.sap_response``)."""
+    _execute_one_statement(conn, UPDATE_POD_SAP_AUDIT, {"pod_id": pod_id, "doc": json.dumps(audit)})
+
+
+def fetch_doc_entry_for_lr(conn: Any, lrnum: str) -> str | None:
+    """Return ``delhivery_lr.doc_entry`` when set (SAP Service Layer ``DocEntry``)."""
+    prev = conn.autocommit
+    conn.autocommit = True
+    try:
+        cur = conn.execute(FETCH_DOC_ENTRY_FOR_LR, {"lrnum": lrnum})
+        row = cur.fetchone()
+        if row is None or row[0] is None:
+            return None
+        return str(row[0]).strip()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.autocommit = prev
+
+
+def apply_pod_webhook(conn: Any, fields: dict[str, Any]) -> tuple[int, str] | None:
     """Append a POD row when ``delhivery_lr`` exists; update ``latest_pod_id`` + ``pod_received``.
 
-    Returns new ``delhivery_lr_pod.id``, or ``None`` if no matching LR (unknown lrnum / waybill).
+    Returns ``(new delhivery_lr_pod.id, resolved lrnum)``, or ``None`` if no matching LR.
     """
     # Never pass None for lrnum/waybill placeholders: ``btrim(NULL)`` makes Postgres unable to
     # infer parameter types (psycopg ``AmbiguousParameter`` on ``WHEN %(lrnum)s IS NOT NULL ...``).
@@ -120,13 +156,14 @@ def apply_pod_webhook(conn: Any, fields: dict[str, Any]) -> int | None:
                 "epod_b64": fields.get("epod_b64"),
                 "pod_url": fields.get("pod_url"),
                 "pod_format": fields.get("pod_format") or "raw",
+                "pod_date": fields.get("pod_date"),
                 "raw_payload": json.dumps(fields["payload"]),
             },
         )
         row = cur.fetchone()
         if row is None or row[0] is None:
             return None
-        return int(row[0])
+        return (int(row[0]), str(row[1]).strip())
     except Exception:
         conn.rollback()
         raise

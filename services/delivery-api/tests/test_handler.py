@@ -101,7 +101,9 @@ def test_worker_pod_from_attributes(monkeypatch: pytest.MonkeyPatch) -> None:
         },
     }
     with patch("src.delhivery_sqs_worker.apply_pod_webhook") as apply_fn:
-        _process_one_record(pool, record)
+        apply_fn.return_value = (1, "LR1")
+        with patch("src.delhivery_sqs_worker.maybe_sync_invoice_pod_after_db"):
+            _process_one_record(pool, record)
     apply_fn.assert_called_once()
 
 
@@ -125,7 +127,27 @@ def test_normalize_pod_webhook_full_payload() -> None:
     assert fields["epod_b64"] == "base64encodedstring=="
     assert fields["pod_url"] is None
     assert fields["pod_format"] == "base64"
+    assert fields.get("pod_date") is None
     assert fields["payload"] is payload
+
+
+def test_normalize_pod_date_from_unix_timestamp() -> None:
+    from datetime import date
+
+    # 2021-01-01 00:00:00 UTC
+    payload = {"lrnum": "1", "EPOD": "e30=", "timestamp": 1609459200}
+    fields = normalize_pod_webhook(payload)
+    assert fields is not None
+    assert fields["pod_date"] == date(2021, 1, 1)
+
+
+def test_normalize_pod_date_from_iso_string() -> None:
+    from datetime import date
+
+    payload = {"lrnum": "1", "EPOD": "e30=", "PODDate": "2025-12-01"}
+    fields = normalize_pod_webhook(payload)
+    assert fields is not None
+    assert fields["pod_date"] == date(2025, 12, 1)
 
 
 def test_normalize_pod_webhook_pod_url_only() -> None:

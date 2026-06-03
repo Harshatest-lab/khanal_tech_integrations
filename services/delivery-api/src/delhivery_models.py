@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date, datetime, timezone
 from typing import Any
 
 
@@ -41,6 +42,52 @@ def _first_non_empty_str(payload: dict[str, Any], *keys: str) -> str | None:
         v = payload.get(k)
         if isinstance(v, str) and v.strip():
             return v.strip()
+    return None
+
+
+def _parse_pod_date(payload: dict[str, Any]) -> date | None:
+    """Best-effort POD / delivery date from Delhivery-style keys (maps to SAP ``U_POD_DATE``)."""
+    for k in (
+        "U_POD_DATE",
+        "PODDate",
+        "podDate",
+        "pod_date",
+        "POD_DATE",
+        "deliveryDate",
+        "DeliveredDate",
+        "delivered_date",
+    ):
+        v = payload.get(k)
+        if v is None:
+            continue
+        if isinstance(v, datetime):
+            return v.date()
+        if type(v) is date:
+            return v
+        if isinstance(v, str) and v.strip():
+            s = v.strip()
+            try:
+                if "T" in s or s.endswith("Z") or "+" in s[-6:]:
+                    return datetime.fromisoformat(s.replace("Z", "+00:00")).date()
+                return date.fromisoformat(s[:10])
+            except ValueError:
+                continue
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            try:
+                return datetime.fromtimestamp(float(v), tz=timezone.utc).date()
+            except (OSError, ValueError, OverflowError):
+                continue
+    ts = payload.get("timestamp")
+    if isinstance(ts, (int, float)) and not isinstance(ts, bool):
+        try:
+            return datetime.fromtimestamp(float(ts), tz=timezone.utc).date()
+        except (OSError, ValueError, OverflowError):
+            return None
+    if isinstance(ts, str) and ts.strip().isdigit():
+        try:
+            return datetime.fromtimestamp(int(ts.strip()), tz=timezone.utc).date()
+        except (OSError, ValueError, OverflowError):
+            return None
     return None
 
 
@@ -121,6 +168,8 @@ def normalize_pod_webhook(payload: dict[str, Any]) -> dict[str, Any] | None:
     else:
         pod_format = "raw"
 
+    pod_date = _parse_pod_date(payload)
+
     return {
         "lrnum": lrnum_s,
         "waybill": waybill_s,
@@ -128,6 +177,7 @@ def normalize_pod_webhook(payload: dict[str, Any]) -> dict[str, Any] | None:
         "epod_b64": epod_s,
         "pod_url": pod_url_s,
         "pod_format": pod_format,
+        "pod_date": pod_date,
         "payload": payload,
     }
 

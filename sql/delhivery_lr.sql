@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS delhivery_lr_pod (
   epod_b64    text,                          -- raw base64 string from Delhivery
   pod_url     text,                          -- time-limited S3 (or other) URL when Delhivery sends URL mode
   pod_format  text,                          -- base64 | url | mixed | raw (hint for clients)
+  pod_date    date,                          -- POD / delivery date from webhook (SAP U_POD_DATE)
+  sap_pod_response jsonb,                     -- Lambda-only: last SAP Service Layer PATCH audit for this POD row (Frappe uses delhivery_lr.sap_response separately)
   raw_payload jsonb       NOT NULL DEFAULT '{}'::jsonb,
   received_at timestamptz NOT NULL DEFAULT now()
 );
@@ -54,6 +56,10 @@ ALTER TABLE delhivery_lr ADD COLUMN IF NOT EXISTS pod_received boolean NOT NULL 
 
 ALTER TABLE delhivery_lr_pod ADD COLUMN IF NOT EXISTS pod_url text;
 ALTER TABLE delhivery_lr_pod ADD COLUMN IF NOT EXISTS pod_format text;
+-- POD delivery / document date from webhook (mirrors SAP U_POD_DATE when synced).
+ALTER TABLE delhivery_lr_pod ADD COLUMN IF NOT EXISTS pod_date date;
+-- SAP B1 POD→Invoice PATCH audit (Lambda); keep ``delhivery_lr.sap_response`` for Frappe LR payloads.
+ALTER TABLE delhivery_lr_pod ADD COLUMN IF NOT EXISTS sap_pod_response jsonb;
 
 -- FK from parent → latest pod row (idempotent add).
 DO $$

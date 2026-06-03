@@ -83,8 +83,23 @@ def upload_epod_to_s3(
         client = s3_client
     else:
         import boto3
+        from botocore.config import Config
 
-        client = boto3.client("s3", region_name=region)
+        # Avoid hanging until Lambda timeout when VPC↔S3 routing is wrong (fail fast + clear error in logs).
+        client = boto3.client(
+            "s3",
+            region_name=region,
+            config=Config(connect_timeout=8, read_timeout=25, retries={"max_attempts": 2, "mode": "standard"}),
+        )
+    log_json(
+        logger,
+        logging.INFO,
+        "delhivery_pod_s3_put_start",
+        bucket=bucket,
+        key=key,
+        bytes=len(data),
+        content_type=ctype,
+    )
     client.put_object(Bucket=bucket, Key=key, Body=data, ContentType=ctype)
 
     return s3_object_https_url(bucket=bucket, region=region, key=key)

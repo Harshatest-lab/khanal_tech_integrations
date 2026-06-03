@@ -16,6 +16,7 @@ from src.common import delhivery_secret_error_response, header_ci
 from src.delhivery_models import normalize_pod_webhook, normalize_shipment_webhook
 from src.delhivery_store import apply_pod_webhook, apply_shipment_status_webhook
 from src.pod_epod_s3 import maybe_upload_epod_clear_b64
+from src.sap_sl_pod import maybe_sync_invoice_pod_after_db
 
 logger = logging.getLogger(__name__)
 
@@ -129,8 +130,8 @@ def _process_one_record(pool: Any, record: dict[str, Any]) -> None:
         # Optional: decode EPOD → object in S3; DB stores HTTPS ``pod_url`` (not ``epod_b64``).
         maybe_upload_epod_clear_b64(fields)
         with pool.connection() as conn:
-            new_pod_id = apply_pod_webhook(conn, fields)
-        if new_pod_id is None:
+            pod_result = apply_pod_webhook(conn, fields)
+        if pod_result is None:
             log_json(
                 logger,
                 logging.WARNING,
@@ -140,11 +141,12 @@ def _process_one_record(pool: Any, record: dict[str, Any]) -> None:
                 reason="no_matching_delhivery_lr",
             )
         else:
+            new_pod_id, resolved_lrnum = pod_result
             log_json(
                 logger,
                 logging.INFO,
                 "delhivery_pod_received",
-                lrnum=fields.get("lrnum"),
+                lrnum=resolved_lrnum,
                 waybill=fields.get("waybill"),
                 order_id=fields.get("order_id"),
                 pod_id=new_pod_id,
@@ -152,6 +154,8 @@ def _process_one_record(pool: Any, record: dict[str, Any]) -> None:
                 has_epod=bool(fields.get("epod_b64")),
                 has_pod_url=bool(fields.get("pod_url")),
             )
+            # SAP Service Layer (optional): PATCH Invoice after RDS — failures logged only.
+            maybe_sync_invoice_pod_after_db(pool, resolved_lrnum, fields, new_pod_id)
         return
 
     log_json(logger, logging.WARNING, "delhivery_sqs_unknown_kind", kind=kind)
