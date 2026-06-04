@@ -2,61 +2,25 @@
 
 from __future__ import annotations
 
-import http.cookiejar
 import json
 import logging
-import os
 import re
-import ssl
 import traceback
 from datetime import datetime, timezone
 from typing import Any
-from urllib.error import HTTPError
-from urllib.request import HTTPCookieProcessor, HTTPSHandler, Request, build_opener
 
 from khanal_shared.logging import log_json
 
 from src.delhivery_store import fetch_doc_entry_for_lr, save_pod_sap_sl_audit
+from khanal_shared.sap_sl import (
+    build_opener_and_base_from_env,
+    build_opener_and_base_via_ssm,
+    sap_sl_enabled,
+    sap_sl_request_json,
+    sap_sl_use_ssm,
+)
 
 logger = logging.getLogger(__name__)
-
-
-def sap_sl_enabled() -> bool:
-    base = (os.environ.get("SAP_SL_BASE_URL") or "").strip()
-    company = (os.environ.get("SAP_SL_COMPANYDB") or "").strip()
-    user = (os.environ.get("SAP_SL_USERNAME") or "").strip()
-    pw = (os.environ.get("SAP_SL_PASSWORD") or "").strip()
-    return bool(base and company and user and pw)
-
-
-def _build_opener() -> Any:
-    ctx = ssl.create_default_context()
-    jar = http.cookiejar.CookieJar()
-    return build_opener(HTTPCookieProcessor(jar), HTTPSHandler(context=ctx))
-
-
-def _request_json(
-    opener: Any,
-    method: str,
-    url: str,
-    body: dict[str, Any] | None = None,
-) -> tuple[int, dict[str, Any] | list[Any] | None]:
-    """Return ``(http_status, parsed_json_or_none)``. PATCH often returns 204 with empty body."""
-    raw = None if body is None else json.dumps(body).encode("utf-8")
-    headers = {}
-    if raw is not None:
-        headers["Content-Type"] = "application/json"
-    req = Request(url, data=raw, method=method, headers=headers)
-    try:
-        with opener.open(req, timeout=90) as resp:
-            status = resp.status
-            out = resp.read()
-            if not out:
-                return status, None
-            return status, json.loads(out.decode("utf-8"))
-    except HTTPError as e:
-        err_body = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"SAP SL HTTP {e.code}: {err_body[:800]}") from e
 
 
 def _safe_save_pod_sap_audit(pool: Any, pod_row_id: int, audit: dict[str, Any]) -> None:
@@ -161,38 +125,29 @@ def maybe_sync_invoice_pod_after_db(
         return
     doc_entry = int(de_s)
 
-    base = os.environ["SAP_SL_BASE_URL"].strip().rstrip("/")
-    company = os.environ["SAP_SL_COMPANYDB"].strip()
-    user = os.environ["SAP_SL_USERNAME"].strip()
-    password = os.environ["SAP_SL_PASSWORD"].strip()
-
     try:
-        opener = _build_opener()
-        login_url = f"{base}/Login"
-        st_login, _ = _request_json(
-            opener,
-            "POST",
-            login_url,
-            {"CompanyDB": company, "UserName": user, "Password": password},
-        )
-        if st_login != 200:
-            _safe_save_pod_sap_audit(
-                pool,
-                pod_row_id,
-                {
-                    "ok": False,
-                    "phase": "login",
-                    "http_status": st_login,
-                    "doc_entry": doc_entry,
-                    "lrnum": resolved_lrnum,
-                    "synced_at": datetime.now(timezone.utc).isoformat(),
-                },
-            )
-            log_json(logger, logging.WARNING, "delhivery_sap_pod_login_bad_status", status=st_login)
-            return
+        if sap_sl_use_ssm():
+            opener, base = build_opener_and_base_via_ssm()
+        else:
+            opener, base, st_login = build_opener_and_base_from_env()
+            if st_login != 200:
+                _safe_save_pod_sap_audit(
+                    pool,
+                    pod_row_id,
+                    {
+                        "ok": False,
+                        "phase": "login",
+                        "http_status": st_login,
+                        "doc_entry": doc_entry,
+                        "lrnum": resolved_lrnum,
+                        "synced_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+                log_json(logger, logging.WARNING, "delhivery_sap_pod_login_bad_status", status=st_login)
+                return
 
         get_url = f"{base}/Invoices({doc_entry})?$select=DocEntry,U_LRtrackno"
-        st_get, inv = _request_json(opener, "GET", get_url, None)
+        st_get, inv = sap_sl_request_json(opener, "GET", get_url, None)
         if st_get != 200 or not isinstance(inv, dict):
             log_json(
                 logger,
@@ -254,7 +209,7 @@ def maybe_sync_invoice_pod_after_db(
         }
 
         patch_url = f"{base}/Invoices({doc_entry})"
-        st_patch, patch_body_out = _request_json(opener, "PATCH", patch_url, patch_body)
+        st_patch, patch_body_out = sap_sl_request_json(opener, "PATCH", patch_url, patch_body)
         ok_http = st_patch in (200, 204)
 
         log_json(

@@ -23,6 +23,15 @@ provider:
           Action:
             - s3:PutObject
           Resource: arn:aws:s3:::${self:custom.podS3Bucket}/*
+        # Optional: SAP SL session + config in SSM when SAP_SL_USE_SSM=true (see docs/DELHIVERY.md).
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+            - ssm:PutParameter
+          Resource:
+            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/sl_config
+            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/credentials
+            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/b1_session
   environment:
     STAGE: ${self:provider.stage}
     LOG_LEVEL: INFO
@@ -34,6 +43,8 @@ provider:
     POD_S3_BUCKET: ${self:custom.podS3Bucket}
     POD_S3_PREFIX: ${env:POD_S3_PREFIX, 'delhivery-pod'}
     # Optional: SAP B1 Service Layer — PATCH Invoices(DocEntry) with U_Pod_Link / U_POD_DATE / U_LRtrackno after POD insert.
+    # When SAP_SL_USE_SSM is 1/true/yes, read base URL + credentials + session cache from SSM (/sap/sl_config, /sap/credentials, /sap/b1_session).
+    SAP_SL_USE_SSM: ${env:SAP_SL_USE_SSM, ''}
     SAP_SL_BASE_URL: ${env:SAP_SL_BASE_URL, ''}
     SAP_SL_COMPANYDB: ${env:SAP_SL_COMPANYDB, ''}
     SAP_SL_USERNAME: ${env:SAP_SL_USERNAME, ''}

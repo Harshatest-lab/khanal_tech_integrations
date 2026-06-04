@@ -6,7 +6,7 @@
 
 1. **API Gateway (REST, regional)** — `POST` on each route integrates **directly** with **SQS `SendMessage`**. The client may send **`X-Delhivery-Webhook-Secret`** (optional **`method.request`** header for VTL **`$input.params`**). Mapping templates URL-encode the JSON body, set **`webhookKind`**, and add **`webhookSecret`** only when the header is non-empty (SQS rejects empty string message attribute values). Response is fixed **`{"ok": true}`**. **No ingest Lambda** on the HTTP path.
 2. **`DelhiveryWebhookQueue`** — buffers webhook payloads; failed processing retries then **DLQ** after 5 receives.
-3. **`delhiveryWebhookWorker`** (SQS trigger, **VPC** + shared layer) — reads **raw Delhivery JSON** from the message body and **`webhookKind`** from message attributes; validates **`X-Delhivery-Webhook-Secret`** when **`DELHIVERY_WEBHOOK_SECRET`** is set and **`DELHIVERY_SKIP_WEBHOOK_SECRET`** is not enabled (via synthetic headers from **`webhookSecret`** attribute when present). Writes **`delhivery_lr`** + **`delhivery_lr_status_events`** for shipment status; for POD, optionally decodes base64 **EPOD** to **`POD_S3_BUCKET`**, then appends **`delhivery_lr_pod`**, sets **`delhivery_lr.latest_pod_id`** + **`pod_received`** when a matching **`delhivery_lr`** row exists, then optionally **PATCH**es SAP **Invoices** when **`SAP_SL_*`** env is configured and **`doc_entry`** is set (no dependency on **Delivered** status).
+3. **`delhiveryWebhookWorker`** (SQS trigger, **VPC** + shared layer) — reads **raw Delhivery JSON** from the message body and **`webhookKind`** from message attributes; validates **`X-Delhivery-Webhook-Secret`** when **`DELHIVERY_WEBHOOK_SECRET`** is set and **`DELHIVERY_SKIP_WEBHOOK_SECRET`** is not enabled (via synthetic headers from **`webhookSecret`** attribute when present). Writes **`delhivery_lr`** + **`delhivery_lr_status_events`** for shipment status; for POD, optionally decodes base64 **EPOD** to **`POD_S3_BUCKET`**, then appends **`delhivery_lr_pod`**, sets **`delhivery_lr.latest_pod_id`** + **`pod_received`** when a matching **`delhivery_lr`** row exists, then optionally **PATCH**es SAP **Invoices** when SAP is enabled (**`SAP_SL_*`** env **or** **`SAP_SL_USE_SSM`**) and **`doc_entry`** is set (no dependency on **Delivered** status).
 
 Delhivery’s HTTP wait time no longer includes any Lambda cold start on receive (only API Gateway + SQS).
 
@@ -126,14 +126,28 @@ Each accepted push appends **`delhivery_lr_pod`** and moves **`delhivery_lr.late
 - **`POD_S3_BUCKET`** — optional; when set, POD webhooks that include base64 **EPOD** are decoded and stored in this bucket, and Postgres gets a stable HTTPS **`pod_url`** (see below). Default at deploy time if unset: **`delivery-api-<stage>-delhivery-epod`** (IAM is scoped to that name unless you override **`POD_S3_BUCKET`**).
 - **`POD_S3_PREFIX`** — optional object key prefix (default **`delhivery-pod`**). Objects look like **`{prefix}/{lrnum-or-waybill}/{uuid}.pdf`** (or **`.jpg`** / **`.png`** / **`.bin`** from content sniffing).
 
-**SAP Business One Service Layer (optional)** — after a POD row is inserted, the worker can **PATCH** `Invoices(DocEntry)` when **`delhivery_lr.doc_entry`** is set and these env vars are all non-empty:
+**SAP Business One Service Layer (optional)** — after a POD row is inserted, the worker can **PATCH** `Invoices(DocEntry)` when **`delhivery_lr.doc_entry`** is set and either:
+
+**A) Environment variables (classic)** — all of these non-empty:
 
 - **`SAP_SL_BASE_URL`** — e.g. `https://<host>:50000/b1s/v1` (no trailing slash).
 - **`SAP_SL_COMPANYDB`**, **`SAP_SL_USERNAME`**, **`SAP_SL_PASSWORD`** — **Login** body fields.
 
-Flow: **Login** → **GET** `Invoices(docEntry)?$select=DocEntry,U_LRtrackno` → compare **`U_LRtrackno`** to the resolved **`lrnum`** → **PATCH** same resource with **`U_Pod_Link`** (from **`pod_url`**), **`U_POD_DATE`** (from webhook-derived **`pod_date`**, ISO `YYYY-MM-DD` or `null`), **`U_LRtrackno`**. The outcome is stored on the **POD row** in **`delhivery_lr_pod.sap_pod_response`** (HTTP status, phase, `doc_entry`, optional error / response preview, `synced_at`). **`delhivery_lr.sap_response`** is left to **Frappe** for LR-level SAP payloads. Failures also log **`delhivery_sap_pod_*`** and do **not** fail the SQS message (POD is already in Postgres).
+**B) SSM Parameter Store (shared session across Lambdas)** — set **`SAP_SL_USE_SSM`** to **`1`**, **`true`**, or **`yes`**. Then the worker reads:
 
-`serverless.yml` passes these from the shell environment at deploy time (`${env:...}`). Set them in GitHub Actions / your deploy shell.
+| Parameter | JSON keys |
+|-----------|-----------|
+| **`/sap/sl_config`** | `sap_b1_url`, `companydb` (aliases: `SAP_SL_BASE_URL`, `CompanyDB`) |
+| **`/sap/credentials`** | `username`, `password` (aliases: `UserName`, `Password`) |
+| **`/sap/b1_session`** | `b1session`, `routeid`, `expires_on` (UTC ISO recommended, e.g. `2026-06-03T14:00:00Z`), `is_locked` (`true`/`false`) |
+
+On each POD sync it uses a cached session when **`expires_on`** is still in the future; otherwise it sets **`is_locked`**, calls **Login**, and updates **`/sap/b1_session`**. You do **not** need **`SAP_SL_*`** env vars when SSM mode is on (they may remain empty).
+
+**VPC:** **`delhiveryWebhookWorker`** is in a private subnet. To reach **SSM** (`ssm.GetParameter` / `PutParameter`), add a **VPC interface endpoint** for **`com.amazonaws.<region>.ssm`** (and typically **SSM Messages**, **`com.amazonaws.<region>.ec2messages`** if you use Session Manager — not required for Parameter Store API alone) **or** route outbound HTTPS via a **NAT gateway**. Without one of these, SSM calls from the worker will time out.
+
+Flow: **Login** (or reuse SSM session) → **GET** `Invoices(docEntry)?$select=DocEntry,U_LRtrackno` → compare **`U_LRtrackno`** to the resolved **`lrnum`** → **PATCH** same resource with **`U_Pod_Link`** (from **`pod_url`**), **`U_POD_DATE`** (from webhook-derived **`pod_date`**, ISO `YYYY-MM-DD` or `null`), **`U_LRtrackno`**. The outcome is stored on the **POD row** in **`delhivery_lr_pod.sap_pod_response`** (HTTP status, phase, `doc_entry`, optional error / response preview, `synced_at`). **`delhivery_lr.sap_response`** is left to **Frappe** for LR-level SAP payloads. Failures also log **`delhivery_sap_pod_*`** and do **not** fail the SQS message (POD is already in Postgres).
+
+`serverless.yml` passes **`SAP_SL_*`** and **`SAP_SL_USE_SSM`** from the shell environment at deploy time (`${env:...}`). Set them in GitHub Actions / your deploy shell. IAM includes **`ssm:GetParameter`** / **`ssm:PutParameter`** on **`arn:aws:ssm:<region>:*:parameter/sap/sl_config`**, **`.../sap/credentials`**, **`.../sap/b1_session`**. Shared SAP helpers live in **`khanal_shared.sap_sl`** (see repo **`shared/khanal_shared/sap_sl/`**); they are copied into the Lambda layer by **`scripts/build_shared_layer.sh`**.
 
 ## AWS: S3 bucket + VPC for POD uploads
 
