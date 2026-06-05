@@ -49,6 +49,8 @@ provider:
     SAP_SL_COMPANYDB: ${env:SAP_SL_COMPANYDB, ''}
     SAP_SL_USERNAME: ${env:SAP_SL_USERNAME, ''}
     SAP_SL_PASSWORD: ${env:SAP_SL_PASSWORD, ''}
+    # When SAP Service Layer uses a self-signed TLS cert, set to false (dev only). Default verifies cert chain.
+    SAP_SL_VERIFY_SSL: ${env:SAP_SL_VERIFY_SSL, 'true'}
 
 layers:
   shared:

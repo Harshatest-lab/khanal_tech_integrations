@@ -52,6 +52,8 @@ jobs:
           SAP_SL_COMPANYDB: ${{ secrets.SAP_SL_COMPANYDB }}
           SAP_SL_USERNAME: ${{ secrets.SAP_SL_USERNAME }}
           SAP_SL_PASSWORD: ${{ secrets.SAP_SL_PASSWORD }}
+          # Optional: set to false for self-signed SAP SL TLS (dev); omit or true for verify.
+          SAP_SL_VERIFY_SSL: ${{ secrets.SAP_SL_VERIFY_SSL }}
         run: |
           npm install
           npx serverless deploy --stage ${{ inputs.stage }}

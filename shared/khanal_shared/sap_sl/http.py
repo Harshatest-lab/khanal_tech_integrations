@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.cookiejar
 import json
+import os
 import ssl
 from http.cookiejar import Cookie
 from typing import Any
@@ -11,8 +12,20 @@ from urllib.error import HTTPError
 from urllib.request import HTTPCookieProcessor, HTTPSHandler, Request, build_opener
 
 
+def _sap_sl_ssl_context() -> ssl.SSLContext:
+    """Default: verify server cert. Set ``SAP_SL_VERIFY_SSL=false`` for self-signed SAP SL (dev only)."""
+    v = (os.environ.get("SAP_SL_VERIFY_SSL") or "true").strip().lower()
+    insecure = v in ("0", "false", "no", "off")
+    if insecure:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    return ssl.create_default_context()
+
+
 def build_sap_cookie_opener_with_jar() -> tuple[Any, http.cookiejar.CookieJar]:
-    ctx = ssl.create_default_context()
+    ctx = _sap_sl_ssl_context()
     jar = http.cookiejar.CookieJar()
     opener = build_opener(HTTPCookieProcessor(jar), HTTPSHandler(context=ctx))
     return opener, jar
