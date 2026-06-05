@@ -77,8 +77,8 @@ functions:
       securityGroupIds:
         - sg-054440547aa97218e   # delivery-api-lambda
       subnetIds:
-        - subnet-0723a5f0183b06da4   # us-east-1a
-        - subnet-0d282e4d768e260cb   # us-east-1d (same AZ as khanal-db-dev)
+        - subnet-0723a5f0183b06da4   # us-east-1a (NAT — Lambda outbound / SAP)
+        - subnet-0cced34950dc4ad65   # us-east-1b (NAT — Lambda HA; RDS stays in 1d on IGW)
     layers:
       - { Ref: SharedLambdaLayer }
     events:
