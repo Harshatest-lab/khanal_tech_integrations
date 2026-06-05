@@ -50,6 +50,14 @@ def maybe_sync_invoice_pod_after_db(
     which is reserved for Frappe). Swallows errors after logging — POD is already in Postgres; SAP must not poison SQS retries.
     """
     if not sap_sl_enabled():
+        log_json(
+            logger,
+            logging.INFO,
+            "delhivery_sap_pod_skip",
+            reason="sap_not_configured",
+            lrnum=resolved_lrnum,
+            hint="Set SAP_SL_USE_SSM or SAP_SL_* on the Lambda at deploy",
+        )
         return
 
     pod_url = fields.get("pod_url")
