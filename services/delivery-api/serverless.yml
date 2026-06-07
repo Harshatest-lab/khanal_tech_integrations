@@ -13,7 +13,7 @@ provider:
   name: aws
   runtime: python3.12
   stage: ${opt:stage, 'dev'}
-  region: ${opt:region, 'us-east-1'}
+  region: ${opt:region, 'ap-south-1'}
   memorySize: 512
   timeout: 20
   iam:
@@ -75,10 +75,10 @@ functions:
     timeout: 30
     vpc:
       securityGroupIds:
-        - sg-054440547aa97218e   # delivery-api-lambda
+        - sg-0328c65a23a32e9ac   # delivery-api-lambda
       subnetIds:
-        - subnet-0723a5f0183b06da4   # us-east-1a (NAT — Lambda outbound / SAP)
-        - subnet-0cced34950dc4ad65   # us-east-1b (NAT — Lambda HA; RDS stays in 1d on IGW)
+        - subnet-098cc0239f9840668   # us-east-1a (NAT — Lambda outbound / SAP)
+        - subnet-06c2706a4258ec055   # us-east-1b (NAT — Lambda HA; RDS stays in 1d on IGW)
     layers:
       - { Ref: SharedLambdaLayer }
     events:

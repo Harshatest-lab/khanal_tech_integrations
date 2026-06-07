@@ -1,5 +1,7 @@
 # Delhivery LRN integration (Frappe + PostgreSQL + Lambda webhooks)
 
+**Greenfield AWS (VPC, RDS, IAM, endpoints):** see [INFRA_AWS_FROM_SCRATCH.md](./INFRA_AWS_FROM_SCRATCH.md) for a step-by-step build order before deploy.
+
 **Frappe** calls Delhivery’s track API and **writes the snapshot directly to PostgreSQL** (`delhivery_lr`). This repo’s **delivery-api** stack exposes only **Delhivery webhooks** (API Gateway REST + SQS + one worker Lambda): shipment status and POD.
 
 ## Architecture (async, no Lambda on the HTTP ack path)

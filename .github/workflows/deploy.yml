@@ -56,4 +56,4 @@ jobs:
           SAP_SL_VERIFY_SSL: ${{ secrets.SAP_SL_VERIFY_SSL }}
         run: |
           npm install
-          npx serverless deploy --stage ${{ inputs.stage }}
+          npx serverless deploy --stage ${{ inputs.stage }} --region ${{ secrets.AWS_REGION }}
