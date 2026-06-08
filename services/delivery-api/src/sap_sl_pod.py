@@ -11,8 +11,7 @@ from typing import Any
 
 from khanal_shared.logging import log_json
 
-from src.delhivery_models import frappe_grn_key_from_delhivery_status
-from src.delhivery_store import fetch_doc_entry_and_delhivery_status_for_lr, save_pod_sap_sl_audit
+from src.delhivery_store import fetch_doc_entry_for_lr, save_pod_sap_sl_audit
 from khanal_shared.sap_sl import (
     build_opener_and_base_from_env,
     build_opener_and_base_via_ssm,
@@ -47,8 +46,7 @@ def maybe_sync_invoice_pod_after_db(
 ) -> None:
     """If SAP env is set and ``delhivery_lr.doc_entry`` exists, verify ``U_LRtrackno`` then PATCH POD fields.
 
-    PATCH includes ``U_FrappeGRNKey`` (**1** = **Delivered**, **2** = **RTO**, case-insensitive) only when
-    ``delhivery_lr.delhivery_status`` in RDS matches (shipment-status webhooks); otherwise the key is omitted.
+    ``U_FrappeGRNKey`` is updated from the **shipment-status** webhook (see ``sap_sl_shipment``), not here.
 
     Outcome is stored on **this POD row** in ``delhivery_lr_pod.sap_pod_response`` (not ``delhivery_lr.sap_response``,
     which is reserved for Frappe). Swallows errors after logging — POD is already in Postgres; SAP must not poison SQS retries.
@@ -82,9 +80,7 @@ def maybe_sync_invoice_pod_after_db(
 
     try:
         with pool.connection() as conn:
-            doc_entry_raw, db_delhivery_status = fetch_doc_entry_and_delhivery_status_for_lr(
-                conn, resolved_lrnum
-            )
+            doc_entry_raw = fetch_doc_entry_for_lr(conn, resolved_lrnum)
     except Exception:
         log_json(
             logger,
@@ -216,15 +212,11 @@ def maybe_sync_invoice_pod_after_db(
         else:
             u_pod_date = None
 
-        frappe_grn_key = frappe_grn_key_from_delhivery_status(db_delhivery_status)
-
         patch_body: dict[str, Any] = {
             "U_Pod_Link": pod_url.strip(),
             "U_LRtrackno": str(resolved_lrnum).strip(),
             "U_POD_DATE": u_pod_date,
         }
-        if frappe_grn_key is not None:
-            patch_body["U_FrappeGRNKey"] = frappe_grn_key
 
         patch_url = f"{base}/Invoices({doc_entry})"
         st_patch, patch_body_out = sap_sl_request_json(opener, "PATCH", patch_url, patch_body)
@@ -237,7 +229,6 @@ def maybe_sync_invoice_pod_after_db(
             doc_entry=doc_entry,
             lrnum=resolved_lrnum,
             has_pod_date=u_pod_date is not None,
-            u_frappe_grn_key=frappe_grn_key,
             http_status=st_patch,
         )
         _safe_save_pod_sap_audit(
@@ -250,7 +241,6 @@ def maybe_sync_invoice_pod_after_db(
                 "doc_entry": doc_entry,
                 "lrnum": resolved_lrnum,
                 "has_pod_date": u_pod_date is not None,
-                "u_frappe_grn_key": frappe_grn_key,
                 "response_preview": (
                     json.dumps(patch_body_out)[:800]
                     if isinstance(patch_body_out, (dict, list))

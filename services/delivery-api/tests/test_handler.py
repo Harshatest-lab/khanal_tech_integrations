@@ -22,9 +22,12 @@ def test_worker_raw_shipment_with_attributes(monkeypatch: pytest.MonkeyPatch) ->
             "webhookKind": {"stringValue": "shipment_status", "dataType": "String"},
         },
     }
-    with patch("src.delhivery_sqs_worker.apply_shipment_status_webhook") as apply_fn:
+    with patch("src.delhivery_sqs_worker.apply_shipment_status_webhook") as apply_fn, patch(
+        "src.delhivery_sqs_worker.maybe_sync_invoice_grn_after_shipment_status"
+    ) as grn_fn:
         _process_one_record(pool, record)
     apply_fn.assert_called_once()
+    grn_fn.assert_called_once()
 
 
 def test_worker_legacy_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -41,9 +44,12 @@ def test_worker_legacy_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
         "body": {"lrnum": "LR9", "status": "Pending"},
     }
     record = {"body": json.dumps(envelope), "messageAttributes": {}}
-    with patch("src.delhivery_sqs_worker.apply_shipment_status_webhook") as apply_fn:
+    with patch("src.delhivery_sqs_worker.apply_shipment_status_webhook") as apply_fn, patch(
+        "src.delhivery_sqs_worker.maybe_sync_invoice_grn_after_shipment_status"
+    ) as grn_fn:
         _process_one_record(pool, record)
     apply_fn.assert_called_once()
+    grn_fn.assert_called_once()
 
 
 def test_worker_wrong_secret_from_attribute(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -81,9 +87,12 @@ def test_worker_skip_secret_allows_without_webhook_secret_attribute(
             "webhookKind": {"stringValue": "shipment_status", "dataType": "String"},
         },
     }
-    with patch("src.delhivery_sqs_worker.apply_shipment_status_webhook") as apply_fn:
+    with patch("src.delhivery_sqs_worker.apply_shipment_status_webhook") as apply_fn, patch(
+        "src.delhivery_sqs_worker.maybe_sync_invoice_grn_after_shipment_status"
+    ) as grn_fn:
         _process_one_record(pool, record)
     apply_fn.assert_called_once()
+    grn_fn.assert_called_once()
 
 
 def test_worker_pod_from_attributes(monkeypatch: pytest.MonkeyPatch) -> None:

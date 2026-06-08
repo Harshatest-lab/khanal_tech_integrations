@@ -17,6 +17,7 @@ from src.delhivery_models import normalize_pod_webhook, normalize_shipment_webho
 from src.delhivery_store import apply_pod_webhook, apply_shipment_status_webhook
 from src.pod_epod_s3 import maybe_upload_epod_clear_b64
 from src.sap_sl_pod import maybe_sync_invoice_pod_after_db
+from src.sap_sl_shipment import maybe_sync_invoice_grn_after_shipment_status
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,8 @@ def _process_one_record(pool: Any, record: dict[str, Any]) -> None:
             lrnum=fields["lrnum"],
             status=fields.get("delhivery_status"),
         )
+        # SAP: U_FrappeGRNKey on Delivered / RTO (same webhook status), when doc_entry exists.
+        maybe_sync_invoice_grn_after_shipment_status(pool, fields)
         return
 
     if kind == "pod":
