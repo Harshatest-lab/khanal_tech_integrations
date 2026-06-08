@@ -118,6 +118,43 @@ def normalize_shipment_webhook(payload: dict[str, Any]) -> dict[str, Any] | None
     }
 
 
+def frappe_grn_key_from_delhivery_status(status: str | None) -> int | None:
+    """Map Delhivery-style status text to SAP ``U_FrappeGRNKey`` (integer).
+
+    Delhivery is expected to send **Delivered** or **RTO** (comparison is case-insensitive).
+
+    - **Delivered** → ``1``
+    - **RTO** → ``2``
+    - Anything else → ``None`` (caller omits the UDF on PATCH).
+    """
+    if not isinstance(status, str):
+        return None
+    s = status.strip().casefold()
+    if not s:
+        return None
+    if s == "delivered":
+        return 1
+    if s == "rto":
+        return 2
+    return None
+
+
+def frappe_grn_key_for_sap_pod_patch(fields: dict[str, Any], db_delhivery_status: str | None) -> int | None:
+    """Resolve ``U_FrappeGRNKey`` for the POD→SAP PATCH.
+
+    Prefer ``status`` / ``delhivery_status`` on the POD webhook ``payload`` (``fields['payload']``),
+    else fall back to ``delhivery_lr.delhivery_status`` from RDS (shipment webhooks may have set it).
+    """
+    payload = fields.get("payload")
+    if isinstance(payload, dict):
+        for key in ("status", "Status", "delhivery_status", "Delhivery_status"):
+            v = payload.get(key)
+            k = frappe_grn_key_from_delhivery_status(v if isinstance(v, str) else None)
+            if k is not None:
+                return k
+    return frappe_grn_key_from_delhivery_status(db_delhivery_status)
+
+
 def normalize_pod_webhook(payload: dict[str, Any]) -> dict[str, Any] | None:
     """Return flat fields for DB write; None if identifiers and POD content are unusable.
 

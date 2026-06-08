@@ -1,5 +1,7 @@
 from src.delhivery_models import (
     body_json,
+    frappe_grn_key_for_sap_pod_patch,
+    frappe_grn_key_from_delhivery_status,
     lrnum_from_track_response,
     normalize_shipment_webhook,
 )
@@ -34,3 +36,27 @@ def test_normalize_shipment_webhook_missing_lrnum() -> None:
 def test_body_json() -> None:
     ev = {"body": '{"a": 1}'}
     assert body_json(ev) == {"a": 1}
+
+
+def test_frappe_grn_key_from_delhivery_status() -> None:
+    assert frappe_grn_key_from_delhivery_status("Delivered") == 1
+    assert frappe_grn_key_from_delhivery_status("DELIVERED") == 1
+    assert frappe_grn_key_from_delhivery_status("RTO") == 2
+    assert frappe_grn_key_from_delhivery_status("rto") == 2
+    assert frappe_grn_key_from_delhivery_status("RTO Initiated") is None
+    assert frappe_grn_key_from_delhivery_status("Manifested") is None
+    assert frappe_grn_key_from_delhivery_status(None) is None
+
+
+def test_frappe_grn_key_for_sap_pod_patch_payload_then_db() -> None:
+    fields = {"payload": {"status": "Delivered"}}
+    assert frappe_grn_key_for_sap_pod_patch(fields, "RTO") == 1
+
+    fields2 = {"payload": {"lrnum": "x"}}  # no status key
+    assert frappe_grn_key_for_sap_pod_patch(fields2, "RTO") == 2
+
+    fields3 = {"payload": {}}
+    assert frappe_grn_key_for_sap_pod_patch(fields3, "Delivered") == 1
+
+    fields4 = {"payload": {}}
+    assert frappe_grn_key_for_sap_pod_patch(fields4, "In Transit") is None

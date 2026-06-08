@@ -104,6 +104,14 @@ WHERE btrim(lrnum) = btrim(%(lrnum)s)
 LIMIT 1
 """
 
+FETCH_DOC_ENTRY_AND_STATUS_FOR_LR = """
+SELECT NULLIF(btrim(doc_entry), '') AS doc_entry,
+       NULLIF(btrim(delhivery_status), '') AS delhivery_status
+FROM delhivery_lr
+WHERE btrim(lrnum) = btrim(%(lrnum)s)
+LIMIT 1
+"""
+
 
 UPDATE_POD_SAP_AUDIT = """
 UPDATE delhivery_lr_pod SET sap_pod_response = (%(doc)s)::jsonb WHERE id = %(pod_id)s
@@ -125,6 +133,27 @@ def fetch_doc_entry_for_lr(conn: Any, lrnum: str) -> str | None:
         if row is None or row[0] is None:
             return None
         return str(row[0]).strip()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.autocommit = prev
+
+
+def fetch_doc_entry_and_delhivery_status_for_lr(
+    conn: Any, lrnum: str
+) -> tuple[str | None, str | None]:
+    """Return ``(doc_entry, delhivery_status)`` from ``delhivery_lr`` for SAP POD PATCH context."""
+    prev = conn.autocommit
+    conn.autocommit = True
+    try:
+        cur = conn.execute(FETCH_DOC_ENTRY_AND_STATUS_FOR_LR, {"lrnum": lrnum})
+        row = cur.fetchone()
+        if row is None:
+            return (None, None)
+        de = None if row[0] is None else str(row[0]).strip()
+        st = None if row[1] is None else str(row[1]).strip()
+        return (de, st)
     except Exception:
         conn.rollback()
         raise

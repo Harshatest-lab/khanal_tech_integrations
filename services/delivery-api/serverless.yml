@@ -42,7 +42,7 @@ provider:
     # When set, POD webhooks with base64 EPOD are decoded and stored in this bucket; DB keeps HTTPS pod_url only.
     POD_S3_BUCKET: ${self:custom.podS3Bucket}
     POD_S3_PREFIX: ${env:POD_S3_PREFIX, 'delhivery-pod'}
-    # Optional: SAP B1 Service Layer — PATCH Invoices(DocEntry) with U_Pod_Link / U_POD_DATE / U_LRtrackno after POD insert.
+    # Optional: SAP B1 Service Layer — PATCH Invoices(DocEntry) with U_Pod_Link / U_POD_DATE / U_LRtrackno / U_FrappeGRNKey after POD insert.
     # When SAP_SL_USE_SSM is 1/true/yes, read base URL + credentials + session cache from SSM (/sap/sl_config, /sap/credentials, /sap/b1_session).
     SAP_SL_USE_SSM: ${env:SAP_SL_USE_SSM, ''}
     SAP_SL_BASE_URL: ${env:SAP_SL_BASE_URL, ''}
