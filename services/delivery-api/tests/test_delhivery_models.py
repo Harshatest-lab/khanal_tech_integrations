@@ -1,6 +1,5 @@
 from src.delhivery_models import (
     body_json,
-    frappe_grn_key_for_sap_pod_patch,
     frappe_grn_key_from_delhivery_status,
     lrnum_from_track_response,
     normalize_shipment_webhook,
@@ -46,17 +45,3 @@ def test_frappe_grn_key_from_delhivery_status() -> None:
     assert frappe_grn_key_from_delhivery_status("RTO Initiated") is None
     assert frappe_grn_key_from_delhivery_status("Manifested") is None
     assert frappe_grn_key_from_delhivery_status(None) is None
-
-
-def test_frappe_grn_key_for_sap_pod_patch_payload_then_db() -> None:
-    fields = {"payload": {"status": "Delivered"}}
-    assert frappe_grn_key_for_sap_pod_patch(fields, "RTO") == 1
-
-    fields2 = {"payload": {"lrnum": "x"}}  # no status key
-    assert frappe_grn_key_for_sap_pod_patch(fields2, "RTO") == 2
-
-    fields3 = {"payload": {}}
-    assert frappe_grn_key_for_sap_pod_patch(fields3, "Delivered") == 1
-
-    fields4 = {"payload": {}}
-    assert frappe_grn_key_for_sap_pod_patch(fields4, "In Transit") is None

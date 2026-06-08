@@ -139,22 +139,6 @@ def frappe_grn_key_from_delhivery_status(status: str | None) -> int | None:
     return None
 
 
-def frappe_grn_key_for_sap_pod_patch(fields: dict[str, Any], db_delhivery_status: str | None) -> int | None:
-    """Resolve ``U_FrappeGRNKey`` for the POD→SAP PATCH.
-
-    Prefer ``status`` / ``delhivery_status`` on the POD webhook ``payload`` (``fields['payload']``),
-    else fall back to ``delhivery_lr.delhivery_status`` from RDS (shipment webhooks may have set it).
-    """
-    payload = fields.get("payload")
-    if isinstance(payload, dict):
-        for key in ("status", "Status", "delhivery_status", "Delhivery_status"):
-            v = payload.get(key)
-            k = frappe_grn_key_from_delhivery_status(v if isinstance(v, str) else None)
-            if k is not None:
-                return k
-    return frappe_grn_key_from_delhivery_status(db_delhivery_status)
-
-
 def normalize_pod_webhook(payload: dict[str, Any]) -> dict[str, Any] | None:
     """Return flat fields for DB write; None if identifiers and POD content are unusable.
 
