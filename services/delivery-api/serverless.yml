@@ -75,10 +75,10 @@ functions:
     timeout: 30
     vpc:
       securityGroupIds:
-        - sg-0328c65a23a32e9ac   # delivery-api-lambda
+        - sg-07d7a2a772bd34c7e   # delivery-api-lambda
       subnetIds:
-        - subnet-098cc0239f9840668   # us-east-1a (NAT — Lambda outbound / SAP)
-        - subnet-06c2706a4258ec055   # us-east-1b (NAT — Lambda HA; RDS stays in 1d on IGW)
+        - subnet-076c930135ac601bf   # us-east-1a (NAT — Lambda outbound / SAP)
+        - subnet-005b89db9e7e74655   # us-east-1b (NAT — Lambda HA; RDS stays in 1d on IGW)
     layers:
       - { Ref: SharedLambdaLayer }
     events:
