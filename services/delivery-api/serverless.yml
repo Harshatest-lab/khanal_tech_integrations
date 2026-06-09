@@ -73,12 +73,14 @@ functions:
     handler: src.delhivery_sqs_worker.handler
     memorySize: 512
     timeout: 30
+    # VPC: set at deploy time (same region as provider.region, e.g. ap-south-1). Subnets must be
+    # khanal-prod-lambda-nat-1a + khanal-prod-lambda-nat-1b (see docs/INFRA_AWS_FROM_SCRATCH.md Step 14).
     vpc:
       securityGroupIds:
-        - sg-07d7a2a772bd34c7e   # delivery-api-lambda
+        - ${env:LAMBDA_VPC_SECURITY_GROUP_ID}
       subnetIds:
-        - subnet-076c930135ac601bf   # us-east-1a (NAT — Lambda outbound / SAP)
-        - subnet-005b89db9e7e74655   # us-east-1b (NAT — Lambda HA; RDS stays in 1d on IGW)
+        - ${env:LAMBDA_VPC_SUBNET_ID_1}
+        - ${env:LAMBDA_VPC_SUBNET_ID_2}
     layers:
       - { Ref: SharedLambdaLayer }
     events:

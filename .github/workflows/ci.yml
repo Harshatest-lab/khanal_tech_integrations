@@ -33,6 +33,11 @@ jobs:
 
       - name: Serverless package (delivery-api)
         working-directory: services/delivery-api
+        env:
+          # Placeholders for `serverless package` only (not validated against AWS).
+          LAMBDA_VPC_SECURITY_GROUP_ID: sg-0123456789abcdef
+          LAMBDA_VPC_SUBNET_ID_1: subnet-0123456789abcdef0
+          LAMBDA_VPC_SUBNET_ID_2: subnet-0123456789abcdef1
         run: |
           npm install
           npx serverless package --stage dev

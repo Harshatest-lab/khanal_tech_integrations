@@ -399,12 +399,17 @@ After a successful login, Lambda writes a fresh JSON (non-empty **`b1session`**,
 
 ---
 
-## Step 14 — `serverless.yml` (delivery-api)
+## Step 14 — `serverless.yml` (delivery-api) + VPC env at deploy
 
-Edit **`services/delivery-api/serverless.yml`**:
+**`delhiveryWebhookWorker`** VPC settings are **not** hardcoded in the repo. Set these **environment variables** on every deploy (local shell or GitHub Actions secrets — Step 17D):
 
-- **`vpc.securityGroupIds`:** ID of **`khanal-prod-sg-delivery-api-lambda`**
-- **`vpc.subnetIds`:** IDs of **`khanal-prod-lambda-nat-1a`** and **`khanal-prod-lambda-nat-1b`** only
+| Variable | Value (example source) |
+|----------|-------------------------|
+| **`LAMBDA_VPC_SECURITY_GROUP_ID`** | **`khanal-prod-sg-delivery-api-lambda`** → copy **`sg-…`** in **the same account and region** as the deploy (e.g. **`ap-south-1`**). |
+| **`LAMBDA_VPC_SUBNET_ID_1`** | Subnet **`khanal-prod-lambda-nat-1a`** → copy **`subnet-…`**. |
+| **`LAMBDA_VPC_SUBNET_ID_2`** | Subnet **`khanal-prod-lambda-nat-1b`** → copy **`subnet-…`**. |
+
+**Rules:** Subnets and security group must live in **`khanal-prod-vpc`** and match **`provider.region`** (Mumbai **`ap-south-1`**). Do **not** reuse subnet IDs from another region or another AWS account — Lambda **`CREATE_FAILED`** in CloudFormation is the usual symptom.
 
 ---
 
@@ -419,7 +424,7 @@ npm install
 npx serverless deploy --stage prod --region ap-south-1
 ```
 
-Set env vars for that shell (or use a `.env` you do not commit): **`DATABASE_URL`**, **`DELHIVERY_WEBHOOK_SECRET`**, **`POD_S3_BUCKET`**, **`SAP_SL_USE_SSM=1`**, **`SAP_SL_VERIFY_SSL`**, etc. See [DELHIVERY.md](./DELHIVERY.md).
+Set env vars for that shell (or use a `.env` you do not commit): **`LAMBDA_VPC_SECURITY_GROUP_ID`**, **`LAMBDA_VPC_SUBNET_ID_1`**, **`LAMBDA_VPC_SUBNET_ID_2`**, **`DATABASE_URL`**, **`DELHIVERY_WEBHOOK_SECRET`**, **`POD_S3_BUCKET`**, **`SAP_SL_USE_SSM=1`**, **`SAP_SL_VERIFY_SSL`**, etc. See [DELHIVERY.md](./DELHIVERY.md).
 
 ---
 
@@ -526,6 +531,9 @@ Required for the workflow (see **`.github/workflows/deploy.yml`**):
 |--------|------------------|
 | **`AWS_ROLE_ARN`** | `arn:aws:iam::ACCOUNT_ID:role/khanal-prod-github-deploy` |
 | **`AWS_REGION`** | `ap-south-1` (must match where you deploy the stack) |
+| **`LAMBDA_VPC_SECURITY_GROUP_ID`** | **`sg-…`** for **`khanal-prod-sg-delivery-api-lambda`** (same account/region as deploy). |
+| **`LAMBDA_VPC_SUBNET_ID_1`** | **`subnet-…`** for **`khanal-prod-lambda-nat-1a`**. |
+| **`LAMBDA_VPC_SUBNET_ID_2`** | **`subnet-…`** for **`khanal-prod-lambda-nat-1b`**. |
 | **`DATABASE_URL`** | Same URI as Step 15 (`…?sslmode=require`, correct DB name). |
 | **`DELHIVERY_WEBHOOK_SECRET`** | Same as prod Delhivery header secret (or empty if not used). |
 | **`POD_S3_BUCKET`** | e.g. `khanal-prod-delhivery-epod` |
