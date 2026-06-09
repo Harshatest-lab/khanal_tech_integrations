@@ -42,6 +42,10 @@ jobs:
       - name: Install & deploy
         working-directory: services/${{ inputs.service }}
         env:
+          # delivery-api: Lambda ENIs — same account/region as deploy (e.g. Mumbai lambda-nat subnets + Lambda SG).
+          LAMBDA_VPC_SECURITY_GROUP_ID: ${{ secrets.LAMBDA_VPC_SECURITY_GROUP_ID }}
+          LAMBDA_VPC_SUBNET_ID_1: ${{ secrets.LAMBDA_VPC_SUBNET_ID_1 }}
+          LAMBDA_VPC_SUBNET_ID_2: ${{ secrets.LAMBDA_VPC_SUBNET_ID_2 }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DELHIVERY_WEBHOOK_SECRET: ${{ secrets.DELHIVERY_WEBHOOK_SECRET }}
           # Optional: S3 bucket for base64 EPOD → object; must match IAM bucket name at deploy.

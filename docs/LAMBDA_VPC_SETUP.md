@@ -22,8 +22,8 @@ Use the **same pattern in dev and prod**; only **subnet IDs, security group IDs,
 ## Wire `delivery-api` (Serverless)
 
 1. Open [`services/delivery-api/serverless.yml`](../services/delivery-api/serverless.yml).
-2. Under **`delhiveryWebhookWorker`**, set **`vpc.securityGroupIds`** and **`vpc.subnetIds`** (the HTTP **ingest** function has **no** VPC; only the SQS worker talks to RDS).
-3. Replace **`subnet-*`** and **`sg-*`** with your **dev** subnets and **`sg-lambda`** for dev deploys; use **prod** values for prod deploys (different `serverless deploy --stage prod` or separate CI variables).
+2. Under **`delhiveryWebhookWorker`**, **`vpc`** reads **`LAMBDA_VPC_SECURITY_GROUP_ID`**, **`LAMBDA_VPC_SUBNET_ID_1`**, **`LAMBDA_VPC_SUBNET_ID_2`** at deploy time (the HTTP **ingest** path has **no** VPC; only the SQS worker talks to RDS).
+3. Export those variables (or set GitHub Actions secrets) to your **dev** subnets + Lambda SG for dev deploys; use **prod** VPC IDs for prod (`serverless deploy --stage prod` in the right account/region).
 4. Deploy from `services/delivery-api` (or your CI) with **`DATABASE_URL`** set to the **dev** DSN first, then **prod**.
 
 **Tip:** Keep real IDs out of git if policy requires it — use **CI secrets** or **SSM Parameter Store** and paste into deploy env, or generate `serverless.yml` from a private template in CI.
