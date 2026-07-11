@@ -15,7 +15,7 @@ from khanal_shared.logging import configure_logging, log_json
 from src.common import delhivery_secret_error_response, header_ci
 from src.delhivery_models import normalize_pod_webhook, normalize_shipment_webhook
 from src.delhivery_store import apply_pod_webhook, apply_shipment_status_webhook
-from src.pod_epod_s3 import maybe_upload_epod_clear_b64
+from src.pod_epod_s3 import maybe_mirror_external_pod_url, maybe_upload_epod_clear_b64
 from src.sap_sl_pod import maybe_sync_invoice_pod_after_db
 from src.sap_sl_shipment import maybe_sync_invoice_grn_after_shipment_status
 
@@ -130,8 +130,9 @@ def _process_one_record(pool: Any, record: dict[str, Any]) -> None:
         if fields is None:
             log_json(logger, logging.WARNING, "delhivery_sqs_skip", reason="missing_pod_identifiers")
             return
-        # Optional: decode EPOD → object in S3; DB stores HTTPS ``pod_url`` (not ``epod_b64``).
+        # Optional: base64 EPOD or external pod_url → object in our S3; DB stores HTTPS ``pod_url``.
         maybe_upload_epod_clear_b64(fields)
+        maybe_mirror_external_pod_url(fields)
         with pool.connection() as conn:
             pod_result = apply_pod_webhook(conn, fields)
         if pod_result is None:
