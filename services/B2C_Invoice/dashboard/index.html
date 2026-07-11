@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Walmart Orders — Tracker Report</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-icon">W</div>
+        <div>
+          <div class="brand-title">Walmart B2C</div>
+          <div class="brand-sub">ORDER SYNC</div>
+        </div>
+      </div>
+      <div class="nav-label">Menu</div>
+      <nav class="nav">
+        <a class="nav-item active" href="#">
+          <span class="nav-icon">☰</span>
+          Orders report
+        </a>
+        <a class="nav-item" href="#" id="nav-sync">
+          <span class="nav-icon">↻</span>
+          Sync history
+        </a>
+        <a class="nav-item" href="#" id="nav-sap">
+          <span class="nav-icon">◇</span>
+          SAP FG items
+        </a>
+      </nav>
+      <div class="sidebar-footer">
+        <span class="dot"></span>
+        Live from RDS
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="page-header">
+        <div class="page-topbar">
+          <div class="page-header-intro">
+            <p class="page-eyebrow">Orders report</p>
+            <h1 id="page-title">Records <span class="page-title-muted">(<span id="record-count">—</span>)</span></h1>
+            <div class="stat-chips" id="stat-chips">
+              <span class="stat-chip stat-chip--muted">Loading stats…</span>
+            </div>
+          </div>
+          <div class="page-topbar-actions">
+            <div class="header-tools">
+              <div class="sap-alert-wrap" id="sap-alert-wrap">
+                <button
+                  type="button"
+                  class="sap-alert-bell"
+                  id="sap-alert-bell"
+                  title="SAP sync failures"
+                  aria-label="SAP sync failures"
+                  aria-expanded="false"
+                  aria-controls="sap-alert-panel"
+                >
+                  <svg class="sap-alert-bell-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12 22a2.5 2.5 0 0 0 2.45-2h-4.9A2.5 2.5 0 0 0 12 22Zm7-6V11a7 7 0 1 0-14 0v5l-2 2v1h18v-1l-2-2Z" fill="currentColor"/>
+                  </svg>
+                  <span class="sap-alert-count hidden" id="sap-alert-count">0</span>
+                </button>
+                <div class="sap-alert-panel hidden" id="sap-alert-panel" role="dialog" aria-label="SAP sync failures">
+                  <div class="sap-alert-panel-head">
+                    <strong>SAP sync failures</strong>
+                    <span class="sap-alert-panel-count" id="sap-alert-panel-count">0</span>
+                  </div>
+                  <div class="sap-alert-panel-body" id="sap-alert-panel-body">
+                    <p class="muted">Loading…</p>
+                  </div>
+                  <div class="sap-alert-panel-foot">
+                    <button type="button" class="btn-outline btn-sm" id="sap-alert-view-all">View all in table</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="filter-card" id="orders-filter-card">
+          <div class="filter-card-grid">
+            <label class="filter-field filter-field--wide">
+              <span class="filter-label">PO number</span>
+              <input
+                type="search"
+                id="po-filter"
+                placeholder="Search purchase order…"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </label>
+            <label class="filter-field">
+              <span class="filter-label">Status</span>
+              <select id="status-filter">
+                <option value="">All statuses</option>
+              </select>
+            </label>
+            <label class="filter-field" title="UTC calendar date">
+              <span class="filter-label">From (UTC)</span>
+              <input type="date" id="order-date-from" />
+            </label>
+            <label class="filter-field" title="UTC calendar date">
+              <span class="filter-label">To (UTC)</span>
+              <input type="date" id="order-date-to" />
+            </label>
+            <label class="filter-field">
+              <span class="filter-label">Shipping</span>
+              <select id="shipping-filter">
+                <option value="">All orders</option>
+                <option value="yes">With shipping</option>
+                <option value="no">No shipping</option>
+              </select>
+            </label>
+            <label class="filter-field">
+              <span class="filter-label">SAP sync</span>
+              <select id="sap-sync-filter">
+                <option value="">All</option>
+                <option value="failed">Failed</option>
+                <option value="posted">Posted</option>
+                <option value="pending">Not synced</option>
+              </select>
+            </label>
+          </div>
+          <div class="filter-card-actions">
+            <button type="button" class="btn-ghost" id="clear-filters-btn">Clear filters</button>
+            <button type="button" class="btn-primary" id="refresh-btn">Refresh</button>
+          </div>
+        </div>
+        <p class="sap-alert-hint hidden" id="sap-alert-hint"></p>
+        <p class="page-meta visually-hidden" id="last-sync-meta" aria-hidden="true">Loading…</p>
+      </header>
+
+      <div id="error-banner" class="error-banner hidden"></div>
+
+      <section id="orders-panel" class="panel">
+        <div class="table-scroll">
+          <table class="report-table" id="orders-table">
+            <colgroup>
+              <col class="col-idx" />
+              <col class="col-po" />
+              <col class="col-order" />
+              <col class="col-order-date" />
+              <col class="col-line" />
+              <col class="col-status" />
+              <col class="col-sku" />
+              <col class="col-qty" />
+              <col class="col-date" />
+              <col class="col-date" />
+              <col class="col-sap-sync" />
+              <col class="col-action" />
+            </colgroup>
+            <thead>
+              <tr>
+                <th class="col-idx">#</th>
+                <th class="col-po">PO number</th>
+                <th class="col-order">Order #</th>
+                <th class="col-order-date">Order date (UTC)</th>
+                <th class="col-line">Item</th>
+                <th class="col-status">Status</th>
+                <th class="col-sku">SKU</th>
+                <th class="col-qty">Qty</th>
+                <th class="col-date">Status date</th>
+                <th class="col-date">Updated</th>
+                <th class="col-sap-sync">SAP sync</th>
+                <th class="col-action"></th>
+              </tr>
+            </thead>
+            <tbody id="orders-body">
+              <tr><td colspan="12" class="loading-cell">Loading orders…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="pagination" id="orders-pagination">
+          <span class="pagination-info" id="pagination-info">—</span>
+          <div class="pagination-actions">
+            <label class="filter-inline">
+              Per page
+              <select id="page-size">
+                <option value="50">50</option>
+                <option value="100" selected>100</option>
+                <option value="200">200</option>
+              </select>
+            </label>
+            <button type="button" class="btn-outline" id="prev-page" disabled>Previous</button>
+            <button type="button" class="btn-outline" id="next-page" disabled>Next</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="sync-panel" class="panel hidden">
+        <div class="table-scroll">
+          <table class="report-table" id="sync-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Run status</th>
+                <th>Finished</th>
+                <th>Orders</th>
+                <th>Lines</th>
+                <th>Sync window</th>
+              </tr>
+            </thead>
+            <tbody id="sync-body"></tbody>
+          </table>
+        </div>
+
+        <div class="panel-section" id="sap-items-section">
+          <div class="panel-section-head">
+            <h2 class="panel-section-title">SAP FG items (HANA)</h2>
+            <p class="panel-section-meta" id="sap-items-meta">Loading from SAP…</p>
+          </div>
+          <div class="table-scroll">
+            <table class="report-table" id="sap-items-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Item code</th>
+                  <th>Amazon SKU (U_Amz_SKU)</th>
+                  <th>Walmart SKU (U_WM_SKU)</th>
+                </tr>
+              </thead>
+              <tbody id="sap-items-body">
+                <tr><td colspan="4" class="loading-cell">Loading SAP items…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="sap-error-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-backdrop" id="sap-error-backdrop"></div>
+    <div class="modal-card" role="dialog" aria-labelledby="sap-error-title">
+      <div class="modal-header">
+        <h2 id="sap-error-title">SAP sync error</h2>
+        <button type="button" class="modal-close" id="sap-error-close" aria-label="Close">×</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-meta" id="sap-error-po"></p>
+        <pre class="modal-pre" id="sap-error-text"></pre>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

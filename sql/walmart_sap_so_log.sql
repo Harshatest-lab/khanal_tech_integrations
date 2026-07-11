@@ -1,0 +1,2 @@
+-- Deprecated: use walmart_sap_invoice_log.sql for new environments.
+-- Existing DBs: run walmart_sap_so_log_rename_to_invoice.sql once.

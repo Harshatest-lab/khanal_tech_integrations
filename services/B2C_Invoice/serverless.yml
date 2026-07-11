@@ -1,0 +1,124 @@
+service: b2c-invoice
+
+frameworkVersion: "3"
+
+provider:
+  name: aws
+  runtime: python3.12
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'ap-south-1'}
+  memorySize: 512
+  timeout: 900
+  httpApi:
+    cors: true
+  iam:
+    role:
+      statements:
+        # SAP HANA read-only DB credentials from SSM when HANA_USE_SSM=1.
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+          Resource:
+            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/hana_config
+            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/hana_credentials
+        # SAP Service Layer (US INC) when SAP_SL_PROFILE=inc and SAP_SL_USE_SSM=true.
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+            - ssm:PutParameter
+          Resource:
+            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/sl_config
+            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/credentials
+            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/b1_session
+  environment:
+    STAGE: ${self:provider.stage}
+    LOG_LEVEL: ${env:LOG_LEVEL, 'INFO'}
+    DATABASE_URL: ${env:DATABASE_URL, ''}
+    WM_API_BASE: ${env:WM_API_BASE, 'https://marketplace.walmartapis.com/v3'}
+    WM_SVC_NAME: ${env:WM_SVC_NAME, 'Walmart Marketplace'}
+    WM_BASIC_AUTH: ${env:WM_BASIC_AUTH, ''}
+    WM_SHIP_NODE_TYPE: ${env:WM_SHIP_NODE_TYPE, 'WFSFulfilled'}
+    # HANA + SAP SL read from /sap/inc/* (US INC). India uses /sap/* via delivery-api.
+    HANA_USE_SSM: ${env:HANA_USE_SSM, '1'}
+    HANA_PROFILE: ${env:HANA_PROFILE, 'inc'}
+    SAP_SL_PROFILE: ${env:SAP_SL_PROFILE, 'inc'}
+
+layers:
+  shared:
+    name: ${self:service}-${self:provider.stage}-shared
+    path: ../../layers/build
+    package:
+      patterns:
+        - "python/**"
+    compatibleRuntimes:
+      - python3.12
+
+package:
+  patterns:
+    - "!**"
+    - "src/**"
+
+functions:
+  walmartSync:
+    handler: src.handlers.walmart_sync.handler
+    memorySize: 512
+    timeout: 900
+    environment:
+      SAP_SL_USE_SSM: ${env:SAP_SL_USE_SSM, ''}
+      SAP_SL_VERIFY_SSL: ${env:SAP_SL_VERIFY_SSL, 'true'}
+      SAP_SL_PROFILE: ${env:SAP_SL_PROFILE, 'inc'}
+      HANA_PROFILE: ${env:HANA_PROFILE, 'inc'}
+    vpc:
+      securityGroupIds:
+        - ${env:LAMBDA_VPC_SECURITY_GROUP_ID}
+      subnetIds:
+        - ${env:LAMBDA_VPC_SUBNET_ID_1}
+        - ${env:LAMBDA_VPC_SUBNET_ID_2}
+    layers:
+      - { Ref: SharedLambdaLayer }
+    events:
+      - schedule:
+          rate: rate(15 minutes)
+          enabled: true
+          input:
+            mode: updation
+      - schedule:
+          rate: rate(30 minutes)
+          enabled: true
+          input:
+            mode: sap_retry
+
+  walmartDashboardApi:
+    handler: src.handlers.walmart_api.handler
+    memorySize: 512
+    timeout: 60
+    vpc:
+      securityGroupIds:
+        - ${env:LAMBDA_VPC_SECURITY_GROUP_ID}
+      subnetIds:
+        - ${env:LAMBDA_VPC_SUBNET_ID_1}
+        - ${env:LAMBDA_VPC_SUBNET_ID_2}
+    layers:
+      - { Ref: SharedLambdaLayer }
+    events:
+      - httpApi:
+          path: /v1/walmart/stats
+          method: get
+      - httpApi:
+          path: /v1/walmart/orders
+          method: get
+      - httpApi:
+          path: /v1/walmart/sync-log
+          method: get
+      - httpApi:
+          path: /v1/walmart/order-detail
+          method: get
+      - httpApi:
+          path: /v1/walmart/sap-sync
+          method: get
+      - httpApi:
+          path: /v1/walmart/sap-failures
+          method: get
+      - httpApi:
+          path: /v1/walmart/sap-items
+          method: get

@@ -32,12 +32,34 @@ from khanal_shared.sap_sl.http import (
 
 logger = logging.getLogger(__name__)
 
+_LOCK_WAIT_SEC = 2.0
+_MAX_LOCK_WAITS = 30
+
+
+def sap_sl_ssm_prefix() -> str:
+    """SSM path prefix from ``SAP_SL_PROFILE`` (e.g. ``inc`` → ``/sap/inc``)."""
+    profile = (os.environ.get("SAP_SL_PROFILE") or "").strip().lower()
+    if not profile or profile in ("default", "sap"):
+        return "/sap"
+    return f"/sap/{profile}"
+
+
+def param_sl_config() -> str:
+    return f"{sap_sl_ssm_prefix()}/sl_config"
+
+
+def param_credentials() -> str:
+    return f"{sap_sl_ssm_prefix()}/credentials"
+
+
+def param_b1_session() -> str:
+    return f"{sap_sl_ssm_prefix()}/b1_session"
+
+
+# Default-profile paths (India / delivery-api).
 PARAM_SL_CONFIG = "/sap/sl_config"
 PARAM_CREDENTIALS = "/sap/credentials"
 PARAM_B1_SESSION = "/sap/b1_session"
-
-_LOCK_WAIT_SEC = 2.0
-_MAX_LOCK_WAITS = 30
 
 
 def sap_sl_use_ssm() -> bool:
@@ -120,16 +142,17 @@ def _host_from_base(base: str) -> str:
 
 
 def _read_sl_and_credentials() -> tuple[str, str, str, str]:
-    sl = _get_param_json(PARAM_SL_CONFIG)
-    cr = _get_param_json(PARAM_CREDENTIALS)
+    sl = _get_param_json(param_sl_config())
+    cr = _get_param_json(param_credentials())
     base = (sl.get("sap_b1_url") or sl.get("SAP_SL_BASE_URL") or "").strip()
     company = (sl.get("companydb") or sl.get("CompanyDB") or "").strip()
     user = (cr.get("username") or cr.get("UserName") or "").strip()
     pw = (cr.get("password") or cr.get("Password") or "").strip()
     if not base or not company or not user or not pw:
         raise ValueError(
-            "SSM /sap/sl_config and /sap/credentials must include "
-            "sap_b1_url, companydb, username, password"
+            "SSM sl_config and credentials must include "
+            "sap_b1_url, companydb, username, password "
+            f"(profile prefix {sap_sl_ssm_prefix()})"
         )
     return base.rstrip("/"), company, user, pw
 
@@ -188,7 +211,7 @@ def renew_sap_session_ssm() -> tuple[Any, str]:
         "expires_on": _expires_on_from_timeout_minutes(timeout_min),
         "is_locked": False,
     }
-    _put_param_json(PARAM_B1_SESSION, updated)
+    _put_param_json(param_b1_session(), updated)
     log_json(logger, logging.INFO, "sap_sl_ssm_session_renewed", expires_on=updated["expires_on"])
     return opener, base.rstrip("/")
 
@@ -196,7 +219,7 @@ def renew_sap_session_ssm() -> tuple[Any, str]:
 def _resolve_session_tokens() -> tuple[str, str, str]:
     """Return ``(base_url, b1session, routeid)`` after SSM lock + cache or SAP renew (``base_url`` has no trailing slash)."""
     for _attempt in range(_MAX_LOCK_WAITS):
-        session_data = _get_param_json(PARAM_B1_SESSION)
+        session_data = _get_param_json(param_b1_session())
         is_locked = bool(session_data.get("is_locked"))
         b1session_val = (session_data.get("b1session") or "").strip()
         routeid_val = (session_data.get("routeid") or "").strip()
@@ -223,7 +246,7 @@ def _resolve_session_tokens() -> tuple[str, str, str]:
 
         try:
             session_data["is_locked"] = True
-            _put_param_json(PARAM_B1_SESSION, session_data)
+            _put_param_json(param_b1_session(), session_data)
         except Exception:
             log_json(
                 logger,
@@ -236,7 +259,7 @@ def _resolve_session_tokens() -> tuple[str, str, str]:
 
         try:
             renew_sap_session_ssm()
-            refreshed = _get_param_json(PARAM_B1_SESSION)
+            refreshed = _get_param_json(param_b1_session())
             base, _, _, _ = _read_sl_and_credentials()
             b1 = (refreshed.get("b1session") or "").strip()
             rt = (refreshed.get("routeid") or "").strip()
@@ -249,9 +272,9 @@ def _resolve_session_tokens() -> tuple[str, str, str]:
                 trace=traceback.format_exc(),
             )
             try:
-                cur = _get_param_json(PARAM_B1_SESSION)
+                cur = _get_param_json(param_b1_session())
                 cur["is_locked"] = False
-                _put_param_json(PARAM_B1_SESSION, cur)
+                _put_param_json(param_b1_session(), cur)
             except Exception:
                 log_json(
                     logger,

@@ -16,6 +16,9 @@ dependencies = [
 db = [
   "psycopg[binary,pool]>=3.2,<4",
 ]
+hana = [
+  "hdbcli>=2.23",
+]
 dev = [
   "pytest>=8.0",
   "ruff>=0.4",
