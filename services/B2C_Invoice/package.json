@@ -1,0 +1,10 @@
+{
+  "name": "b2c-invoice",
+  "private": true,
+  "scripts": {
+    "dashboard": "python3 -m http.server 8080 --directory dashboard"
+  },
+  "devDependencies": {
+    "serverless": "^3.39.0"
+  }
+}
