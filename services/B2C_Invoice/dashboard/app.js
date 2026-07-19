@@ -1,5 +1,5 @@
 /** Hardcoded API — dev account 699013266218 / ap-south-1 */
-const API_BASE = "https://21oe3vqlvl.execute-api.ap-south-1.amazonaws.com";
+const API_BASE = "https://5e4ry5m7f7.execute-api.ap-south-1.amazonaws.com";
 
 const AUTH_STORAGE_KEY = "walmart_dashboard_auth";
 

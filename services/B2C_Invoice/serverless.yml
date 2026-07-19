@@ -66,8 +66,8 @@ provider:
     HANA_USE_SSM: ${env:HANA_USE_SSM, '1'}
     HANA_PROFILE: ${env:HANA_PROFILE, 'inc'}
     SAP_SL_PROFILE: ${env:SAP_SL_PROFILE, 'inc'}
-    WALMART_SAP_ALERT_ADMIN_EMAIL: ${env:WALMART_SAP_ALERT_ADMIN_EMAIL, 'cursorharsha@gmail.com'}
-    WALMART_SAP_ALERT_FROM_EMAIL: ${env:WALMART_SAP_ALERT_FROM_EMAIL, 'kflharshkfl@gmail.com'}
+    WALMART_SAP_ALERT_ADMIN_EMAIL: ${env:WALMART_SAP_ALERT_ADMIN_EMAIL, 'harsha@khanalfoods.com'}
+    WALMART_SAP_ALERT_FROM_EMAIL: ${env:WALMART_SAP_ALERT_FROM_EMAIL, 'techadmin@khanalfoods.com'}
     WALMART_DASHBOARD_URL: ${env:WALMART_DASHBOARD_URL, 'http://walmart-dashboard-khanalb2c.s3-website.ap-south-1.amazonaws.com/'}
     WALMART_SES_REGION: ${env:WALMART_SES_REGION, 'ap-south-1'}
 
