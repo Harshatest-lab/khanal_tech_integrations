@@ -8,7 +8,7 @@ on:
         required: true
         default: dev
       service:
-        description: "Service folder: delivery-api | dogseeus-invoice"
+        description: "Service folder: delivery-api | B2C_Invoice"
         required: true
         default: delivery-api
 
