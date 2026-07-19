@@ -1,6 +1,6 @@
 # B2C Invoice — Walmart order sync (Lambda)
 
-**Python 3.12** Lambda in VPC: Walmart Marketplace API → PostgreSQL (`walmart_order_headers`, `walmart_order_lines`, `walmart_log`).
+**Python 3.12** Lambda (no VPC): Walmart Marketplace API → PostgreSQL (`walmart_order_headers`, `walmart_order_lines`, `walmart_log`).
 
 | Function | Trigger | Role |
 |----------|---------|------|
@@ -16,9 +16,6 @@ bash scripts/build_shared_layer.sh
 cd services/B2C_Invoice
 npm install
 
-export LAMBDA_VPC_SECURITY_GROUP_ID=sg-...
-export LAMBDA_VPC_SUBNET_ID_1=subnet-...
-export LAMBDA_VPC_SUBNET_ID_2=subnet-...
 export DATABASE_URL='postgresql://...?sslmode=require'
 export WM_BASIC_AUTH='Basic ...'
 
@@ -91,6 +88,24 @@ Then open `http://localhost:8080`.
 **S3 hosting (optional):** upload all of `dashboard/` to S3 (+ CloudFront for HTTPS).
 
 **Auth:** API is open today — add API Gateway authorizer before sharing widely.
+
+## Dashboard auth (Cognito)
+
+The static dashboard uses **Cognito** (1 user) + **JWT authorizer** on all `/v1/walmart/*` routes.
+
+**After deploy**, create the dashboard user:
+
+```bash
+cd services/B2C_Invoice
+export STAGE=dev
+export DASHBOARD_EMAIL='you@example.com'
+export DASHBOARD_PASSWORD='YourSecurePass123'
+bash scripts/create_walmart_dashboard_user.sh
+```
+
+Re-upload `dashboard/` to S3 after UI changes. Sign-in is required before any order data loads.
+
+Public auth routes (no JWT): `GET /v1/auth/config`, `POST /v1/auth/login`, `POST /v1/auth/refresh`.
 
 ## Emergency: stop schedule
 

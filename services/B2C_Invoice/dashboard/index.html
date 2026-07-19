@@ -10,7 +10,33 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <div class="layout">
+  <div id="login-screen" class="login-screen">
+    <div class="login-card">
+      <div class="login-brand">
+        <div class="brand-icon">W</div>
+        <div>
+          <div class="brand-title">Walmart B2C</div>
+          <div class="brand-sub">ORDER SYNC</div>
+        </div>
+      </div>
+      <h2 class="login-title">Sign in</h2>
+      <p class="login-subtitle">Single-user dashboard access</p>
+      <form id="login-form" class="login-form" autocomplete="on">
+        <label class="login-field">
+          <span class="login-label">Email</span>
+          <input type="email" id="login-email" name="email" required autocomplete="username" />
+        </label>
+        <label class="login-field">
+          <span class="login-label">Password</span>
+          <input type="password" id="login-password" name="password" required autocomplete="current-password" />
+        </label>
+        <p class="login-error hidden" id="login-error" role="alert"></p>
+        <button type="submit" class="btn-primary login-submit" id="login-submit">Sign in</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="layout hidden" id="app-shell">
     <aside class="sidebar">
       <div class="brand">
         <div class="brand-icon">W</div>
@@ -37,6 +63,7 @@
       <div class="sidebar-footer">
         <span class="dot"></span>
         Live from RDS
+        <button type="button" class="btn-logout" id="logout-btn">Sign out</button>
       </div>
     </aside>
 
@@ -51,6 +78,14 @@
             </div>
           </div>
           <div class="page-topbar-actions">
+            <button
+              type="button"
+              class="btn-sap-retry"
+              id="sap-retry-btn"
+              title="Retry failed SAP posts (same as daily 08:00 IST sap_retry job)"
+            >
+              Retry SAP failures
+            </button>
             <div class="header-tools">
               <div class="sap-alert-wrap" id="sap-alert-wrap">
                 <button
@@ -85,30 +120,65 @@
         </div>
 
         <div class="filter-card" id="orders-filter-card">
-          <div class="filter-card-grid">
-            <label class="filter-field filter-field--wide">
+          <div class="filter-card-grid filter-card-grid--wide">
+            <label class="filter-field">
               <span class="filter-label">PO number</span>
-              <input
-                type="search"
-                id="po-filter"
-                placeholder="Search purchase order…"
-                autocomplete="off"
-                spellcheck="false"
-              />
+              <input type="search" id="po-filter" placeholder="Search PO…" autocomplete="off" spellcheck="false" />
+            </label>
+            <label class="filter-field">
+              <span class="filter-label">Order #</span>
+              <input type="search" id="order-filter" placeholder="Search order #…" autocomplete="off" spellcheck="false" />
             </label>
             <label class="filter-field">
               <span class="filter-label">Status</span>
               <select id="status-filter">
                 <option value="">All statuses</option>
+                <option value="partial">Delivered (Partial)</option>
               </select>
             </label>
-            <label class="filter-field" title="UTC calendar date">
-              <span class="filter-label">From (UTC)</span>
+            <label class="filter-field">
+              <span class="filter-label">SKU</span>
+              <input type="search" id="sku-filter" placeholder="Search SKU…" autocomplete="off" spellcheck="false" />
+            </label>
+            <label class="filter-field filter-field--wide">
+              <span class="filter-label">Item</span>
+              <input type="search" id="item-filter" placeholder="Search product name…" autocomplete="off" spellcheck="false" />
+            </label>
+            <label class="filter-field filter-field--narrow">
+              <span class="filter-label">Qty</span>
+              <input type="search" id="qty-filter" placeholder="Exact e.g. 1" inputmode="numeric" autocomplete="off" spellcheck="false" />
+            </label>
+            <label class="filter-field" title="Order date UTC">
+              <span class="filter-label">Order from (UTC)</span>
               <input type="date" id="order-date-from" />
             </label>
-            <label class="filter-field" title="UTC calendar date">
-              <span class="filter-label">To (UTC)</span>
+            <label class="filter-field" title="Order date UTC">
+              <span class="filter-label">Order to (UTC)</span>
               <input type="date" id="order-date-to" />
+            </label>
+            <label class="filter-field" title="Line status date UTC">
+              <span class="filter-label">Status from</span>
+              <input type="date" id="status-date-from" />
+            </label>
+            <label class="filter-field" title="Line status date UTC">
+              <span class="filter-label">Status to</span>
+              <input type="date" id="status-date-to" />
+            </label>
+            <label class="filter-field" title="Header updated UTC">
+              <span class="filter-label">Updated from</span>
+              <input type="date" id="updated-from" />
+            </label>
+            <label class="filter-field" title="Header updated UTC">
+              <span class="filter-label">Updated to</span>
+              <input type="date" id="updated-to" />
+            </label>
+            <label class="filter-field">
+              <span class="filter-label">Line count</span>
+              <select id="line-count-filter">
+                <option value="">All orders</option>
+                <option value="single">Single line (1)</option>
+                <option value="multiple">Multiple lines (2+)</option>
+              </select>
             </label>
             <label class="filter-field">
               <span class="filter-label">Shipping</span>
@@ -116,6 +186,22 @@
                 <option value="">All orders</option>
                 <option value="yes">With shipping</option>
                 <option value="no">No shipping</option>
+              </select>
+            </label>
+            <label class="filter-field">
+              <span class="filter-label">County surcharge tax</span>
+              <select id="county-surcharge-filter">
+                <option value="">All orders</option>
+                <option value="yes">With County Surcharge Tax</option>
+                <option value="no">Without County Surcharge Tax</option>
+              </select>
+            </label>
+            <label class="filter-field">
+              <span class="filter-label">Discount</span>
+              <select id="promotion-discount-filter">
+                <option value="">All orders</option>
+                <option value="yes">With Discount</option>
+                <option value="no">Without Discount</option>
               </select>
             </label>
             <label class="filter-field">
@@ -146,6 +232,8 @@
               <col class="col-idx" />
               <col class="col-po" />
               <col class="col-order" />
+              <col class="col-state" />
+              <col class="col-order-date" />
               <col class="col-order-date" />
               <col class="col-line" />
               <col class="col-status" />
@@ -159,21 +247,45 @@
             <thead>
               <tr>
                 <th class="col-idx">#</th>
-                <th class="col-po">PO number</th>
-                <th class="col-order">Order #</th>
-                <th class="col-order-date">Order date (UTC)</th>
-                <th class="col-line">Item</th>
-                <th class="col-status">Status</th>
-                <th class="col-sku">SKU</th>
-                <th class="col-qty">Qty</th>
-                <th class="col-date">Status date</th>
-                <th class="col-date">Updated</th>
-                <th class="col-sap-sync">SAP sync</th>
-                <th class="col-action"></th>
+                <th class="col-po sortable-th" data-sort-key="po">
+                  <button type="button" class="sortable-btn">PO number <span class="sort-indicator"></span></button>
+                </th>
+                <th class="col-order sortable-th" data-sort-key="order">
+                  <button type="button" class="sortable-btn">Order # <span class="sort-indicator"></span></button>
+                </th>
+                <th class="col-state">State</th>
+                <th class="col-order-date sortable-th" data-sort-key="order_date">
+                  <button type="button" class="sortable-btn">Order date (UTC) <span class="sort-indicator"></span></button>
+                </th>
+                <th class="col-order-date sortable-th" data-sort-key="order_date_pacific">
+                  <button type="button" class="sortable-btn">Order date (Pacific) <span class="sort-indicator"></span></button>
+                </th>
+                <th class="col-line sortable-th" data-sort-key="item">
+                  <button type="button" class="sortable-btn">Item <span class="sort-indicator"></span></button>
+                </th>
+                <th class="col-status sortable-th" data-sort-key="status">
+                  <button type="button" class="sortable-btn">Status <span class="sort-indicator"></span></button>
+                </th>
+                <th class="col-sku sortable-th" data-sort-key="sku">
+                  <button type="button" class="sortable-btn">SKU <span class="sort-indicator"></span></button>
+                </th>
+                <th class="col-qty sortable-th" data-sort-key="qty">
+                  <button type="button" class="sortable-btn">Qty <span class="sort-indicator"></span></button>
+                </th>
+                <th class="col-date sortable-th" data-sort-key="status_date">
+                  <button type="button" class="sortable-btn">Status date <span class="sort-indicator"></span></button>
+                </th>
+                <th class="col-date sortable-th" data-sort-key="updated">
+                  <button type="button" class="sortable-btn">Updated <span class="sort-indicator"></span></button>
+                </th>
+                <th class="col-sap-sync sortable-th" data-sort-key="sap_sync">
+                  <button type="button" class="sortable-btn">SAP sync <span class="sort-indicator"></span></button>
+                </th>
+                <th class="col-action">Actions</th>
               </tr>
             </thead>
             <tbody id="orders-body">
-              <tr><td colspan="12" class="loading-cell">Loading orders…</td></tr>
+              <tr><td colspan="14" class="loading-cell">Loading orders…</td></tr>
             </tbody>
           </table>
         </div>

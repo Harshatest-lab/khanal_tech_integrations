@@ -1,17 +1,204 @@
-/** Hardcoded API — change when deploying to prod / another stage. */
-const API_BASE = "https://r6y9eiin7d.execute-api.us-east-1.amazonaws.com";
+/** Hardcoded API — dev account 699013266218 / ap-south-1 */
+const API_BASE = "https://21oe3vqlvl.execute-api.ap-south-1.amazonaws.com";
 
-const COLSPAN = 12;
+const AUTH_STORAGE_KEY = "walmart_dashboard_auth";
+
+const loginScreen = document.getElementById("login-screen");
+const appShell = document.getElementById("app-shell");
+const loginForm = document.getElementById("login-form");
+const loginEmail = document.getElementById("login-email");
+const loginPassword = document.getElementById("login-password");
+const loginError = document.getElementById("login-error");
+const loginSubmit = document.getElementById("login-submit");
+const logoutBtn = document.getElementById("logout-btn");
+
+let authSession = null;
+
+function loadAuthSession() {
+  try {
+    const raw = sessionStorage.getItem(AUTH_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && parsed.id_token ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveAuthSession(session) {
+  authSession = session;
+  sessionStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(session));
+}
+
+function clearAuthSession() {
+  authSession = null;
+  sessionStorage.removeItem(AUTH_STORAGE_KEY);
+}
+
+function jwtExpMs(token) {
+  try {
+    const part = token.split(".")[1];
+    if (!part) return 0;
+    const payload = JSON.parse(atob(part.replace(/-/g, "+").replace(/_/g, "/")));
+    return payload.exp ? payload.exp * 1000 : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function isSessionValid(session) {
+  if (!session?.id_token) return false;
+  const exp = jwtExpMs(session.id_token);
+  if (!exp) return true;
+  return Date.now() < exp - 60_000;
+}
+
+function authHeaders(extra) {
+  const headers = { ...(extra || {}) };
+  if (authSession?.id_token) {
+    headers.Authorization = `Bearer ${authSession.id_token}`;
+  }
+  return headers;
+}
+
+function showLoginScreen(message) {
+  appShell?.classList.add("hidden");
+  loginScreen?.classList.remove("hidden");
+  if (message && loginError) {
+    loginError.textContent = message;
+    loginError.classList.remove("hidden");
+  } else if (loginError) {
+    loginError.textContent = "";
+    loginError.classList.add("hidden");
+  }
+}
+
+function showAppShell() {
+  loginScreen?.classList.add("hidden");
+  appShell?.classList.remove("hidden");
+  if (loginError) {
+    loginError.textContent = "";
+    loginError.classList.add("hidden");
+  }
+}
+
+async function refreshAuthSession() {
+  if (!authSession?.refresh_token) return false;
+  const res = await fetch(`${API_BASE}/v1/auth/refresh`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ refresh_token: authSession.refresh_token }),
+  });
+  const body = await res.text();
+  let data = null;
+  if (body) {
+    try {
+      data = JSON.parse(body);
+    } catch {
+      data = { error: body };
+    }
+  }
+  if (!res.ok) return false;
+  saveAuthSession({
+    id_token: data.id_token,
+    access_token: data.access_token,
+    refresh_token: data.refresh_token || authSession.refresh_token,
+    expires_in: data.expires_in,
+  });
+  return true;
+}
+
+async function loginWithPassword(email, password) {
+  const res = await fetch(`${API_BASE}/v1/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  const body = await res.text();
+  let data = null;
+  if (body) {
+    try {
+      data = JSON.parse(body);
+    } catch {
+      data = { error: body };
+    }
+  }
+  if (!res.ok) {
+    throw new Error(data?.error || `${res.status} ${body}`);
+  }
+  saveAuthSession({
+    id_token: data.id_token,
+    access_token: data.access_token,
+    refresh_token: data.refresh_token,
+    expires_in: data.expires_in,
+  });
+}
+
+async function ensureAuthenticated() {
+  authSession = loadAuthSession();
+  if (isSessionValid(authSession)) return true;
+  if (authSession?.refresh_token && (await refreshAuthSession())) return true;
+  clearAuthSession();
+  return false;
+}
+
+async function handleUnauthorized() {
+  if (authSession?.refresh_token && (await refreshAuthSession())) {
+    return true;
+  }
+  clearAuthSession();
+  showLoginScreen("Session expired — sign in again.");
+  return false;
+}
+
+async function bootstrapApp() {
+  if (isFileProtocol()) {
+    showAppShell();
+    showError(fileProtocolHelp());
+    return;
+  }
+
+  const ok = await ensureAuthenticated();
+  if (!ok) {
+    showLoginScreen();
+    return;
+  }
+
+  showAppShell();
+  updateSortIndicators();
+  try {
+    await loadOrders(true);
+  } catch (e) {
+    showError(e.message);
+    ordersBody.innerHTML =
+      `<tr><td colspan="${COLSPAN}" class="loading-cell">Failed to load data.</td></tr>`;
+  }
+}
+
+const COLSPAN = 14;
 
 let currentOffset = 0;
 let pageTotal = 0;
 let lastDashboardStats = null;
+let sortBy = "order_date";
+let sortDir = "desc";
 
 const statusFilter = document.getElementById("status-filter");
 const poFilter = document.getElementById("po-filter");
+const orderFilter = document.getElementById("order-filter");
+const skuFilter = document.getElementById("sku-filter");
+const itemFilter = document.getElementById("item-filter");
+const qtyFilter = document.getElementById("qty-filter");
 const orderDateFrom = document.getElementById("order-date-from");
 const orderDateTo = document.getElementById("order-date-to");
+const statusDateFrom = document.getElementById("status-date-from");
+const statusDateTo = document.getElementById("status-date-to");
+const updatedFrom = document.getElementById("updated-from");
+const updatedTo = document.getElementById("updated-to");
 const shippingFilter = document.getElementById("shipping-filter");
+const countySurchargeFilter = document.getElementById("county-surcharge-filter");
+const promotionDiscountFilter = document.getElementById("promotion-discount-filter");
+const lineCountFilter = document.getElementById("line-count-filter");
 const sapSyncFilter = document.getElementById("sap-sync-filter");
 const clearFiltersBtn = document.getElementById("clear-filters-btn");
 const pageSizeSelect = document.getElementById("page-size");
@@ -43,6 +230,63 @@ const sapAlertPanel = document.getElementById("sap-alert-panel");
 const sapAlertPanelBody = document.getElementById("sap-alert-panel-body");
 const sapAlertPanelCount = document.getElementById("sap-alert-panel-count");
 const sapAlertViewAll = document.getElementById("sap-alert-view-all");
+const sapRetryBtn = document.getElementById("sap-retry-btn");
+
+function buildOrdersQueryParams(limit, offset) {
+  const params = new URLSearchParams();
+  params.set("limit", String(limit));
+  params.set("offset", String(offset));
+  params.set("sort_by", sortBy);
+  params.set("sort_dir", sortDir);
+
+  const add = (key, value) => {
+    const trimmed = String(value || "").trim();
+    if (trimmed) params.set(key, trimmed);
+  };
+
+  add("purchase_order_id", poFilter.value);
+  add("customer_order_id", orderFilter.value);
+  add("status", statusFilter.value);
+  add("sku", skuFilter.value);
+  add("product_name", itemFilter.value);
+  add("quantity", qtyFilter.value);
+  add("order_date_from", orderDateFrom.value);
+  add("order_date_to", orderDateTo.value);
+  add("status_date_from", statusDateFrom.value);
+  add("status_date_to", statusDateTo.value);
+  add("updated_from", updatedFrom.value);
+  add("updated_to", updatedTo.value);
+  add("has_shipping", shippingFilter.value);
+  add("county_surcharge_tax", countySurchargeFilter?.value);
+  add("promotion_discount", promotionDiscountFilter?.value);
+  add("line_count", lineCountFilter?.value);
+  add("sap_sync", sapSyncFilter?.value);
+
+  return params.toString();
+}
+
+function updateSortIndicators() {
+  document.querySelectorAll(".sortable-th").forEach((th) => {
+    const key = th.getAttribute("data-sort-key");
+    const indicator = th.querySelector(".sort-indicator");
+    const active = key === sortBy;
+    th.classList.toggle("sortable-th--active", active);
+    if (indicator) {
+      indicator.textContent = active ? (sortDir === "asc" ? "▲" : "▼") : "";
+    }
+  });
+}
+
+function toggleSort(columnKey) {
+  if (sortBy === columnKey) {
+    sortDir = sortDir === "asc" ? "desc" : "asc";
+  } else {
+    sortBy = columnKey;
+    sortDir = columnKey === "po" || columnKey === "order" || columnKey === "sku" ? "asc" : "desc";
+  }
+  updateSortIndicators();
+  loadOrders(true).catch((e) => showError(e.message));
+}
 
 function pageSize() {
   return parseInt(pageSizeSelect.value, 10) || 100;
@@ -72,7 +316,14 @@ function showError(message) {
 
 async function apiGet(path) {
   try {
-    const res = await fetch(`${API_BASE}${path}`);
+    const res = await fetch(`${API_BASE}${path}`, { headers: authHeaders() });
+    if (res.status === 401) {
+      const recovered = await handleUnauthorized();
+      if (recovered) {
+        return apiGet(path);
+      }
+      throw new Error("Unauthorized — sign in again");
+    }
     if (!res.ok) {
       const body = await res.text();
       throw new Error(`${res.status} ${body}`);
@@ -83,6 +334,88 @@ async function apiGet(path) {
       throw new Error(fileProtocolHelp());
     }
     throw err;
+  }
+}
+
+async function apiPost(path, bodyObj) {
+  try {
+    const init = {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+    };
+    if (bodyObj !== undefined) {
+      init.body = JSON.stringify(bodyObj);
+    }
+    const res = await fetch(`${API_BASE}${path}`, init);
+    if (res.status === 401) {
+      const recovered = await handleUnauthorized();
+      if (recovered) {
+        return apiPost(path, bodyObj);
+      }
+      throw new Error("Unauthorized — sign in again");
+    }
+    const body = await res.text();
+    let data = null;
+    if (body) {
+      try {
+        data = JSON.parse(body);
+      } catch {
+        data = { error: body };
+      }
+    }
+    if (!res.ok) {
+      throw new Error(data?.error || data?.reason || `${res.status} ${body}`);
+    }
+    return data;
+  } catch (err) {
+    if (isFileProtocol() && err instanceof TypeError) {
+      throw new Error(fileProtocolHelp());
+    }
+    throw err;
+  }
+}
+
+const SAP_POST_ELIGIBLE_STATUSES = new Set(["Shipped", "Delivered", "Dispensed"]);
+
+function canShowPostSap(row) {
+  if (row.sap_sync?.status === "posted") return false;
+  const lines = row.lines || [];
+  return lines.some((line) =>
+    SAP_POST_ELIGIBLE_STATUSES.has(String(line.status || "").trim())
+  );
+}
+
+function renderPostSapButton(row) {
+  if (!canShowPostSap(row)) return "";
+  return '<button type="button" class="btn-post-sap" title="Post this order to SAP">Post-SAP</button>';
+}
+
+async function postOrderToSap(po, btn) {
+  if (
+    !window.confirm(
+      `Post PO ${po} to SAP?\n\nThis builds the invoice payload and posts to SAP Service Layer.`
+    )
+  ) {
+    return;
+  }
+
+  btn.disabled = true;
+  const originalLabel = btn.textContent;
+  btn.textContent = "Posting…";
+
+  try {
+    const result = await apiPost(
+      `/v1/walmart/sap-post?purchase_order_id=${encodeURIComponent(po)}`
+    );
+    await loadOrders(true);
+    hideError();
+    if (result?.status === "skipped") {
+      showError(`SAP post skipped for PO ${po}: ${result.reason || "unknown reason"}`);
+    }
+  } catch (err) {
+    showError(`SAP post failed for PO ${po}: ${err.message}`);
+    btn.disabled = false;
+    btn.textContent = originalLabel;
   }
 }
 
@@ -107,7 +440,7 @@ function formatDateStack(value) {
   return `<span class="date-stack"><span class="date-line">${dateLine}</span><span class="time-line">${timeLine}</span></span>`;
 }
 
-function statusBadge(status) {
+function statusBadge(status, label = status) {
   const key = String(status || "").toLowerCase();
   const map = {
     delivered: "badge-delivered",
@@ -120,7 +453,20 @@ function statusBadge(status) {
     failed: "badge-failed",
   };
   const cls = map[key] || "badge-default";
-  return `<span class="badge ${cls}">${escapeHtml(status || "—")}</span>`;
+  return `<span class="badge ${cls}">${escapeHtml(label || "—")}</span>`;
+}
+
+function lineStatusBadge(line) {
+  const status = line?.status || "—";
+  return statusBadge(status, line?.is_partial ? `${status} (Partial)` : status);
+}
+
+function lineQuantitySummary(line) {
+  const total = line?.quantity_amount || "—";
+  if (!line?.is_partial) return escapeHtml(total);
+  return `${escapeHtml(total)} <span class="muted">(Delivered ${escapeHtml(
+    line.invoiceable_quantity ?? line.delivered_quantity ?? "—"
+  )}, Cancelled ${escapeHtml(line.cancelled_quantity ?? "—")})</span>`;
 }
 
 function escapeHtml(text) {
@@ -139,8 +485,11 @@ function truncate(text, max = 80) {
 
 function populateStatusFilter(byStatus) {
   const current = statusFilter.value;
-  statusFilter.innerHTML = '<option value="">All statuses</option>';
+  statusFilter.innerHTML = `
+    <option value="">All statuses</option>
+    <option value="partial">Delivered (Partial)</option>`;
   for (const row of byStatus || []) {
+    if (String(row.status || "").toLowerCase() === "partial") continue;
     const opt = document.createElement("option");
     opt.value = row.status;
     opt.textContent = `${row.status} (${row.count})`;
@@ -178,7 +527,43 @@ function renderStatChips(stats) {
 function setOrdersChromeVisible(visible) {
   ordersFilterCard?.classList.toggle("hidden", !visible);
   statChips?.classList.toggle("hidden", !visible);
-  sapAlertWrap?.closest(".page-topbar-actions")?.classList.toggle("hidden", !visible);
+  sapRetryBtn?.classList.toggle("hidden", !visible);
+  sapAlertWrap?.classList.toggle("hidden", !visible);
+}
+
+async function runSapRetryBatch(btn) {
+  if (
+    !window.confirm(
+      "Retry all failed SAP posts?\n\nThis runs the same job as the daily 08:00 IST sap_retry schedule (up to 50 failed orders)."
+    )
+  ) {
+    return;
+  }
+
+  const button = btn || sapRetryBtn;
+  if (!button) return;
+
+  button.disabled = true;
+  const originalLabel = button.textContent;
+  button.textContent = "Retrying…";
+
+  try {
+    const result = await apiPost("/v1/walmart/sap-retry");
+    hideError();
+    await loadOrders(true);
+    const posted = result?.posted ?? 0;
+    const failed = result?.failed ?? 0;
+    const skipped = result?.skipped ?? 0;
+    const candidates = result?.candidates ?? 0;
+    window.alert(
+      `SAP retry finished.\n\nCandidates: ${candidates}\nPosted: ${posted}\nFailed: ${failed}\nSkipped: ${skipped}`
+    );
+  } catch (err) {
+    showError(`SAP retry failed: ${err.message}`);
+  } finally {
+    button.disabled = false;
+    button.textContent = originalLabel;
+  }
 }
 
 function setRecordCount(shown, total) {
@@ -213,6 +598,7 @@ function normalizeOrderItems(items) {
         ship_node_type: row.ship_node_type,
         order_date_ms: row.order_date_ms,
         has_shipping_charges: row.has_shipping_charges,
+        ship_to_state: row.ship_to_state,
         status_date: row.status_date,
         updated_at: row.updated_at,
         line_count: 0,
@@ -255,7 +641,81 @@ function sortedLines(lines) {
   });
 }
 
+function formatPacificDateOnly(value) {
+  if (value == null || value === "") return "—";
+  const text = String(value).slice(0, 10);
+  const parts = text.split("-");
+  if (parts.length !== 3) return text;
+  const d = new Date(Date.UTC(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2])));
+  if (Number.isNaN(d.getTime())) return text;
+  const date = d.toLocaleDateString("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+  return `${date} Pacific`;
+}
+
+function lineShipDateTimeMsFromJson(jsonLine) {
+  if (!jsonLine) return null;
+  const statuses = asArray(jsonLine.orderLineStatuses?.orderLineStatus);
+  if (!statuses.length) return null;
+  const shipDates = statuses
+    .map((status) => Number(status?.trackingInfo?.shipDateTime))
+    .filter((ms) => Number.isFinite(ms) && ms > 0);
+  return shipDates.length ? Math.max(...shipDates) : null;
+}
+
+function resolveShipDateTimeMs(line, jsonLine) {
+  if (line?.ship_date_time_ms != null) return line.ship_date_time_ms;
+  return lineShipDateTimeMsFromJson(jsonLine);
+}
+
+function formatShipDatePacific(line) {
+  const ms = line?.ship_date_time_ms;
+  if (ms != null) {
+    return formatOrderDatePacific(ms);
+  }
+  if (line?.ship_date_pacific) {
+    return formatPacificDateOnly(line.ship_date_pacific);
+  }
+  return "—";
+}
+
+function orderShipDatePacificLabel(detail) {
+  const jsonLines = orderLineItemsFromDetail(detail);
+  const jsonByLine = new Map(jsonLines.map((line) => [String(line.lineNumber), line]));
+  const lines = detail?.lines || [];
+  let maxMs = null;
+  let maxPacific = null;
+  for (const line of lines) {
+    const ms = resolveShipDateTimeMs(line, jsonByLine.get(String(line.line_number)));
+    if (ms != null && (maxMs == null || ms > maxMs)) {
+      maxMs = ms;
+      maxPacific = line.ship_date_pacific || null;
+    }
+  }
+  if (maxMs == null) {
+    for (const jsonLine of jsonLines) {
+      const ms = lineShipDateTimeMsFromJson(jsonLine);
+      if (ms != null && (maxMs == null || ms > maxMs)) maxMs = ms;
+    }
+  }
+  if (maxMs != null) return formatOrderDatePacific(maxMs);
+  if (maxPacific) return formatPacificDateOnly(maxPacific);
+  return "—";
+}
+
 function formatOrderDateUtc(ms) {
+  return formatOrderDateWithTz(ms, "UTC", "UTC");
+}
+
+function formatOrderDatePacific(ms) {
+  return formatOrderDateWithTz(ms, "America/Los_Angeles", "Pacific");
+}
+
+function formatOrderDateWithTz(ms, timeZone, tzLabel) {
   if (ms == null || ms === "") return "—";
   const d = new Date(Number(ms));
   if (Number.isNaN(d.getTime())) return "—";
@@ -263,18 +723,26 @@ function formatOrderDateUtc(ms) {
     day: "2-digit",
     month: "short",
     year: "numeric",
-    timeZone: "UTC",
+    timeZone,
   });
   const time = d.toLocaleTimeString("en-GB", {
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
-    timeZone: "UTC",
+    timeZone,
   });
-  return `${date} ${time} UTC`;
+  return `${date} ${time} ${tzLabel}`;
 }
 
 function formatDateStackFromMs(ms) {
+  return formatDateStackFromMsWithTz(ms, "UTC", "UTC");
+}
+
+function formatDateStackFromMsPacific(ms) {
+  return formatDateStackFromMsWithTz(ms, "America/Los_Angeles", "Pacific");
+}
+
+function formatDateStackFromMsWithTz(ms, timeZone, tzLabel) {
   if (ms == null || ms === "") {
     return '<span class="date-stack"><span class="date-line">—</span></span>';
   }
@@ -286,15 +754,15 @@ function formatDateStackFromMs(ms) {
     day: "2-digit",
     month: "short",
     year: "numeric",
-    timeZone: "UTC",
+    timeZone,
   });
   const timeLine = d.toLocaleTimeString("en-GB", {
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
-    timeZone: "UTC",
+    timeZone,
   });
-  return `<span class="date-stack"><span class="date-line">${dateLine}</span><span class="time-line">${timeLine} UTC</span></span>`;
+  return `<span class="date-stack"><span class="date-line">${dateLine}</span><span class="time-line">${timeLine} ${tzLabel}</span></span>`;
 }
 
 function displayLineIndex(index) {
@@ -435,15 +903,20 @@ function renderOrders(items, offset, total) {
         ${poMeta}
       </td>
       <td class="cell-mono">${escapeHtml(row.customer_order_id || "—")}</td>
+      <td class="cell-center cell-state">${escapeHtml(row.ship_to_state || "—")}</td>
       <td>${formatDateStackFromMs(row.order_date_ms)}</td>
+      <td>${formatDateStackFromMsPacific(row.order_date_ms)}</td>
       <td class="cell-stack cell-center">${renderLineStack(lines, (_line, index) => `<div class="line-stack line-num">${displayLineIndex(index)}</div>`)}</td>
-      <td class="cell-stack">${renderLineStack(lines, (line) => `<div class="line-stack">${statusBadge(line.status)}</div>`)}</td>
+      <td class="cell-stack">${renderLineStack(lines, (line) => `<div class="line-stack">${lineStatusBadge(line)}</div>`)}</td>
       <td class="cell-stack cell-mono">${renderLineStack(lines, (line) => `<div class="line-stack">${escapeHtml(line.sku || "—")}</div>`)}</td>
-      <td class="cell-stack cell-center">${renderLineStack(lines, (line) => `<div class="line-stack">${escapeHtml(line.quantity_amount || "—")}</div>`)}</td>
+      <td class="cell-stack cell-center">${renderLineStack(lines, (line) => `<div class="line-stack">${lineQuantitySummary(line)}</div>`)}</td>
       <td class="cell-stack">${renderLineStack(lines, (line) => `<div class="line-stack">${formatDateStack(line.status_date)}</div>`)}</td>
       <td>${formatDateStack(row.updated_at)}</td>
       <td class="cell-sap-sync">${renderSapSyncCell(row)}</td>
-      <td class="cell-center"><button type="button" class="btn-view">View</button></td>
+      <td class="cell-center cell-actions">
+        <button type="button" class="btn-view">View</button>
+        ${renderPostSapButton(row)}
+      </td>
     </tr>`;
     })
     .join("");
@@ -452,6 +925,14 @@ function renderOrders(items, offset, total) {
     btn.addEventListener("click", () => {
       const row = btn.closest(".data-row");
       toggleOrderDetail(btn, row.getAttribute("data-po"));
+    });
+  });
+
+  ordersBody.querySelectorAll(".data-row .btn-post-sap").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const row = btn.closest(".data-row");
+      postOrderToSap(row.getAttribute("data-po"), btn);
     });
   });
 
@@ -527,33 +1008,119 @@ function orderLineItemsFromDetail(detail) {
 
 function parseLineCharges(orderLine) {
   const charges = asArray(orderLine?.charges?.charge);
+  const taxLines = [];
   const result = {
-    unitPrice: null,
+    itemPrice: null,
+    discount: 0,
+    netItemPrice: null,
     currency: "USD",
     productTax: null,
     shipping: null,
     shippingTax: null,
+    taxLines,
+    totalTax: 0,
   };
+
+  function promotionDiscountAmount(charge) {
+    const chargeName = String(charge.chargeName || "").trim();
+    const chargeType = String(charge.chargeType || "").toUpperCase();
+    const amount = charge.chargeAmount?.amount;
+    if (amount == null || Number(amount) >= 0) return null;
+    if (chargeName === "Promotion" || chargeType === "PRODUCT") {
+      return Math.abs(Number(amount));
+    }
+    return null;
+  }
+
+  function appendTaxLine(name, amount, category) {
+    if (amount == null || Number.isNaN(Number(amount)) || Number(amount) <= 0) return;
+    taxLines.push({
+      name,
+      amount: Number(amount),
+      category,
+    });
+  }
+
+  function chargeTax(charge) {
+    const taxName = charge.tax?.taxName;
+    let taxAmount = charge.tax?.taxAmount?.amount;
+    if (taxAmount == null) {
+      taxAmount = charge.taxAndOtherFees?.taxAndOtherFeesAmount?.amount;
+    }
+    const label = taxName || charge.taxAndOtherFees?.taxAndOtherFeesName || null;
+    return { name: label, amount: taxAmount != null ? Number(taxAmount) : null };
+  }
 
   for (const charge of charges) {
     const chargeType = String(charge.chargeType || "").toUpperCase();
     const chargeName = String(charge.chargeName || "");
     const amount = charge.chargeAmount?.amount;
-    const tax =
-      charge.tax?.taxAmount?.amount ??
-      charge.taxAndOtherFees?.taxAndOtherFeesAmount?.amount;
+    const { name: taxName, amount: taxAmount } = chargeTax(charge);
 
     if (chargeType === "PRODUCT" || chargeName === "ItemPrice") {
-      result.unitPrice = amount != null ? Number(amount) : null;
-      result.productTax = tax != null ? Number(tax) : null;
+      result.itemPrice = amount != null ? Number(amount) : null;
+      result.productTax = taxAmount;
       result.currency = charge.chargeAmount?.currency || result.currency;
-    } else if (chargeType === "SHIPPING" || chargeName === "Shipping") {
+      appendTaxLine("Product tax", taxAmount, "product");
+      continue;
+    }
+
+    if (chargeType === "SHIPPING" || chargeName === "Shipping") {
       result.shipping = amount != null ? Number(amount) : null;
-      result.shippingTax = tax != null ? Number(tax) : null;
+      result.shippingTax = taxAmount;
+      appendTaxLine("Shipping tax", taxAmount, "shipping");
+      continue;
+    }
+
+    if (taxAmount != null && taxAmount > 0) {
+      appendTaxLine(taxName || chargeName || "Other tax", taxAmount, "other");
     }
   }
 
+  for (const refundCharge of asArray(orderLine?.refund?.refundCharges?.refundCharge)) {
+    const amount = promotionDiscountAmount(refundCharge?.charge || {});
+    if (amount != null) result.discount += amount;
+  }
+
+  for (const charge of charges) {
+    const amount = promotionDiscountAmount(charge);
+    if (amount != null) result.discount += amount;
+  }
+
+  result.discount = result.discount > 0 ? Math.round(result.discount * 100) / 100 : 0;
+  if (result.itemPrice != null) {
+    result.netItemPrice = Math.round((result.itemPrice - result.discount) * 100) / 100;
+    result.grossUnitPrice = perUnitPrice(result.itemPrice, orderLine?.orderLineQuantity?.amount || "1");
+    result.netUnitPrice = perUnitPrice(result.netItemPrice, orderLine?.orderLineQuantity?.amount || "1");
+  }
+
+  result.totalTax = taxLines.reduce((sum, row) => sum + row.amount, 0);
   return result;
+}
+
+function renderTaxRows(charges, currency, hasPricing, hasShipping, qty) {
+  if (!hasPricing || !charges.taxLines?.length) {
+    return '<div><dt>Total tax</dt><dd class="money">—</dd></div>';
+  }
+
+  const rows = charges.taxLines
+    .filter((tax) => tax.category !== "shipping" || hasShipping)
+    .map(
+      (tax) => `
+        <div><dt>${escapeHtml(tax.name)} (total)</dt><dd class="money">${formatMoney(tax.amount, currency)}</dd></div>
+        <div><dt>${escapeHtml(tax.name)} (per unit)</dt><dd class="money">${formatMoney(perUnitPrice(tax.amount, qty), currency)}</dd></div>`
+    )
+    .join("");
+
+  return `
+    ${rows}
+    <div class="detail-dl-subtotal"><dt>Total tax</dt><dd class="money">${formatMoney(charges.totalTax, currency)}</dd></div>`;
+}
+
+function perUnitPrice(itemPrice, qty) {
+  if (itemPrice == null || Number.isNaN(Number(itemPrice))) return null;
+  const q = parseInt(qty, 10) || 1;
+  return Number(itemPrice) / q;
 }
 
 function formatMoney(amount, currency = "USD") {
@@ -583,21 +1150,50 @@ function mergeLinesWithCharges(dbLines, jsonLines) {
       10
     ) || 1;
     const hasShipping = charges.shipping != null && charges.shipping > 0;
+    const netItemPrice =
+      charges.netItemPrice != null
+        ? charges.netItemPrice
+        : charges.itemPrice != null
+          ? charges.itemPrice - (charges.discount || 0)
+          : null;
     const lineTotal =
-      (charges.unitPrice ?? 0) +
-      (charges.productTax ?? 0) +
-      (charges.shipping ?? 0) +
-      (charges.shippingTax ?? 0);
+      (netItemPrice ?? 0) +
+      (charges.totalTax ?? 0) +
+      (charges.shipping ?? 0);
 
     return {
       ...line,
-      charges,
+      ship_date_time_ms: resolveShipDateTimeMs(line, jsonLine),
+      charges: {
+        ...charges,
+        grossUnitPrice: charges.grossUnitPrice ?? perUnitPrice(charges.itemPrice, qty),
+        unitPrice:
+          charges.discount > 0
+            ? (charges.netUnitPrice ?? perUnitPrice(netItemPrice, qty))
+            : (charges.grossUnitPrice ?? perUnitPrice(charges.itemPrice, qty)),
+      },
       qty,
       hasShipping,
       lineTotal: jsonLine ? lineTotal : null,
       shipMethod: jsonLine?.fulfillment?.shipMethod || null,
     };
   });
+}
+
+function renderDiscountRow(charges, currency, hasPricing, qty) {
+  if (!hasPricing || !charges.discount) return "";
+  return `<div><dt>Promotion (total)</dt><dd class="money money-discount">-${formatMoney(charges.discount, currency)}</dd></div>
+    <div><dt>Promotion (per unit)</dt><dd class="money money-discount">-${formatMoney(perUnitPrice(charges.discount, qty), currency)}</dd></div>`;
+}
+
+function renderUnitPriceRow(charges, currency, hasPricing) {
+  if (!hasPricing || charges.unitPrice == null) {
+    return `<div><dt>Unit price</dt><dd class="money">—</dd></div>`;
+  }
+  if (charges.discount > 0) {
+    return `<div><dt>Unit price (Discount applied)</dt><dd class="money">${formatMoney(charges.unitPrice, currency)}</dd></div>`;
+  }
+  return `<div><dt>Unit price</dt><dd class="money">${formatMoney(charges.unitPrice, currency)}</dd></div>`;
 }
 
 function renderLineDetailBox(row, index, currency, hasPricing) {
@@ -610,19 +1206,21 @@ function renderLineDetailBox(row, index, currency, hasPricing) {
     <div class="line-item-box">
       <div class="line-item-head">
         <span class="line-item-num">Line ${displayLineIndex(index)}</span>
-        ${statusBadge(row.status)}
+        ${lineStatusBadge(row)}
         <span class="line-item-meta cell-mono">${escapeHtml(row.sku || "—")}</span>
-        <span class="line-item-meta">Qty ${escapeHtml(String(row.qty))}</span>
+        <span class="line-item-meta">Qty ${lineQuantitySummary({...row, quantity_amount: row.qty})}</span>
       </div>
       <p class="line-item-product">${escapeHtml(row.product_name || "—")}</p>
       <div class="line-item-panels">
         <div class="line-item-panel">
           <div class="panel-title">Charges &amp; tax</div>
           <dl class="detail-dl">
-            <div><dt>Unit price</dt><dd class="money">${hasPricing ? formatMoney(c.unitPrice, currency) : "—"}</dd></div>
-            <div><dt>Product tax</dt><dd class="money">${hasPricing ? formatMoney(c.productTax, currency) : "—"}</dd></div>
-            <div><dt>Shipping</dt><dd class="money">${hasPricing ? shippingCell : "—"}</dd></div>
-            <div><dt>Shipping tax</dt><dd class="money">${hasPricing && row.hasShipping ? formatMoney(c.shippingTax, currency) : "—"}</dd></div>
+            <div><dt>Item price (total)</dt><dd class="money">${hasPricing ? formatMoney(c.itemPrice, currency) : "—"}</dd></div>
+            ${renderDiscountRow(c, currency, hasPricing, row.qty)}
+            ${renderUnitPriceRow(c, currency, hasPricing)}
+            ${renderTaxRows(c, currency, hasPricing, row.hasShipping, row.qty)}
+            <div><dt>Shipping (total)</dt><dd class="money">${hasPricing ? shippingCell : "—"}</dd></div>
+            <div><dt>Shipping (per unit)</dt><dd class="money">${hasPricing && row.hasShipping ? formatMoney(perUnitPrice(c.shipping, row.qty), currency) : "—"}</dd></div>
             <div class="detail-dl-total"><dt>Line total</dt><dd class="money money-total">${hasPricing ? formatMoney(row.lineTotal, currency) : "—"}</dd></div>
           </dl>
         </div>
@@ -631,6 +1229,7 @@ function renderLineDetailBox(row, index, currency, hasPricing) {
           <dl class="detail-dl">
             <div><dt>Tracking</dt><dd class="cell-mono">${escapeHtml(row.tracking_number || "—")}</dd></div>
             <div><dt>Carrier</dt><dd>${escapeHtml(row.carrier_name || "—")}</dd></div>
+            <div><dt>Ship date (Pacific)</dt><dd>${escapeHtml(formatShipDatePacific(row))}</dd></div>
             <div><dt>Ship method</dt><dd>${escapeHtml(row.shipMethod || "—")}</dd></div>
           </dl>
         </div>
@@ -640,26 +1239,37 @@ function renderLineDetailBox(row, index, currency, hasPricing) {
 
 function renderUnifiedOrderTable(detail, lines) {
   const enriched = mergeLinesWithCharges(lines, orderLineItemsFromDetail(detail));
-  const hasPricing = enriched.some((row) => row.charges.unitPrice != null);
+  const hasPricing = enriched.some((row) => row.charges.itemPrice != null);
   const currency = enriched.find((row) => row.charges.currency)?.charges.currency || "USD";
 
   let subtotal = 0;
-  let productTax = 0;
+  let totalDiscount = 0;
+  let totalTax = 0;
   let shipping = 0;
-  let shippingTax = 0;
+  const taxBreakdown = new Map();
 
   const lineBoxes = enriched
     .map((row, index) => {
       const c = row.charges;
-      if (c.unitPrice != null) subtotal += c.unitPrice;
-      if (c.productTax != null) productTax += c.productTax;
+      if (c.itemPrice != null) subtotal += c.itemPrice;
+      if (c.discount) totalDiscount += c.discount;
+      if (c.totalTax != null) totalTax += c.totalTax;
       if (c.shipping != null) shipping += c.shipping;
-      if (c.shippingTax != null) shippingTax += c.shippingTax;
+      for (const tax of c.taxLines || []) {
+        taxBreakdown.set(tax.name, (taxBreakdown.get(tax.name) || 0) + tax.amount);
+      }
       return renderLineDetailBox(row, index, currency, hasPricing);
     })
     .join("");
 
-  const orderTotal = subtotal + productTax + shipping + shippingTax;
+  const orderTotal = subtotal - totalDiscount + totalTax + shipping;
+
+  const taxRows = [...taxBreakdown.entries()]
+    .map(
+      ([name, amount]) =>
+        `<div><dt>${escapeHtml(name)}</dt><dd class="money">${formatMoney(amount, currency)}</dd></div>`
+    )
+    .join("");
 
   const totalsBox = hasPricing
     ? `
@@ -667,9 +1277,10 @@ function renderUnifiedOrderTable(detail, lines) {
       <div class="panel-title">Order totals</div>
       <dl class="totals-dl">
         <div><dt>Subtotal</dt><dd class="money">${formatMoney(subtotal, currency)}</dd></div>
-        <div><dt>Product tax</dt><dd class="money">${formatMoney(productTax, currency)}</dd></div>
+        ${totalDiscount > 0 ? `<div><dt>Promotion</dt><dd class="money money-discount">-${formatMoney(totalDiscount, currency)}</dd></div>` : ""}
+        ${taxRows}
+        <div><dt>Total tax</dt><dd class="money">${formatMoney(totalTax, currency)}</dd></div>
         <div><dt>Shipping</dt><dd class="money">${shipping > 0 ? formatMoney(shipping, currency) : "—"}</dd></div>
-        <div><dt>Shipping tax</dt><dd class="money">${shippingTax > 0 ? formatMoney(shippingTax, currency) : "—"}</dd></div>
         <div class="totals-dl-grand"><dt>Grand total</dt><dd class="money money-total">${formatMoney(orderTotal, currency)}</dd></div>
       </dl>
     </div>`
@@ -803,6 +1414,13 @@ function renderSapTraceSection(sapSync) {
     </details>`;
 }
 
+function getShippingStateFromDetail(detail) {
+  if (detail?.ship_to_state) return detail.ship_to_state;
+  const order = getOrderFromDetail(detail);
+  const state = order?.shippingInfo?.postalAddress?.state;
+  return state ? String(state).trim().toUpperCase() : null;
+}
+
 function renderTracePanel(detail, highlightLine) {
   const lines = sortedLines(detail.lines || []);
 
@@ -826,6 +1444,7 @@ function renderTracePanel(detail, highlightLine) {
           <div class="trace-sub">
             PO ${escapeHtml(detail.purchase_order_id)} · ${lines.length} line item(s)
             · Order date ${escapeHtml(formatOrderDateUtc(detail.order_date_ms))}
+            · ${escapeHtml(formatOrderDatePacific(detail.order_date_ms))}
           </div>
         </div>
         <button type="button" class="btn-outline btn-hide-trace">Hide trace</button>
@@ -834,6 +1453,9 @@ function renderTracePanel(detail, highlightLine) {
       <div class="trace-cards">
         <div class="trace-card"><span class="trace-card-label">Customer order</span><span class="trace-card-value">${escapeHtml(detail.customer_order_id || "—")}</span></div>
         <div class="trace-card"><span class="trace-card-label">Order date (UTC)</span><span class="trace-card-value">${escapeHtml(formatOrderDateUtc(detail.order_date_ms))}</span></div>
+        <div class="trace-card"><span class="trace-card-label">Order date (Pacific)</span><span class="trace-card-value">${escapeHtml(formatOrderDatePacific(detail.order_date_ms))}</span></div>
+        <div class="trace-card"><span class="trace-card-label">Ship date (Pacific)</span><span class="trace-card-value">${escapeHtml(orderShipDatePacificLabel(detail))}</span></div>
+        <div class="trace-card"><span class="trace-card-label">Ship to state (PayTo / ShipTo)</span><span class="trace-card-value">${escapeHtml(getShippingStateFromDetail(detail) || "—")}</span></div>
         <div class="trace-card"><span class="trace-card-label">Shipping charge</span><span class="trace-card-value">${detail.has_shipping_charges ? "Applicable" : "Not applicable"}</span></div>
         <div class="trace-card"><span class="trace-card-label">Ship node</span><span class="trace-card-value">${escapeHtml(detail.ship_node_type || "—")}</span></div>
         <div class="trace-card"><span class="trace-card-label">Line items</span><span class="trace-card-value">${lines.length}</span></div>
@@ -1072,23 +1694,8 @@ async function loadOrders(resetPage = false) {
   ordersBody.innerHTML =
     `<tr><td colspan="${COLSPAN}" class="loading-cell">Loading orders…</td></tr>`;
 
-  const status = statusFilter.value;
-  const po = poFilter.value.trim();
   const limit = pageSize();
-  const statusQ = status ? `&status=${encodeURIComponent(status)}` : "";
-  const poQ = po ? `&purchase_order_id=${encodeURIComponent(po)}` : "";
-  const fromQ = orderDateFrom.value
-    ? `&order_date_from=${encodeURIComponent(orderDateFrom.value)}`
-    : "";
-  const toQ = orderDateTo.value
-    ? `&order_date_to=${encodeURIComponent(orderDateTo.value)}`
-    : "";
-  const shipQ = shippingFilter.value
-    ? `&has_shipping=${encodeURIComponent(shippingFilter.value)}`
-    : "";
-  const sapQ = sapSyncFilter?.value
-    ? `&sap_sync=${encodeURIComponent(sapSyncFilter.value)}`
-    : "";
+  updateSortIndicators();
 
   let stats = null;
   try {
@@ -1105,8 +1712,12 @@ async function loadOrders(resetPage = false) {
 
   try {
     const orders = await apiGet(
-      `/v1/walmart/orders?limit=${limit}&offset=${currentOffset}${statusQ}${poQ}${fromQ}${toQ}${shipQ}${sapQ}`
+      `/v1/walmart/orders?${buildOrdersQueryParams(limit, currentOffset)}`
     );
+    if (orders.sort_by) sortBy = orders.sort_by;
+    if (orders.sort_dir) sortDir = orders.sort_dir;
+    updateSortIndicators();
+    const status = statusFilter.value;
     const total =
       orders.total ?? filteredTotal(stats, status) ?? orders.items?.length ?? 0;
     const groupedItems = normalizeOrderItems(orders.items || []);
@@ -1116,6 +1727,22 @@ async function loadOrders(resetPage = false) {
     if (String(err.message).includes("has_shipping_charges")) {
       hint +=
         " — Run DB migration: sql/walmart_order_headers_add_shipping.sql (adds has_shipping_charges column).";
+    }
+    if (String(err.message).includes("has_county_surcharge_tax")) {
+      hint +=
+        " — Run DB migration: sql/walmart_order_headers_add_county_surcharge.sql (adds has_county_surcharge_tax column).";
+    }
+    if (String(err.message).includes("has_promotion_discount")) {
+      hint +=
+        " — Run DB migration: sql/walmart_order_headers_add_promotion_discount.sql (adds has_promotion_discount column).";
+    }
+    if (String(err.message).includes("ship_to_state")) {
+      hint +=
+        " — Run DB migration: sql/walmart_order_headers_add_ship_to_state.sql (adds ship_to_state column).";
+    }
+    if (String(err.message).includes("ship_date_pacific") || String(err.message).includes("ship_date_time_ms")) {
+      hint +=
+        " — Run: psql \"$DATABASE_URL\" -f sql/walmart_b2c_apply_migrations.sql";
     }
     showError(`Orders failed: ${hint}`);
     ordersBody.innerHTML =
@@ -1213,11 +1840,22 @@ document.getElementById("refresh-btn").addEventListener("click", () => {
 
 let poFilterTimer = null;
 
-function schedulePoFilterSearch() {
+function scheduleFilterSearch() {
   clearTimeout(poFilterTimer);
   poFilterTimer = setTimeout(() => {
     loadOrders(true).catch((e) => showError(e.message));
   }, 400);
+}
+
+function bindTextFilter(el) {
+  if (!el) return;
+  el.addEventListener("input", scheduleFilterSearch);
+  el.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      clearTimeout(poFilterTimer);
+      loadOrders(true).catch((err) => showError(err.message));
+    }
+  });
 }
 
 statusFilter.addEventListener("change", () => {
@@ -1232,9 +1870,43 @@ orderDateTo.addEventListener("change", () => {
   loadOrders(true).catch((e) => showError(e.message));
 });
 
+statusDateFrom.addEventListener("change", () => {
+  loadOrders(true).catch((e) => showError(e.message));
+});
+
+statusDateTo.addEventListener("change", () => {
+  loadOrders(true).catch((e) => showError(e.message));
+});
+
+updatedFrom.addEventListener("change", () => {
+  loadOrders(true).catch((e) => showError(e.message));
+});
+
+updatedTo.addEventListener("change", () => {
+  loadOrders(true).catch((e) => showError(e.message));
+});
+
 shippingFilter.addEventListener("change", () => {
   loadOrders(true).catch((e) => showError(e.message));
 });
+
+if (countySurchargeFilter) {
+  countySurchargeFilter.addEventListener("change", () => {
+    loadOrders(true).catch((e) => showError(e.message));
+  });
+}
+
+if (promotionDiscountFilter) {
+  promotionDiscountFilter.addEventListener("change", () => {
+    loadOrders(true).catch((e) => showError(e.message));
+  });
+}
+
+if (lineCountFilter) {
+  lineCountFilter.addEventListener("change", () => {
+    loadOrders(true).catch((e) => showError(e.message));
+  });
+}
 
 if (sapSyncFilter) {
   sapSyncFilter.addEventListener("change", () => {
@@ -1242,6 +1914,44 @@ if (sapSyncFilter) {
     loadOrders(true).catch((e) => showError(e.message));
   });
 }
+
+bindTextFilter(poFilter);
+bindTextFilter(orderFilter);
+bindTextFilter(skuFilter);
+bindTextFilter(itemFilter);
+bindTextFilter(qtyFilter);
+
+document.querySelectorAll(".sortable-th .sortable-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const th = btn.closest(".sortable-th");
+    const key = th?.getAttribute("data-sort-key");
+    if (key) toggleSort(key);
+  });
+});
+
+clearFiltersBtn.addEventListener("click", () => {
+  poFilter.value = "";
+  orderFilter.value = "";
+  statusFilter.value = "";
+  skuFilter.value = "";
+  itemFilter.value = "";
+  qtyFilter.value = "";
+  orderDateFrom.value = "";
+  orderDateTo.value = "";
+  statusDateFrom.value = "";
+  statusDateTo.value = "";
+  updatedFrom.value = "";
+  updatedTo.value = "";
+  shippingFilter.value = "";
+  if (countySurchargeFilter) countySurchargeFilter.value = "";
+  if (promotionDiscountFilter) promotionDiscountFilter.value = "";
+  if (lineCountFilter) lineCountFilter.value = "";
+  if (sapSyncFilter) sapSyncFilter.value = "";
+  sortBy = "order_date";
+  sortDir = "desc";
+  updateSortIndicators();
+  loadOrders(true).catch((e) => showError(e.message));
+});
 
 if (sapAlertBell) {
   sapAlertBell.addEventListener("click", async (e) => {
@@ -1265,29 +1975,16 @@ if (sapAlertViewAll) {
   });
 }
 
+if (sapRetryBtn) {
+  sapRetryBtn.addEventListener("click", () => {
+    runSapRetryBatch(sapRetryBtn).catch((e) => showError(e.message));
+  });
+}
+
 document.addEventListener("click", (e) => {
   if (!sapAlertWrap?.contains(e.target)) {
     closeSapAlertPanel();
   }
-});
-
-poFilter.addEventListener("input", schedulePoFilterSearch);
-
-poFilter.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") {
-    clearTimeout(poFilterTimer);
-    loadOrders(true).catch((err) => showError(err.message));
-  }
-});
-
-clearFiltersBtn.addEventListener("click", () => {
-  poFilter.value = "";
-  statusFilter.value = "";
-  orderDateFrom.value = "";
-  orderDateTo.value = "";
-  shippingFilter.value = "";
-  if (sapSyncFilter) sapSyncFilter.value = "";
-  loadOrders(true).catch((e) => showError(e.message));
 });
 
 pageSizeSelect.addEventListener("change", () => {
@@ -1321,12 +2018,43 @@ document.querySelector('.nav-item[href="#"]').addEventListener("click", (e) => {
   showOrdersPanel();
 });
 
-loadOrders(true).catch((e) => {
-  showError(e.message);
-  ordersBody.innerHTML =
-    `<tr><td colspan="${COLSPAN}" class="loading-cell">Failed to load data.</td></tr>`;
-});
+updateSortIndicators();
 
-if (isFileProtocol()) {
-  showError(fileProtocolHelp());
+if (loginForm) {
+  loginForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (loginError) {
+      loginError.textContent = "";
+      loginError.classList.add("hidden");
+    }
+    loginSubmit.disabled = true;
+    const originalLabel = loginSubmit.textContent;
+    loginSubmit.textContent = "Signing in…";
+    try {
+      await loginWithPassword(loginEmail.value.trim(), loginPassword.value);
+      loginPassword.value = "";
+      showAppShell();
+      await loadOrders(true);
+      hideError();
+    } catch (err) {
+      if (loginError) {
+        loginError.textContent = err.message || "Sign in failed";
+        loginError.classList.remove("hidden");
+      }
+    } finally {
+      loginSubmit.disabled = false;
+      loginSubmit.textContent = originalLabel;
+    }
+  });
 }
+
+if (logoutBtn) {
+  logoutBtn.addEventListener("click", () => {
+    clearAuthSession();
+    showLoginScreen();
+  });
+}
+
+bootstrapApp().catch((e) => {
+  showLoginScreen(e.message);
+});

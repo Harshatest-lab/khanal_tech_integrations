@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 import psycopg
 
-from walmart.order_pricing import line_quantity, parse_line_charges
+from walmart.dates import PACIFIC, ms_to_pacific_date_str
+from walmart.order_pricing import (
+    line_invoiceable_quantity,
+    line_quantity,
+    net_unit_price,
+    parse_line_charges,
+)
 from walmart.sap_hana import DEFAULT_WAREHOUSE, fetch_batches_for_item
 from walmart.sap_item_lookup import resolve_item_code
-from walmart.walmart_store import _as_list, ms_to_utc_datetime
+from walmart.walmart_store import (
+    _as_list,
+    order_ship_date_time_ms,
+    order_shipping_state,
+)
 
 # SAP B1 constants (Walmart B2C)
 CARD_CODE = "C00002"
@@ -19,16 +29,26 @@ PAY_TO_CODE = "Walmart-B2C"
 WAREHOUSE_CODE = DEFAULT_WAREHOUSE
 TAX_CODE = "etax0"
 U_CHANNEL = "Walmart_US"
+U_CREATED_BY = "Posted By Walmart API"
 TAX_ITEM_CODE = "EXP000003"
 TAX_ACCOUNT_CODE = "_SYS00000000059"
 SHIPPING_ITEM_CODE = "EXP000004"
 SHIPPING_ACCOUNT_CODE = "_SYS00000000084"
 
 
-def _order_date_str(order_date_ms: int | None) -> str:
+def _order_date_pacific_str(order_date_ms: int | None) -> str:
+    """SAP TaxDate = Walmart orderDate in US Pacific."""
     if order_date_ms is None:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    return ms_to_utc_datetime(int(order_date_ms)).strftime("%Y-%m-%d")
+        return datetime.now(PACIFIC).strftime("%Y-%m-%d")
+    return ms_to_pacific_date_str(int(order_date_ms))
+
+
+def _ship_date_pacific_str(order: dict[str, Any], order_date_ms: int | None) -> str:
+    """SAP DocDate = shipDateTime in US Pacific (falls back to order date Pacific)."""
+    ship_ms = order_ship_date_time_ms(order)
+    if ship_ms is not None:
+        return ms_to_pacific_date_str(ship_ms)
+    return _order_date_pacific_str(order_date_ms)
 
 
 def _allocate_batches(
@@ -102,11 +122,13 @@ def _expense_line(
     account_code: str,
     customer_order_id: str,
     purchase_order_id: str,
+    quantity: float = 1,
+    unit_price_precision: int = 2,
 ) -> dict[str, Any]:
     return {
         "ItemCode": item_code,
-        "Quantity": 1,
-        "UnitPrice": round(unit_price, 2),
+        "Quantity": quantity,
+        "UnitPrice": round(unit_price, unit_price_precision),
         "WarehouseCode": WAREHOUSE_CODE,
         "TaxCode": TAX_CODE,
         "AccountCode": account_code,
@@ -129,13 +151,13 @@ def build_sap_invoice_payload(
         raise ValueError("Order missing purchaseOrderId or customerOrderId")
 
     order_date_ms = order.get("orderDate")
-    doc_date = _order_date_str(int(order_date_ms) if order_date_ms is not None else None)
+    order_date_ms_int = int(order_date_ms) if order_date_ms is not None else None
+    doc_date = _ship_date_pacific_str(order, order_date_ms_int)
+    tax_date = _order_date_pacific_str(order_date_ms_int)
     ship_node_type = (order.get("shipNode") or {}).get("type")
 
     document_lines: list[dict[str, Any]] = []
-    total_product_tax = 0.0
-    total_shipping_tax = 0.0
-    total_shipping = 0.0
+    total_all_tax = 0.0
 
     order_lines = _as_list(order.get("orderLines", {}).get("orderLine"))
     for order_line in order_lines:
@@ -145,26 +167,26 @@ def build_sap_invoice_payload(
             raise ValueError(f"Order {purchase_order_id} has a line without SKU")
 
         charges = parse_line_charges(order_line)
-        unit_price = charges.get("unit_price")
-        if unit_price is None:
-            raise ValueError(f"Order {purchase_order_id} line {order_line.get('lineNumber')} missing unit price")
+        item_price = charges.get("item_price")
+        if item_price is None:
+            raise ValueError(f"Order {purchase_order_id} line {order_line.get('lineNumber')} missing item price")
 
         qty = line_quantity(order_line)
+        invoiceable_qty = line_invoiceable_quantity(order_line)
+        if invoiceable_qty <= 0:
+            continue
+        fulfilled_ratio = min(invoiceable_qty / qty, 1.0)
+        discount = float(charges.get("discount") or 0.0)
+        unit_price = net_unit_price(float(item_price), discount, qty)
         item_code = resolve_item_code(conn, wm_sku)
 
-        product_tax = float(charges.get("product_tax") or 0.0)
         shipping = float(charges.get("shipping") or 0.0)
-        shipping_tax = float(charges.get("shipping_tax") or 0.0)
-
-        total_product_tax += product_tax
-        total_shipping_tax += shipping_tax
-        if shipping > 0:
-            total_shipping += shipping
+        total_all_tax += float(charges.get("total_tax") or 0.0) * fulfilled_ratio
 
         document_lines.append(
             _product_document_line(
                 item_code=item_code,
-                quantity=qty,
+                quantity=invoiceable_qty,
                 unit_price=unit_price,
                 customer_order_id=customer_order_id,
                 purchase_order_id=purchase_order_id,
@@ -172,7 +194,21 @@ def build_sap_invoice_payload(
             )
         )
 
-    total_tax = round(total_product_tax + total_shipping_tax, 2)
+        if shipping > 0:
+            document_lines.append(
+                _expense_line(
+                    item_code=SHIPPING_ITEM_CODE,
+                    quantity=1,
+                    unit_price=shipping * fulfilled_ratio,
+                    unit_price_precision=6,
+                    account_code=SHIPPING_ACCOUNT_CODE,
+                    customer_order_id=customer_order_id,
+                    purchase_order_id=purchase_order_id,
+                )
+            )
+
+    # Single tax expense line: product tax + fee taxes (e.g. County Surcharge) + shipping tax.
+    total_tax = round(total_all_tax, 2)
     if total_tax > 0:
         document_lines.append(
             _expense_line(
@@ -184,30 +220,24 @@ def build_sap_invoice_payload(
             )
         )
 
-    if total_shipping > 0:
-        document_lines.append(
-            _expense_line(
-                item_code=SHIPPING_ITEM_CODE,
-                unit_price=round(total_shipping, 2),
-                account_code=SHIPPING_ACCOUNT_CODE,
-                customer_order_id=customer_order_id,
-                purchase_order_id=purchase_order_id,
-            )
-        )
-
     comments = (
         f"Walmart B2C | Order {purchase_order_id} | CustomerOrderId {customer_order_id}"
     )
     if ship_node_type:
         comments += f" | ShipNode {ship_node_type}"
 
+    ship_to_code = order_shipping_state(order) or PAY_TO_CODE
+
     return {
         "CardCode": CARD_CODE,
         "DocDate": doc_date,
+        "TaxDate": tax_date,
         "DocDueDate": doc_date,
         "Series": SERIES,
         "NumAtCard": customer_order_id,
-        "PayToCode": PAY_TO_CODE,
+        "PayToCode": ship_to_code,
+        "ShipToCode": ship_to_code,
+        "U_CreatedBy": U_CREATED_BY,
         "Comments": comments,
         "DocumentLines": document_lines,
     }
