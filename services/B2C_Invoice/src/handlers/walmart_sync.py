@@ -1,4 +1,4 @@
-"""Lambda entry: EventBridge schedule or manual invoke (updation / creation / sap_retry)."""
+"""Lambda entry: EventBridge schedule or manual invoke."""
 
 from __future__ import annotations
 
@@ -21,7 +21,12 @@ from khanal_shared.logging import configure_logging, log_json
 from walmart.credentials import DATABASE_URL, WM_BASIC_AUTH
 from walmart.order_creation import DEFAULT_LIMIT, DEFAULT_SHIP_NODE_TYPE, run_creation_sync
 from walmart.order_updation import run_updation_sync
-from walmart.sap_invoice_sync import DEFAULT_RETRY_LIMIT, run_sap_invoice_retry_sync
+from walmart.sap_invoice_sync import (
+    DEFAULT_RETRY_LIMIT,
+    DEFAULT_SAP_POST_LIMIT,
+    run_sap_invoice_post_sync,
+    run_sap_invoice_retry_sync,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +84,25 @@ def handler(event: dict[str, Any] | None, context: object) -> dict[str, Any]:
                 skipped=output.get("skipped"),
             )
             return {"ok": True, "mode": mode, **output}
+        if mode == "sap_post":
+            post_limit = int(payload.get("limit") or DEFAULT_SAP_POST_LIMIT)
+            output = run_sap_invoice_post_sync(
+                purchase_order_id=(payload.get("purchase_order_id") or "").strip() or None,
+                limit=post_limit,
+                post_to_sap=not bool(payload.get("no_post")),
+            )
+            log_json(
+                logger,
+                logging.INFO,
+                "walmart_sap_post_complete",
+                mode=mode,
+                candidates=output.get("candidates"),
+                posted=output.get("posted"),
+                prepared=output.get("prepared"),
+                failed=output.get("failed"),
+                skipped=output.get("skipped"),
+            )
+            return {"ok": True, "mode": mode, **output}
         if mode == "updation":
             output = run_updation_sync(
                 last_modified_start_date=payload.get("last_modified_start_date"),
@@ -103,7 +127,7 @@ def handler(event: dict[str, Any] | None, context: object) -> dict[str, Any]:
             )
         else:
             raise ValueError(
-                f"Unknown mode: {mode!r} (use 'updation', 'creation', or 'sap_retry')"
+                f"Unknown mode: {mode!r} (use 'updation', 'creation', 'sap_post', or 'sap_retry')"
             )
 
         log_json(

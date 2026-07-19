@@ -1,4 +1,4 @@
-"""HTTP API for Walmart orders dashboard (read-only RDS queries)."""
+"""HTTP API for Walmart orders dashboard."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from walmart.dashboard_api import (
     _clamp_limit,
     _clamp_offset,
 )
+from walmart.sap_invoice_sync import run_sap_invoice_post_single, run_sap_invoice_retry_sync
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,30 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             from walmart.sap_hana import fetch_fg_items
 
             return json_response(200, fetch_fg_items())
+
+        if path.endswith("/v1/walmart/sap-post") and method == "POST":
+            po = (q.get("purchase_order_id") or "").strip()
+            if not po:
+                return json_response(400, {"error": "purchase_order_id is required"})
+            result = run_sap_invoice_post_single(po)
+            if result.get("status") == "error":
+                return json_response(404, result)
+            if result.get("status") == "failed":
+                return json_response(502, result)
+            return json_response(200, result)
+
+        if path.endswith("/v1/walmart/sap-retry") and method == "POST":
+            po = (q.get("purchase_order_id") or "").strip() or None
+            limit_raw = (q.get("limit") or "").strip()
+            limit = int(limit_raw) if limit_raw.isdigit() else None
+            kwargs: dict[str, Any] = {
+                "purchase_order_id": po,
+                "post_to_sap": True,
+            }
+            if limit is not None:
+                kwargs["limit"] = limit
+            result = run_sap_invoice_retry_sync(**kwargs)
+            return json_response(200, {"ok": True, **result})
 
         with get_db_connection() as conn:
             if path.endswith("/v1/walmart/stats"):
@@ -104,10 +129,23 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
                     offset=offset,
                     status=q.get("status") or None,
                     purchase_order_id=(q.get("purchase_order_id") or "").strip() or None,
+                    customer_order_id=(q.get("customer_order_id") or "").strip() or None,
                     order_date_from=q.get("order_date_from") or None,
                     order_date_to=q.get("order_date_to") or None,
                     has_shipping=q.get("has_shipping") or None,
+                    county_surcharge_tax=q.get("county_surcharge_tax") or None,
+                    promotion_discount=q.get("promotion_discount") or None,
+                    line_count=q.get("line_count") or None,
                     sap_sync=q.get("sap_sync") or None,
+                    sku=(q.get("sku") or "").strip() or None,
+                    product_name=(q.get("product_name") or "").strip() or None,
+                    quantity=(q.get("quantity") or "").strip() or None,
+                    status_date_from=q.get("status_date_from") or None,
+                    status_date_to=q.get("status_date_to") or None,
+                    updated_from=q.get("updated_from") or None,
+                    updated_to=q.get("updated_to") or None,
+                    sort_by=q.get("sort_by") or None,
+                    sort_dir=q.get("sort_dir") or None,
                 )
                 return json_response(200, page)
 

@@ -10,7 +10,25 @@ provider:
   memorySize: 512
   timeout: 900
   httpApi:
-    cors: true
+    cors:
+      allowedOrigins:
+        - "*"
+      allowedHeaders:
+        - Content-Type
+        - Authorization
+      allowedMethods:
+        - GET
+        - POST
+        - OPTIONS
+    authorizers:
+      dashboardCognitoJwt:
+        type: jwt
+        identitySource:
+          - $request.header.Authorization
+        issuerUrl:
+          Fn::Sub: "https://cognito-idp.${AWS::Region}.amazonaws.com/${WalmartDashboardUserPool}"
+        audience:
+          - Ref: WalmartDashboardUserPoolClient
   iam:
     role:
       statements:
@@ -30,6 +48,12 @@ provider:
             - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/sl_config
             - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/credentials
             - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/b1_session
+        # SAP failure alerts to admin (Amazon SES).
+        - Effect: Allow
+          Action:
+            - ses:SendEmail
+            - ses:SendRawEmail
+          Resource: "*"
   environment:
     STAGE: ${self:provider.stage}
     LOG_LEVEL: ${env:LOG_LEVEL, 'INFO'}
@@ -42,6 +66,10 @@ provider:
     HANA_USE_SSM: ${env:HANA_USE_SSM, '1'}
     HANA_PROFILE: ${env:HANA_PROFILE, 'inc'}
     SAP_SL_PROFILE: ${env:SAP_SL_PROFILE, 'inc'}
+    WALMART_SAP_ALERT_ADMIN_EMAIL: ${env:WALMART_SAP_ALERT_ADMIN_EMAIL, 'cursorharsha@gmail.com'}
+    WALMART_SAP_ALERT_FROM_EMAIL: ${env:WALMART_SAP_ALERT_FROM_EMAIL, 'kflharshkfl@gmail.com'}
+    WALMART_DASHBOARD_URL: ${env:WALMART_DASHBOARD_URL, 'http://walmart-dashboard-khanalb2c.s3-website.ap-south-1.amazonaws.com/'}
+    WALMART_SES_REGION: ${env:WALMART_SES_REGION, 'ap-south-1'}
 
 layers:
   shared:
@@ -59,6 +87,25 @@ package:
     - "src/**"
 
 functions:
+  walmartAuth:
+    handler: src.handlers.walmart_auth.handler
+    memorySize: 256
+    timeout: 15
+    environment:
+      COGNITO_CLIENT_ID: !Ref WalmartDashboardUserPoolClient
+      COGNITO_USER_POOL_ID: !Ref WalmartDashboardUserPool
+      COGNITO_REGION: ${self:provider.region}
+    events:
+      - httpApi:
+          path: /v1/auth/config
+          method: get
+      - httpApi:
+          path: /v1/auth/login
+          method: post
+      - httpApi:
+          path: /v1/auth/refresh
+          method: post
+
   walmartSync:
     handler: src.handlers.walmart_sync.handler
     memorySize: 512
@@ -68,22 +115,25 @@ functions:
       SAP_SL_VERIFY_SSL: ${env:SAP_SL_VERIFY_SSL, 'true'}
       SAP_SL_PROFILE: ${env:SAP_SL_PROFILE, 'inc'}
       HANA_PROFILE: ${env:HANA_PROFILE, 'inc'}
-    vpc:
-      securityGroupIds:
-        - ${env:LAMBDA_VPC_SECURITY_GROUP_ID}
-      subnetIds:
-        - ${env:LAMBDA_VPC_SUBNET_ID_1}
-        - ${env:LAMBDA_VPC_SUBNET_ID_2}
+      SAP_SYNC_MAX_ATTEMPTS: ${env:SAP_SYNC_MAX_ATTEMPTS, '3'}
     layers:
       - { Ref: SharedLambdaLayer }
     events:
       - schedule:
-          rate: rate(15 minutes)
+          # Daily order pull only. 20:00 UTC = 01:30 IST.
+          rate: cron(0 20 * * ? *)
           enabled: true
           input:
             mode: updation
       - schedule:
-          rate: rate(30 minutes)
+          # Daily SAP posting after order pull. 20:30 UTC = 02:00 IST.
+          rate: cron(30 20 * * ? *)
+          enabled: true
+          input:
+            mode: sap_post
+      - schedule:
+          # Daily retry safety net. 02:30 UTC = 08:00 IST.
+          rate: cron(30 2 * * ? *)
           enabled: true
           input:
             mode: sap_retry
@@ -91,34 +141,109 @@ functions:
   walmartDashboardApi:
     handler: src.handlers.walmart_api.handler
     memorySize: 512
-    timeout: 60
-    vpc:
-      securityGroupIds:
-        - ${env:LAMBDA_VPC_SECURITY_GROUP_ID}
-      subnetIds:
-        - ${env:LAMBDA_VPC_SUBNET_ID_1}
-        - ${env:LAMBDA_VPC_SUBNET_ID_2}
+    timeout: 120
+    environment:
+      SAP_SL_USE_SSM: ${env:SAP_SL_USE_SSM, ''}
+      SAP_SL_VERIFY_SSL: ${env:SAP_SL_VERIFY_SSL, 'true'}
+      SAP_SL_PROFILE: ${env:SAP_SL_PROFILE, 'inc'}
+      HANA_PROFILE: ${env:HANA_PROFILE, 'inc'}
+      SAP_SYNC_MAX_ATTEMPTS: ${env:SAP_SYNC_MAX_ATTEMPTS, '3'}
     layers:
       - { Ref: SharedLambdaLayer }
     events:
       - httpApi:
           path: /v1/walmart/stats
           method: get
+          authorizer:
+            name: dashboardCognitoJwt
       - httpApi:
           path: /v1/walmart/orders
           method: get
+          authorizer:
+            name: dashboardCognitoJwt
+      - httpApi:
+          path: /v1/walmart/sap-post
+          method: post
+          authorizer:
+            name: dashboardCognitoJwt
+      - httpApi:
+          path: /v1/walmart/sap-retry
+          method: post
+          authorizer:
+            name: dashboardCognitoJwt
       - httpApi:
           path: /v1/walmart/sync-log
           method: get
+          authorizer:
+            name: dashboardCognitoJwt
       - httpApi:
           path: /v1/walmart/order-detail
           method: get
+          authorizer:
+            name: dashboardCognitoJwt
       - httpApi:
           path: /v1/walmart/sap-sync
           method: get
+          authorizer:
+            name: dashboardCognitoJwt
       - httpApi:
           path: /v1/walmart/sap-failures
           method: get
+          authorizer:
+            name: dashboardCognitoJwt
       - httpApi:
           path: /v1/walmart/sap-items
           method: get
+          authorizer:
+            name: dashboardCognitoJwt
+
+resources:
+  Resources:
+    WalmartDashboardUserPool:
+      Type: AWS::Cognito::UserPool
+      Properties:
+        UserPoolName: ${self:service}-${self:provider.stage}-dashboard
+        UsernameAttributes:
+          - email
+        AutoVerifiedAttributes:
+          - email
+        Policies:
+          PasswordPolicy:
+            MinimumLength: 10
+            RequireLowercase: true
+            RequireNumbers: true
+            RequireSymbols: false
+            RequireUppercase: true
+        AccountRecoverySetting:
+          RecoveryMechanisms:
+            - Name: verified_email
+              Priority: 1
+
+    WalmartDashboardUserPoolClient:
+      Type: AWS::Cognito::UserPoolClient
+      Properties:
+        ClientName: ${self:service}-${self:provider.stage}-dashboard-web
+        UserPoolId: !Ref WalmartDashboardUserPool
+        GenerateSecret: false
+        ExplicitAuthFlows:
+          - ALLOW_USER_PASSWORD_AUTH
+          - ALLOW_REFRESH_TOKEN_AUTH
+          - ALLOW_USER_SRP_AUTH
+        PreventUserExistenceErrors: ENABLED
+        SupportedIdentityProviders:
+          - COGNITO
+        AccessTokenValidity: 8
+        IdTokenValidity: 8
+        RefreshTokenValidity: 30
+        TokenValidityUnits:
+          AccessToken: hours
+          IdToken: hours
+          RefreshToken: days
+
+  Outputs:
+    WalmartDashboardUserPoolId:
+      Description: Cognito User Pool ID for dashboard login
+      Value: !Ref WalmartDashboardUserPool
+    WalmartDashboardUserPoolClientId:
+      Description: Cognito app client ID for dashboard login
+      Value: !Ref WalmartDashboardUserPoolClient

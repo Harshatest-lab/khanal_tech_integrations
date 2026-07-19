@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS walmart_order_headers (
   ship_node_type    text,
   order_date_ms     bigint,
   has_shipping_charges boolean   NOT NULL DEFAULT false,
+  has_county_surcharge_tax boolean NOT NULL DEFAULT false,
   raw_payload       jsonb       NOT NULL DEFAULT '{}'::jsonb,
   created_at        timestamptz NOT NULL DEFAULT now(),
   updated_at        timestamptz NOT NULL DEFAULT now()
@@ -18,6 +19,9 @@ CREATE INDEX IF NOT EXISTS idx_walmart_order_headers_order_date
 
 CREATE INDEX IF NOT EXISTS idx_walmart_order_headers_has_shipping
   ON walmart_order_headers (has_shipping_charges);
+
+CREATE INDEX IF NOT EXISTS idx_walmart_order_headers_county_surcharge
+  ON walmart_order_headers (has_county_surcharge_tax);
 
 CREATE INDEX IF NOT EXISTS idx_walmart_order_headers_updated_at
   ON walmart_order_headers (updated_at DESC);
@@ -37,6 +41,8 @@ CREATE TABLE IF NOT EXISTS walmart_order_lines (
   tracking_number   text,
   tracking_url      text,
   carrier_name      text,
+  ship_date_time_ms bigint,
+  ship_date_pacific date,
   created_at        timestamptz NOT NULL DEFAULT now(),
   updated_at        timestamptz NOT NULL DEFAULT now(),
   UNIQUE (purchase_order_id, line_number)
@@ -50,6 +56,9 @@ CREATE INDEX IF NOT EXISTS idx_walmart_order_lines_status_date
 
 CREATE INDEX IF NOT EXISTS idx_walmart_order_lines_status
   ON walmart_order_lines (status);
+
+CREATE INDEX IF NOT EXISTS idx_walmart_order_lines_ship_date_pacific
+  ON walmart_order_lines (ship_date_pacific DESC);
 
 CREATE TABLE IF NOT EXISTS walmart_log (
   id                       bigserial PRIMARY KEY,

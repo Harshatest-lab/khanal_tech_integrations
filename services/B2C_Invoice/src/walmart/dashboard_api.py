@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import psycopg
 
 from walmart.credentials import DATABASE_URL
+from walmart.dates import ms_to_pacific_date
+from walmart.order_pricing import line_display_status, line_status_quantities
+from walmart.walmart_store import line_ship_date_time_ms, order_shipping_state
 
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
@@ -107,14 +110,81 @@ def _utc_day_end_exclusive_ms(date_str: str) -> int:
     return _utc_day_start_ms(date_str) + 24 * 60 * 60 * 1000
 
 
-def _header_filter_clauses(
+def _utc_day_start_ts(date_str: str) -> datetime:
+    return datetime.strptime(date_str.strip(), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+
+def _utc_day_end_exclusive_ts(date_str: str) -> datetime:
+    return _utc_day_start_ts(date_str) + timedelta(days=1)
+
+
+SORT_KEYS = {
+    "po": "h.purchase_order_id",
+    "order": "h.customer_order_id",
+    "order_date": "sort_ms",
+    "order_date_pacific": "sort_ms",
+    "item": "sort_product_name",
+    "status": "sort_status",
+    "sku": "sort_sku",
+    "qty": "sort_qty_min",
+    "status_date": "sort_status_date_ms",
+    "updated": "header_updated_at",
+    "sap_sync": "sap_sync_status",
+}
+
+_COUNTY_SURCHARGE_TAX_PATTERN = "%County Surcharge Tax%"
+
+
+def _qty_numeric_sql(column: str) -> str:
+    return (
+        f"NULLIF(regexp_replace(COALESCE({column}, ''), '[^0-9.]', '', 'g'), '')::numeric"
+    )
+
+
+def _parse_quantity_filter(raw: str | None) -> float | None:
+    if not raw or not raw.strip():
+        return None
+    try:
+        return float(raw.strip())
+    except ValueError:
+        return None
+
+
+def _sort_column(sort_key: str, sort_direction: str) -> str:
+    if sort_key == "qty":
+        return "sort_qty_max" if sort_direction == "desc" else "sort_qty_min"
+    return SORT_KEYS[sort_key]
+
+
+def _parse_sort(sort_by: str | None, sort_dir: str | None) -> tuple[str, str]:
+    key = (sort_by or "order_date").strip().lower()
+    direction = (sort_dir or "desc").strip().lower()
+    if direction not in {"asc", "desc"}:
+        direction = "desc"
+    if key not in SORT_KEYS:
+        key = "order_date"
+    return key, direction
+
+
+def _order_filter_clauses(
     *,
     status: str | None = None,
     purchase_order_id: str | None = None,
+    customer_order_id: str | None = None,
     order_date_from: str | None = None,
     order_date_to: str | None = None,
     has_shipping: str | None = None,
+    county_surcharge_tax: str | None = None,
+    promotion_discount: str | None = None,
+    line_count: str | None = None,
     sap_sync: str | None = None,
+    sku: str | None = None,
+    product_name: str | None = None,
+    quantity: str | None = None,
+    status_date_from: str | None = None,
+    status_date_to: str | None = None,
+    updated_from: str | None = None,
+    updated_to: str | None = None,
 ) -> tuple[list[str], list[Any]]:
     clauses: list[str] = []
     params: list[Any] = []
@@ -123,7 +193,162 @@ def _header_filter_clauses(
         clauses.append("h.purchase_order_id ILIKE %s")
         params.append(f"%{purchase_order_id.strip()}%")
 
-    if status:
+    if customer_order_id and customer_order_id.strip():
+        clauses.append("h.customer_order_id ILIKE %s")
+        params.append(f"%{customer_order_id.strip()}%")
+
+    if sku and sku.strip():
+        clauses.append(
+            """
+            EXISTS (
+                SELECT 1
+                FROM walmart_order_lines lf
+                WHERE lf.purchase_order_id = h.purchase_order_id
+                  AND lf.sku ILIKE %s
+            )
+            """
+        )
+        params.append(f"%{sku.strip()}%")
+
+    if product_name and product_name.strip():
+        clauses.append(
+            """
+            EXISTS (
+                SELECT 1
+                FROM walmart_order_lines lf
+                WHERE lf.purchase_order_id = h.purchase_order_id
+                  AND lf.product_name ILIKE %s
+            )
+            """
+        )
+        params.append(f"%{product_name.strip()}%")
+
+    if quantity and quantity.strip():
+        qty_num = _parse_quantity_filter(quantity)
+        if qty_num is not None:
+            qty_sql = _qty_numeric_sql("lf.quantity_amount")
+            clauses.append(
+                f"""
+            EXISTS (
+                SELECT 1
+                FROM walmart_order_lines lf
+                WHERE lf.purchase_order_id = h.purchase_order_id
+                  AND {qty_sql} = %s
+            )
+            """
+            )
+            params.append(qty_num)
+        else:
+            clauses.append(
+                """
+            EXISTS (
+                SELECT 1
+                FROM walmart_order_lines lf
+                WHERE lf.purchase_order_id = h.purchase_order_id
+                  AND TRIM(lf.quantity_amount) = %s
+            )
+            """
+            )
+            params.append(quantity.strip())
+
+    if status_date_from and status_date_from.strip():
+        clauses.append(
+            """
+            EXISTS (
+                SELECT 1
+                FROM walmart_order_lines lf
+                WHERE lf.purchase_order_id = h.purchase_order_id
+                  AND lf.status_date >= %s
+            )
+            """
+        )
+        params.append(_utc_day_start_ts(status_date_from.strip()))
+
+    if status_date_to and status_date_to.strip():
+        clauses.append(
+            """
+            EXISTS (
+                SELECT 1
+                FROM walmart_order_lines lf
+                WHERE lf.purchase_order_id = h.purchase_order_id
+                  AND lf.status_date < %s
+            )
+            """
+        )
+        params.append(_utc_day_end_exclusive_ts(status_date_to.strip()))
+
+    if updated_from and updated_from.strip():
+        clauses.append("h.updated_at >= %s")
+        params.append(_utc_day_start_ts(updated_from.strip()))
+
+    if updated_to and updated_to.strip():
+        clauses.append("h.updated_at < %s")
+        params.append(_utc_day_end_exclusive_ts(updated_to.strip()))
+
+    if status and status.strip().lower() in {"partial", "delivered_partial"}:
+        clauses.append(
+            """
+            EXISTS (
+                SELECT 1
+                FROM jsonb_array_elements(
+                    CASE
+                        WHEN jsonb_typeof(h.raw_payload #> '{order,orderLines,orderLine}') = 'array'
+                            THEN h.raw_payload #> '{order,orderLines,orderLine}'
+                        WHEN h.raw_payload #> '{order,orderLines,orderLine}' IS NOT NULL
+                            THEN jsonb_build_array(h.raw_payload #> '{order,orderLines,orderLine}')
+                        ELSE '[]'::jsonb
+                    END
+                ) AS partial_line
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements(
+                        CASE
+                            WHEN jsonb_typeof(partial_line #> '{orderLineStatuses,orderLineStatus}') = 'array'
+                                THEN partial_line #> '{orderLineStatuses,orderLineStatus}'
+                            WHEN partial_line #> '{orderLineStatuses,orderLineStatus}' IS NOT NULL
+                                THEN jsonb_build_array(partial_line #> '{orderLineStatuses,orderLineStatus}')
+                            ELSE '[]'::jsonb
+                        END
+                    ) AS fulfilled_status
+                    WHERE fulfilled_status->>'status' IN ('Shipped', 'Delivered', 'Dispensed')
+                      AND COALESCE(
+                            NULLIF(
+                                regexp_replace(
+                                    COALESCE(fulfilled_status #>> '{statusQuantity,amount}', ''),
+                                    '[^0-9.]', '', 'g'
+                                ),
+                                ''
+                            ),
+                            '0'
+                          )::numeric > 0
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements(
+                        CASE
+                            WHEN jsonb_typeof(partial_line #> '{orderLineStatuses,orderLineStatus}') = 'array'
+                                THEN partial_line #> '{orderLineStatuses,orderLineStatus}'
+                            WHEN partial_line #> '{orderLineStatuses,orderLineStatus}' IS NOT NULL
+                                THEN jsonb_build_array(partial_line #> '{orderLineStatuses,orderLineStatus}')
+                            ELSE '[]'::jsonb
+                        END
+                    ) AS cancelled_status
+                    WHERE cancelled_status->>'status' IN ('Cancelled', 'Canceled')
+                      AND COALESCE(
+                            NULLIF(
+                                regexp_replace(
+                                    COALESCE(cancelled_status #>> '{statusQuantity,amount}', ''),
+                                    '[^0-9.]', '', 'g'
+                                ),
+                                ''
+                            ),
+                            '0'
+                          )::numeric > 0
+                )
+            )
+            """
+        )
+    elif status:
         clauses.append(
             """
             EXISTS (
@@ -149,6 +374,36 @@ def _header_filter_clauses(
         clauses.append("h.has_shipping_charges = true")
     elif shipping in {"no", "false", "0", "not_applicable", "na"}:
         clauses.append("h.has_shipping_charges = false")
+
+    surcharge = (county_surcharge_tax or "").strip().lower()
+    if surcharge in {"yes", "true", "1", "with"}:
+        clauses.append("h.raw_payload::text ILIKE %s")
+        params.append(_COUNTY_SURCHARGE_TAX_PATTERN)
+    elif surcharge in {"no", "false", "0", "without"}:
+        clauses.append("h.raw_payload::text NOT ILIKE %s")
+        params.append(_COUNTY_SURCHARGE_TAX_PATTERN)
+
+    promo = (promotion_discount or "").strip().lower()
+    if promo in {"yes", "true", "1", "with"}:
+        clauses.append("h.has_promotion_discount = true")
+    elif promo in {"no", "false", "0", "without"}:
+        clauses.append("h.has_promotion_discount = false")
+
+    lines_filter = (line_count or "").strip().lower()
+    if lines_filter in {"single", "1", "one"}:
+        clauses.append(
+            """
+            (SELECT COUNT(*)::int FROM walmart_order_lines lc
+             WHERE lc.purchase_order_id = h.purchase_order_id) = 1
+            """
+        )
+    elif lines_filter in {"multiple", "multi", "2plus", "2+"}:
+        clauses.append(
+            """
+            (SELECT COUNT(*)::int FROM walmart_order_lines lc
+             WHERE lc.purchase_order_id = h.purchase_order_id) > 1
+            """
+        )
 
     sap = (sap_sync or "").strip().lower()
     if sap == "failed":
@@ -202,6 +457,20 @@ def _sap_sync_from_row(row: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _raw_line_quantities(raw_payload: Any, line_number: Any) -> dict[str, Any]:
+    parsed = _parse_raw_payload(raw_payload)
+    order = (parsed or {}).get("order") or {}
+    raw_lines = (order.get("orderLines") or {}).get("orderLine")
+    lines = raw_lines if isinstance(raw_lines, list) else ([raw_lines] if raw_lines else [])
+    for raw_line in lines:
+        if str((raw_line or {}).get("lineNumber")) == str(line_number):
+            return {
+                **line_status_quantities(raw_line),
+                "status": line_display_status(raw_line),
+            }
+    return {}
+
+
 def _group_rows_by_po(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     orders: list[dict[str, Any]] = []
     current_po: str | None = None
@@ -209,13 +478,18 @@ def _group_rows_by_po(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     for row in rows:
         po = row["purchase_order_id"]
+        quantities = _raw_line_quantities(row.get("raw_payload"), row.get("line_number"))
         line = {
             "line_number": row.get("line_number"),
-            "status": row.get("status"),
+            "status": quantities.get("status", row.get("status")),
             "status_date": row.get("status_date"),
             "sku": row.get("sku"),
             "product_name": row.get("product_name"),
             "quantity_amount": row.get("quantity_amount"),
+            "delivered_quantity": quantities.get("delivered"),
+            "invoiceable_quantity": quantities.get("invoiceable"),
+            "cancelled_quantity": quantities.get("cancelled"),
+            "is_partial": quantities.get("is_partial", False),
             "tracking_number": row.get("tracking_number"),
             "carrier_name": row.get("carrier_name"),
             "updated_at": row.get("line_updated_at") or row.get("updated_at"),
@@ -231,6 +505,7 @@ def _group_rows_by_po(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "ship_node_type": row.get("ship_node_type"),
                 "order_date_ms": row.get("order_date_ms"),
                 "has_shipping_charges": row.get("has_shipping_charges"),
+                "ship_to_state": row.get("ship_to_state"),
                 "status_date": row.get("status_date"),
                 "updated_at": row.get("header_updated_at") or row.get("updated_at"),
                 "line_count": 1,
@@ -267,18 +542,46 @@ def fetch_orders(
     offset: int = 0,
     status: str | None = None,
     purchase_order_id: str | None = None,
+    customer_order_id: str | None = None,
     order_date_from: str | None = None,
     order_date_to: str | None = None,
     has_shipping: str | None = None,
+    county_surcharge_tax: str | None = None,
+    promotion_discount: str | None = None,
+    line_count: str | None = None,
     sap_sync: str | None = None,
+    sku: str | None = None,
+    product_name: str | None = None,
+    quantity: str | None = None,
+    status_date_from: str | None = None,
+    status_date_to: str | None = None,
+    updated_from: str | None = None,
+    updated_to: str | None = None,
+    sort_by: str | None = None,
+    sort_dir: str | None = None,
 ) -> dict[str, Any]:
-    clauses, params = _header_filter_clauses(
+    sort_key, sort_direction = _parse_sort(sort_by, sort_dir)
+    sort_column = _sort_column(sort_key, sort_direction)
+    nulls = "NULLS LAST"
+
+    clauses, params = _order_filter_clauses(
         status=status,
         purchase_order_id=purchase_order_id,
+        customer_order_id=customer_order_id,
         order_date_from=order_date_from,
         order_date_to=order_date_to,
         has_shipping=has_shipping,
+        county_surcharge_tax=county_surcharge_tax,
+        promotion_discount=promotion_discount,
+        line_count=line_count,
         sap_sync=sap_sync,
+        sku=sku,
+        product_name=product_name,
+        quantity=quantity,
+        status_date_from=status_date_from,
+        status_date_to=status_date_to,
+        updated_from=updated_from,
+        updated_to=updated_to,
     )
     where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
@@ -291,16 +594,44 @@ def fetch_orders(
 
         data_params = [*params, limit, offset]
         sql = f"""
-            WITH po_page AS (
+            WITH po_candidates AS (
                 SELECT
                     h.purchase_order_id,
-                    COALESCE(h.order_date_ms, MAX(l.status_date_ms)) AS sort_ms
+                    h.customer_order_id,
+                    h.order_date_ms,
+                    h.updated_at AS header_updated_at,
+                    COALESCE(h.order_date_ms, MAX(l.status_date_ms)) AS sort_ms,
+                    MIN(l.product_name) AS sort_product_name,
+                    MIN(l.status) AS sort_status,
+                    MIN(l.sku) AS sort_sku,
+                    MIN({_qty_numeric_sql("l.quantity_amount")}) AS sort_qty_min,
+                    MAX({_qty_numeric_sql("l.quantity_amount")}) AS sort_qty_max,
+                    MAX(l.status_date_ms) AS sort_status_date_ms,
+                    MAX(sap.status) AS sap_sync_status
                 FROM walmart_order_headers h
                 INNER JOIN walmart_order_lines l
                   ON l.purchase_order_id = h.purchase_order_id
+                LEFT JOIN walmart_sap_invoice_log sap
+                  ON sap.purchase_order_id = h.purchase_order_id
                 {where_sql}
-                GROUP BY h.purchase_order_id, h.order_date_ms
-                ORDER BY sort_ms DESC
+                GROUP BY
+                    h.purchase_order_id,
+                    h.customer_order_id,
+                    h.order_date_ms,
+                    h.updated_at
+            ),
+            po_page AS (
+                SELECT purchase_order_id, page_rank
+                FROM (
+                    SELECT
+                        purchase_order_id,
+                        ROW_NUMBER() OVER (
+                            ORDER BY {sort_column} {sort_direction.upper()} {nulls},
+                                     purchase_order_id ASC
+                        ) AS page_rank
+                    FROM po_candidates
+                ) ranked
+                ORDER BY page_rank
                 LIMIT %s OFFSET %s
             )
             SELECT
@@ -309,6 +640,8 @@ def fetch_orders(
                 h.ship_node_type,
                 h.order_date_ms,
                 h.has_shipping_charges,
+                h.ship_to_state,
+                h.raw_payload,
                 h.updated_at AS header_updated_at,
                 sap.status AS sap_sync_status,
                 sap.sap_doc_entry,
@@ -333,7 +666,7 @@ def fetch_orders(
               ON sap.purchase_order_id = h.purchase_order_id
             INNER JOIN walmart_order_lines l
               ON l.purchase_order_id = h.purchase_order_id
-            ORDER BY p.sort_ms DESC, l.line_number
+            ORDER BY p.page_rank, l.line_number
         """
         cur.execute(sql, data_params)
         items = _group_rows_by_po(_rows_to_dicts(cur))
@@ -344,6 +677,8 @@ def fetch_orders(
         "total": total,
         "offset": offset,
         "limit": limit,
+        "sort_by": sort_key,
+        "sort_dir": sort_direction,
     }
 
 
@@ -355,6 +690,45 @@ def _parse_raw_payload(raw_payload: Any) -> dict[str, Any] | None:
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _json_lines_by_number(order_json: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    order = (order_json or {}).get("order") or {}
+    raw_lines = (order.get("orderLines") or {}).get("orderLine")
+    if not raw_lines:
+        return {}
+    if isinstance(raw_lines, list):
+        lines = raw_lines
+    else:
+        lines = [raw_lines]
+    by_number: dict[str, dict[str, Any]] = {}
+    for line in lines:
+        if not isinstance(line, dict):
+            continue
+        line_number = line.get("lineNumber")
+        if line_number is not None:
+            by_number[str(line_number)] = line
+    return by_number
+
+
+def _enrich_lines_ship_dates(
+    lines: list[dict[str, Any]],
+    order_json: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Fill ship_date_* from raw_payload when DB columns are still null (pre-deploy sync)."""
+    json_by_line = _json_lines_by_number(order_json)
+    enriched: list[dict[str, Any]] = []
+    for line in lines:
+        row = dict(line)
+        if row.get("ship_date_time_ms") is None:
+            json_line = json_by_line.get(str(row.get("line_number")))
+            if json_line:
+                ship_ms = line_ship_date_time_ms(json_line)
+                if ship_ms is not None:
+                    row["ship_date_time_ms"] = ship_ms
+                    row["ship_date_pacific"] = ms_to_pacific_date(ship_ms).isoformat()
+        enriched.append(row)
+    return enriched
 
 
 def _order_json_from_payload(parsed: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -389,8 +763,15 @@ def _order_json_from_rows(header: dict[str, Any], lines: list[dict[str, Any]]) -
                                     "trackingNumber": line.get("tracking_number"),
                                     "trackingURL": line.get("tracking_url"),
                                     "carrierName": {"otherCarrier": line.get("carrier_name")},
+                                    **(
+                                        {"shipDateTime": line.get("ship_date_time_ms")}
+                                        if line.get("ship_date_time_ms") is not None
+                                        else {}
+                                    ),
                                 }
-                                if line.get("tracking_number") or line.get("carrier_name")
+                                if line.get("tracking_number")
+                                or line.get("carrier_name")
+                                or line.get("ship_date_time_ms") is not None
                                 else None
                             ),
                         }
@@ -419,6 +800,7 @@ def fetch_order_detail(conn: psycopg.Connection, purchase_order_id: str) -> dict
                 h.ship_node_type,
                 h.order_date_ms,
                 h.has_shipping_charges,
+                h.ship_to_state,
                 h.raw_payload,
                 h.updated_at AS header_updated_at,
                 l.line_number,
@@ -453,6 +835,18 @@ def fetch_order_detail(conn: psycopg.Connection, purchase_order_id: str) -> dict
             "sku": row.get("sku"),
             "product_name": row.get("product_name"),
             "quantity_amount": row.get("quantity_amount"),
+            "delivered_quantity": _raw_line_quantities(
+                header.get("raw_payload"), row.get("line_number")
+            ).get("delivered"),
+            "invoiceable_quantity": _raw_line_quantities(
+                header.get("raw_payload"), row.get("line_number")
+            ).get("invoiceable"),
+            "cancelled_quantity": _raw_line_quantities(
+                header.get("raw_payload"), row.get("line_number")
+            ).get("cancelled"),
+            "is_partial": _raw_line_quantities(
+                header.get("raw_payload"), row.get("line_number")
+            ).get("is_partial", False),
             "tracking_number": row.get("tracking_number"),
             "tracking_url": row.get("tracking_url"),
             "carrier_name": row.get("carrier_name"),
@@ -461,10 +855,22 @@ def fetch_order_detail(conn: psycopg.Connection, purchase_order_id: str) -> dict
         for row in rows
         if row.get("line_number") is not None
     ]
+    for line in lines:
+        quantities = _raw_line_quantities(
+            header.get("raw_payload"), line.get("line_number")
+        )
+        if quantities.get("status"):
+            line["status"] = quantities["status"]
 
     order_json = _order_json_from_payload(_parse_raw_payload(header.get("raw_payload")))
     if order_json is None and lines:
         order_json = _order_json_from_rows(header, lines)
+
+    lines = _enrich_lines_ship_dates(lines, order_json)
+
+    ship_to_state = header.get("ship_to_state")
+    if not ship_to_state and order_json:
+        ship_to_state = order_shipping_state(order_json.get("order") or {})
 
     sap_sync = fetch_sap_invoice_sync_detail(conn, purchase_order_id)
 
@@ -474,6 +880,7 @@ def fetch_order_detail(conn: psycopg.Connection, purchase_order_id: str) -> dict
         "ship_node_type": header.get("ship_node_type"),
         "order_date_ms": header.get("order_date_ms"),
         "has_shipping_charges": header.get("has_shipping_charges"),
+        "ship_to_state": ship_to_state,
         "line_count": len(lines),
         "lines": lines,
         "raw_payload": header.get("raw_payload"),
@@ -580,14 +987,4 @@ def fetch_sync_log(conn: psycopg.Connection, *, limit: int) -> list[dict[str, An
         return _rows_to_dicts(cur)
 
 
-def json_response(status_code: int, body: Any) -> dict[str, Any]:
-    return {
-        "statusCode": status_code,
-        "headers": {
-            "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Content-Type,Authorization",
-            "Access-Control-Allow-Methods": "GET,OPTIONS",
-        },
-        "body": json.dumps(body, default=str),
-    }
+from walmart.http_response import json_response

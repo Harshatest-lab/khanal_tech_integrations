@@ -7,6 +7,14 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from walmart.dates import ms_to_pacific_date
+from walmart.order_pricing import (
+    SAP_INVOICEABLE_STATUSES,
+    line_display_status,
+    order_has_county_surcharge_tax,
+    order_has_promotion_discount,
+)
+
 logger = logging.getLogger(__name__)
 
 UTC_API_DATE_FMT = "%Y-%m-%dT%H:%M:%SZ"
@@ -90,10 +98,7 @@ def max_status_date_ms(orders: list[dict[str, Any]]) -> int | None:
 
 
 def _line_status(line: dict[str, Any]) -> str:
-    statuses = _as_list(line.get("orderLineStatuses", {}).get("orderLineStatus"))
-    if not statuses:
-        return "Unknown"
-    return str(statuses[-1].get("status") or "Unknown")
+    return line_display_status(line)
 
 
 def order_has_shipping_charges(order: dict[str, Any]) -> bool:
@@ -116,7 +121,14 @@ def _line_tracking(line: dict[str, Any]) -> tuple[str | None, str | None, str | 
     statuses = _as_list(line.get("orderLineStatuses", {}).get("orderLineStatus"))
     if not statuses:
         return None, None, None
-    tracking = statuses[-1].get("trackingInfo") or {}
+    invoiceable = [
+        row
+        for row in statuses
+        if str(row.get("status") or "").strip() in SAP_INVOICEABLE_STATUSES
+        and row.get("trackingInfo")
+    ]
+    selected = invoiceable[-1] if invoiceable else statuses[-1]
+    tracking = selected.get("trackingInfo") or {}
     carrier = tracking.get("carrierName") or {}
     carrier_name = carrier.get("carrier") or carrier.get("otherCarrier")
     tracking_number = tracking.get("trackingNumber") or tracking.get("trackingId")
@@ -126,6 +138,41 @@ def _line_tracking(line: dict[str, Any]) -> tuple[str | None, str | None, str | 
         str(tracking_url) if tracking_url else None,
         str(carrier_name) if carrier_name else None,
     )
+
+
+def line_ship_date_time_ms(line: dict[str, Any]) -> int | None:
+    """Latest Walmart trackingInfo.shipDateTime (epoch ms) across line statuses."""
+    statuses = _as_list(line.get("orderLineStatuses", {}).get("orderLineStatus"))
+    ship_dates: list[int] = []
+    for status in statuses:
+        raw = (status.get("trackingInfo") or {}).get("shipDateTime")
+        if raw is None:
+            continue
+        try:
+            ship_dates.append(int(raw))
+        except (TypeError, ValueError):
+            continue
+    return max(ship_dates) if ship_dates else None
+
+
+def order_ship_date_time_ms(order: dict[str, Any]) -> int | None:
+    """Latest shipDateTime across all order lines (for SAP DocDate)."""
+    max_ms: int | None = None
+    for line in _as_list(order.get("orderLines", {}).get("orderLine")):
+        ms = line_ship_date_time_ms(line)
+        if ms is not None and (max_ms is None or ms > max_ms):
+            max_ms = ms
+    return max_ms
+
+
+def order_shipping_state(order: dict[str, Any]) -> str | None:
+    """US state code from shippingInfo.postalAddress.state (e.g. OK, NC)."""
+    postal = (order.get("shippingInfo") or {}).get("postalAddress") or {}
+    raw = postal.get("state")
+    if raw is None:
+        return None
+    cleaned = str(raw).strip().upper()
+    return cleaned or None
 
 
 def extract_orders_for_storage(
@@ -154,6 +201,9 @@ def extract_orders_for_storage(
                 "ship_node_type": node_type,
                 "order_date_ms": int(order_date_ms) if order_date_ms is not None else None,
                 "has_shipping_charges": order_has_shipping_charges(order),
+                "has_county_surcharge_tax": order_has_county_surcharge_tax(order),
+                "has_promotion_discount": order_has_promotion_discount(order),
+                "ship_to_state": order_shipping_state(order),
                 "raw_payload": full_raw_payload,
             }
         )
@@ -166,6 +216,8 @@ def extract_orders_for_storage(
             status_date_ms = int(line["statusDate"])
             item = line.get("item") or {}
             tracking_number, tracking_url, carrier_name = _line_tracking(line)
+            ship_ms = line_ship_date_time_ms(line)
+            ship_pacific = ms_to_pacific_date(ship_ms) if ship_ms is not None else None
             qty = (line.get("orderLineQuantity") or {}).get("amount")
 
             lines.append(
@@ -181,6 +233,8 @@ def extract_orders_for_storage(
                     "tracking_number": tracking_number,
                     "tracking_url": tracking_url,
                     "carrier_name": carrier_name,
+                    "ship_date_time_ms": ship_ms,
+                    "ship_date_pacific": ship_pacific,
                 }
             )
 
@@ -247,16 +301,21 @@ WHERE id = %(log_id)s
 UPSERT_ORDER_HEADER = """
 INSERT INTO walmart_order_headers (
   purchase_order_id, customer_order_id, ship_node_type,
-  order_date_ms, has_shipping_charges, raw_payload, updated_at
+  order_date_ms, has_shipping_charges, has_county_surcharge_tax, has_promotion_discount,
+  ship_to_state, raw_payload, updated_at
 ) VALUES (
   %(purchase_order_id)s, %(customer_order_id)s, %(ship_node_type)s,
-  %(order_date_ms)s, %(has_shipping_charges)s, %(raw_payload)s::jsonb, now()
+  %(order_date_ms)s, %(has_shipping_charges)s, %(has_county_surcharge_tax)s, %(has_promotion_discount)s,
+  %(ship_to_state)s, %(raw_payload)s::jsonb, now()
 )
 ON CONFLICT (purchase_order_id) DO UPDATE SET
   customer_order_id = EXCLUDED.customer_order_id,
   ship_node_type = EXCLUDED.ship_node_type,
   order_date_ms = EXCLUDED.order_date_ms,
   has_shipping_charges = EXCLUDED.has_shipping_charges,
+  has_county_surcharge_tax = EXCLUDED.has_county_surcharge_tax,
+  has_promotion_discount = EXCLUDED.has_promotion_discount,
+  ship_to_state = EXCLUDED.ship_to_state,
   raw_payload = EXCLUDED.raw_payload,
   updated_at = now()
 """
@@ -265,11 +324,13 @@ UPSERT_ORDER_LINE = """
 INSERT INTO walmart_order_lines (
   purchase_order_id, line_number, status,
   status_date_ms, status_date, sku, product_name, quantity_amount,
-  tracking_number, tracking_url, carrier_name, updated_at
+  tracking_number, tracking_url, carrier_name,
+  ship_date_time_ms, ship_date_pacific, updated_at
 ) VALUES (
   %(purchase_order_id)s, %(line_number)s, %(status)s,
   %(status_date_ms)s, %(status_date)s, %(sku)s, %(product_name)s, %(quantity_amount)s,
-  %(tracking_number)s, %(tracking_url)s, %(carrier_name)s, now()
+  %(tracking_number)s, %(tracking_url)s, %(carrier_name)s,
+  %(ship_date_time_ms)s, %(ship_date_pacific)s, now()
 )
 ON CONFLICT (purchase_order_id, line_number) DO UPDATE SET
   status = EXCLUDED.status,
@@ -281,6 +342,8 @@ ON CONFLICT (purchase_order_id, line_number) DO UPDATE SET
   tracking_number = EXCLUDED.tracking_number,
   tracking_url = EXCLUDED.tracking_url,
   carrier_name = EXCLUDED.carrier_name,
+  ship_date_time_ms = EXCLUDED.ship_date_time_ms,
+  ship_date_pacific = EXCLUDED.ship_date_pacific,
   updated_at = now()
 RETURNING
   (xmax = 0) AS inserted,
@@ -336,6 +399,7 @@ def _line_meaningfully_changed(
         "status_date_ms",
         "tracking_number",
         "carrier_name",
+        "ship_date_time_ms",
         "sku",
     ):
         if previous.get(field) != current.get(field):
@@ -492,16 +556,6 @@ def persist_creation_sync(
         upsert_counts = upsert_order_lines(conn, line_rows_only, commit=False)
 
         sap_invoice_results: list[dict[str, Any]] = []
-        if sync_kind == "updation":
-            try:
-                from walmart.sap_invoice_sync import process_shipped_orders_for_sap_invoice
-
-                sap_invoice_results = process_shipped_orders_for_sap_invoice(
-                    conn, orders, upsert_counts, post_to_sap=True
-                )
-            except Exception as exc:
-                logger.exception("SAP invoice batch failed")
-                sap_invoice_results = [{"status": "batch_error", "error": str(exc)}]
 
         with conn.cursor() as cur:
             cur.execute(
