@@ -35,6 +35,8 @@ layers/build/                # Built by scripts/build_shared_layer.sh
 |-------|----------------|-------------------|
 | **delivery-api** | **Delhivery webhooks** (shipment status + POD) | `POST /v1/webhooks/delhivery/shipment-status`, `POST /v1/webhooks/delhivery/pod` |
 | **dogseeus-invoice** | Invoicing (stub) | `POST /v1/dogseeus/invoices` |
+| **B2C_Invoice** | Walmart order sync + SAP AR Invoices | `GET /v1/walmart/*` (Cognito) |
+| **amazon-us-b2c** | Amazon US SP-API → SAP AR Invoices/Credit Notes + reconciliation | scheduled Lambdas, no HTTP API (see its README) |
 
 ## Shared code
 
