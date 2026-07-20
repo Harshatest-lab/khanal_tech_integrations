@@ -1,0 +1,287 @@
+service: amazon-us-b2c
+
+frameworkVersion: "3"
+
+provider:
+  name: aws
+  runtime: python3.12
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'ap-south-1'}
+  memorySize: 512
+  timeout: 900
+  httpApi:
+    cors:
+      allowedOrigins:
+        - "*"
+      allowedHeaders:
+        - Content-Type
+        - Authorization
+      allowedMethods:
+        - GET
+        - POST
+        - OPTIONS
+    authorizers:
+      dashboardCognitoJwt:
+        type: jwt
+        identitySource:
+          - $request.header.Authorization
+        issuerUrl:
+          Fn::Sub: "https://cognito-idp.${AWS::Region}.amazonaws.com/${AmazonDashboardUserPool}"
+        audience:
+          - Ref: AmazonDashboardUserPoolClient
+  iam:
+    role:
+      statements:
+        # SP-API LWA credentials.
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+          Resource:
+            - arn:aws:ssm:${self:provider.region}:*:parameter/amazon-us/lwa
+        # SAP HANA read-only credentials (FEFO stock, GL, SKU map, recon).
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+          Resource:
+            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/hana_config
+            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/hana_credentials
+        # SAP Service Layer config + login creds — read-only, the code never
+        # writes these (only b1_session, below).
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+          Resource:
+            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/sl_config
+            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/credentials
+        # Shared SSM-cached B1 session; PutParameter for session renewal +
+        # stale-session invalidation.
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+            - ssm:PutParameter
+          Resource:
+            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/b1_session
+        # Failure alerts + recon summaries.
+        - Effect: Allow
+          Action:
+            - ses:SendEmail
+            - ses:SendRawEmail
+          Resource: "*"
+        # MTR recon input/output files.
+        - Effect: Allow
+          Action:
+            - s3:GetObject
+            - s3:PutObject
+          Resource:
+            - arn:aws:s3:::${self:custom.reconBucket}/*
+  environment:
+    STAGE: ${self:provider.stage}
+    LOG_LEVEL: ${env:LOG_LEVEL, 'INFO'}
+    DATABASE_URL: ${env:DATABASE_URL, ''}
+    # SAP profile: /sap/inc/* (US INC entity) — same params the Walmart
+    # service uses, so all services share one SAP session.
+    SAP_SL_USE_SSM: ${env:SAP_SL_USE_SSM, 'true'}
+    SAP_SL_VERIFY_SSL: ${env:SAP_SL_VERIFY_SSL, 'true'}
+    SAP_SL_PROFILE: ${env:SAP_SL_PROFILE, 'inc'}
+    HANA_USE_SSM: ${env:HANA_USE_SSM, '1'}
+    HANA_PROFILE: ${env:HANA_PROFILE, 'inc'}
+    AMZ_LWA_PARAM_NAME: ${env:AMZ_LWA_PARAM_NAME, '/amazon-us/lwa'}
+    # Business config (defaults verified against production KF_INC_22012026).
+    AMZ_POSTING_CUTOFF_DATE: ${env:AMZ_POSTING_CUTOFF_DATE, '2026-06-01'}
+    AMZ_ALERT_ADMIN_EMAIL: ${env:AMZ_ALERT_ADMIN_EMAIL, ''}
+    AMZ_ALERT_FROM_EMAIL: ${env:AMZ_ALERT_FROM_EMAIL, ''}
+    AMZ_SES_REGION: ${env:AMZ_SES_REGION, 'ap-south-1'}
+    AMZ_RECON_BUCKET: ${self:custom.reconBucket}
+
+custom:
+  reconBucket: ${env:AMZ_RECON_BUCKET, 'amazon-us-b2c-recon-${self:provider.stage}'}
+
+layers:
+  shared:
+    name: ${self:service}-${self:provider.stage}-shared
+    path: ../../layers/build
+    package:
+      patterns:
+        - "python/**"
+    compatibleRuntimes:
+      - python3.12
+
+package:
+  patterns:
+    - "!**"
+    - "src/**"
+    - "!src/amazon_us/credentials_local.py"
+    - "!**/__pycache__/**"
+    - "!**/*.pyc"
+
+functions:
+  amazonFetch:
+    handler: src.handlers.fetch_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+    events:
+      # Hourly incremental (Orders API watermark). 15-20k orders/mo means
+      # dozens of orders per run — the per-order item calls are fine.
+      - schedule:
+          rate: cron(10 * * * ? *)
+          enabled: false
+          input: { mode: incremental }
+      # Daily bulk report with MTR lookback: self-heals anything the
+      # incremental path missed. 20:15 UTC = 01:45 IST.
+      - schedule:
+          rate: cron(15 20 * * ? *)
+          enabled: false
+          input: { mode: report }
+
+  amazonFbaShipSync:
+    handler: src.handlers.fba_ship_sync_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+    events:
+      # Daily, before invoice posting. 20:45 UTC = 02:15 IST.
+      - schedule:
+          rate: cron(45 20 * * ? *)
+          enabled: false
+
+  amazonPostInvoices:
+    handler: src.handlers.post_invoices_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+    events:
+      # Hourly during the working window; each run claims up to 200 ready
+      # orders (~4 min at SAP's ~57 docs/min ceiling).
+      - schedule:
+          rate: cron(30 21-23,0-14 * * ? *)
+          enabled: false
+      # Daily retry safety net for transient failures (stock races).
+      - schedule:
+          rate: cron(0 3 * * ? *)
+          enabled: false
+          input: { mode: retry }
+
+  amazonPostCreditNotes:
+    handler: src.handlers.post_credit_notes_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+    events:
+      # Every 6h with a 45-day window: Finances PostedDate lags the MTR,
+      # and the duplicate guards make re-processing free.
+      - schedule:
+          rate: rate(6 hours)
+          enabled: false
+
+  amazonRecon:
+    handler: src.handlers.recon_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+    events:
+      # Daily invariants after the posting window. 15:30 UTC = 21:00 IST.
+      - schedule:
+          rate: cron(30 15 * * ? *)
+          enabled: false
+          input: { mode: invariants }
+
+  amazonDashboardApi:
+    handler: src.handlers.dashboard_handler
+    memorySize: 512
+    timeout: 30
+    layers: [{ Ref: SharedLambdaLayer }]
+    events:
+      - httpApi:
+          path: /v1/amazon/stats
+          method: get
+          authorizer:
+            name: dashboardCognitoJwt
+      - httpApi:
+          path: /v1/amazon/orders
+          method: get
+          authorizer:
+            name: dashboardCognitoJwt
+      - httpApi:
+          path: /v1/amazon/order-detail
+          method: get
+          authorizer:
+            name: dashboardCognitoJwt
+      - httpApi:
+          path: /v1/amazon/invoice-failures
+          method: get
+          authorizer:
+            name: dashboardCognitoJwt
+      - httpApi:
+          path: /v1/amazon/cn-log
+          method: get
+          authorizer:
+            name: dashboardCognitoJwt
+      - httpApi:
+          path: /v1/amazon/sync-log
+          method: get
+          authorizer:
+            name: dashboardCognitoJwt
+      - httpApi:
+          path: /v1/amazon/retry-invoices
+          method: post
+          authorizer:
+            name: dashboardCognitoJwt
+      - httpApi:
+          path: /v1/amazon/retry-cn
+          method: post
+          authorizer:
+            name: dashboardCognitoJwt
+
+resources:
+  Resources:
+    ReconBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:custom.reconBucket}
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+
+    AmazonDashboardUserPool:
+      Type: AWS::Cognito::UserPool
+      Properties:
+        UserPoolName: ${self:service}-${self:provider.stage}-dashboard
+        UsernameAttributes:
+          - email
+        AutoVerifiedAttributes:
+          - email
+        Policies:
+          PasswordPolicy:
+            MinimumLength: 10
+            RequireLowercase: true
+            RequireNumbers: true
+            RequireSymbols: false
+            RequireUppercase: true
+        AccountRecoverySetting:
+          RecoveryMechanisms:
+            - Name: verified_email
+              Priority: 1
+
+    AmazonDashboardUserPoolClient:
+      Type: AWS::Cognito::UserPoolClient
+      Properties:
+        ClientName: ${self:service}-${self:provider.stage}-dashboard-web
+        UserPoolId: !Ref AmazonDashboardUserPool
+        GenerateSecret: false
+        ExplicitAuthFlows:
+          - ALLOW_USER_PASSWORD_AUTH
+          - ALLOW_REFRESH_TOKEN_AUTH
+          - ALLOW_USER_SRP_AUTH
+        PreventUserExistenceErrors: ENABLED
+        SupportedIdentityProviders:
+          - COGNITO
+        AccessTokenValidity: 8
+        IdTokenValidity: 8
+        RefreshTokenValidity: 30
+        TokenValidityUnits:
+          AccessToken: hours
+          IdToken: hours
+          RefreshToken: days
+
+  Outputs:
+    ReconBucketName:
+      Value: !Ref ReconBucket
+    AmazonDashboardUserPoolId:
+      Description: Cognito User Pool ID for dashboard login
+      Value: !Ref AmazonDashboardUserPool
+    AmazonDashboardUserPoolClientId:
+      Description: Cognito app client ID for dashboard login
+      Value: !Ref AmazonDashboardUserPoolClient

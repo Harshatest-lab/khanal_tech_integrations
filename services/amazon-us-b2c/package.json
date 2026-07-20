@@ -1,0 +1,9 @@
+{
+  "name": "amazon-us-b2c",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Amazon US B2C SP-API -> SAP B1 pipeline (orders, invoices, credit notes, reconciliation)",
+  "devDependencies": {
+    "serverless": "^3.38.0"
+  }
+}

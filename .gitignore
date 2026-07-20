@@ -9,6 +9,8 @@ venv/
 .env
 .env.*
 !.env.example
+credentials_local.py
+!credentials_local.example.py
 
 # Serverless
 .serverless/

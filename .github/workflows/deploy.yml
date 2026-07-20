@@ -8,7 +8,7 @@ on:
         required: true
         default: dev
       service:
-        description: "Service folder: delivery-api | B2C_Invoice"
+        description: "Service folder: delivery-api | B2C_Invoice | amazon-us-b2c"
         required: true
         default: delivery-api
 
@@ -58,6 +58,11 @@ jobs:
           SAP_SL_PASSWORD: ${{ secrets.SAP_SL_PASSWORD }}
           # Optional: set to false for self-signed SAP SL TLS (dev); omit or true for verify.
           SAP_SL_VERIFY_SSL: ${{ secrets.SAP_SL_VERIFY_SSL }}
+          # amazon-us-b2c only — falls back to serverless.yml defaults if unset.
+          AMZ_POSTING_CUTOFF_DATE: ${{ secrets.AMZ_POSTING_CUTOFF_DATE }}
+          AMZ_ALERT_ADMIN_EMAIL: ${{ secrets.AMZ_ALERT_ADMIN_EMAIL }}
+          AMZ_ALERT_FROM_EMAIL: ${{ secrets.AMZ_ALERT_FROM_EMAIL }}
+          AMZ_SES_REGION: ${{ secrets.AMZ_SES_REGION }}
         run: |
           npm install
           npx serverless deploy --stage ${{ inputs.stage }} --region ${{ secrets.AWS_REGION }}

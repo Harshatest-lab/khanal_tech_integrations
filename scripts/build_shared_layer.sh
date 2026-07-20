@@ -7,6 +7,8 @@ rm -rf "${BUILD_DIR}"
 mkdir -p "${BUILD_DIR}/python"
 # psycopg in layer so Lambdas can use RDS / RDS Proxy without per-function packaging plugins.
 python3 -m pip install "psycopg[binary,pool]>=3.2,<4" -t "${BUILD_DIR}/python" --quiet
+# requests for the amazon-us-b2c SP-API client.
+python3 -m pip install "requests>=2.31,<3" -t "${BUILD_DIR}/python" --quiet
 # HANA driver for Lambda (Linux x86_64). On macOS, cross-install may fail — run this script in CI/Linux.
 if [[ "${INSTALL_HDBCLI:-1}" != "0" ]]; then
   python3 -m pip install "hdbcli>=2.23" -t "${BUILD_DIR}/python" --quiet \
