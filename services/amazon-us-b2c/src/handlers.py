@@ -8,6 +8,7 @@ honest).
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import traceback
 from datetime import date, datetime, timedelta, timezone
@@ -25,6 +26,15 @@ from amazon_us.fba_ship_sync import sync_ship_dates
 logging.getLogger().setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
+# DATABASE_URL embeds a password (postgresql://user:pass@host/...); some
+# driver errors echo the DSN back in the exception text, so scrub it before
+# any crash detail goes out in an alert email.
+_DSN_CREDS_RE = re.compile(r"://[^/@\s]+:[^/@\s]+@")
+
+
+def _scrub(text: str) -> str:
+    return _DSN_CREDS_RE.sub("://***:***@", text)
+
 
 def _run(label: str, fn):
     try:
@@ -32,7 +42,7 @@ def _run(label: str, fn):
         logger.info("%s result: %s", label, result)
         return result
     except Exception as e:
-        send_alert(f"{label} crashed", f"{e}\n\n{traceback.format_exc()[-3000:]}")
+        send_alert(f"{label} crashed", _scrub(f"{e}\n\n{traceback.format_exc()[-3000:]}"))
         raise
 
 

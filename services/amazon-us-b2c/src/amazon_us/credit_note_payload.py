@@ -70,13 +70,16 @@ def build_credit_note_payload(
             )
             continue
 
+        qty = round(abs(adj.principal_amount) / unit_price, 6)
+        if qty <= 0:
+            continue
+
+        # Pop only once we know this adjustment will actually consume a line —
+        # popping earlier would discard the line for a later same-item_code
+        # adjustment even though this one turned out to be a no-op.
         invoice_line = _pop_matching_invoice_line(lines_by_item_code, item_code)
         if invoice_line is None:
             skipped.append({"seller_sku": adj.seller_sku, "reason": "No matching invoice line found"})
-            continue
-
-        qty = round(abs(adj.principal_amount) / unit_price, 6)
-        if qty <= 0:
             continue
 
         doc_lines.append(

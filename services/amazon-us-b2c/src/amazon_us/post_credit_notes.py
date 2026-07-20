@@ -1,9 +1,10 @@
 """Post AR Credit Notes for Amazon refund events.
 
 Flow per event (refund_id = "{order_id}-{PostedDate}" = SAP NumAtCard):
-  1. Local cn_log duplicate guard, then SAP duplicate guard by NumAtCard
-     (CancelStatus csNo). A failed SAP check aborts the event — never
-     treated as "not found".
+  1. Atomic local claim (cn_log status -> 'posting'; reclaimable after
+     30min if a worker crashed mid-flight), then SAP duplicate guard by
+     NumAtCard (CancelStatus csNo). A failed SAP check aborts the event —
+     never treated as "not found".
   2. Cutoff guard: the ORDER's ship/purchase date must be on/after the
      posting cutoff (pre-cutoff refund revenue was booked manually by
      Finance; posting a CN for it would double-count).
@@ -61,9 +62,16 @@ def _process_event(conn, event: finances_api.RefundEvent, mapping: dict[str, str
     """Returns 'posted' | 'skipped'. Raises on real failures."""
     rid = event.refund_id
 
-    local = store.get_cn_log(conn, rid)
-    if local and local["status"] == "posted":
-        return "skipped"
+    if not dry_run:
+        # Atomic claim: closes the window where two overlapping invocations
+        # (manual backfill overlapping the schedule, an ops re-invoke) could
+        # both pass the SAP existence check below and both post a CN.
+        if not store.claim_cn(conn, rid, event.amazon_order_id, event.posted_date):
+            return "skipped"
+    else:
+        local = store.get_cn_log(conn, rid)
+        if local and local["status"] == "posted":
+            return "skipped"
 
     existing = sap_client.find_credit_note_by_ref(rid)
     if existing:

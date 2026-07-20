@@ -25,15 +25,21 @@ provider:
           Resource:
             - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/hana_config
             - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/hana_credentials
-        # SAP Service Layer (shared SSM-cached session; PutParameter for
-        # session renewal + stale-session invalidation).
+        # SAP Service Layer config + login creds — read-only, the code never
+        # writes these (only b1_session, below).
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+          Resource:
+            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/sl_config
+            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/credentials
+        # Shared SSM-cached B1 session; PutParameter for session renewal +
+        # stale-session invalidation.
         - Effect: Allow
           Action:
             - ssm:GetParameter
             - ssm:PutParameter
           Resource:
-            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/sl_config
-            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/credentials
             - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/b1_session
         # Failure alerts + recon summaries.
         - Effect: Allow
@@ -85,6 +91,8 @@ package:
     - "!**"
     - "src/**"
     - "!src/amazon_us/credentials_local.py"
+    - "!**/__pycache__/**"
+    - "!**/*.pyc"
 
 functions:
   amazonFetch:

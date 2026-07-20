@@ -5,7 +5,7 @@ Daily invariants ("nothing silently missing"):
     be posted, failed (with a reason), or explainably waiting
   - no order stuck in 'posting' (crashed worker)
   - failed orders that exhausted retries
-  - CN failures
+  - CN failures, and no CN claim stuck in 'posting' (crashed worker)
   - fetch watermark freshness (a silent-dead fetch is an outage)
 Breaches alert via SES; counts land in amazon_us_sync_log.
 
@@ -44,7 +44,7 @@ from amazon_us.alerts import send_alert
 logger = logging.getLogger(__name__)
 
 _ORDER_ID_RE = re.compile(r"^\d{3}-\d{7}-\d{7}$")
-_CN_SUFFIX_RE = re.compile(r"-[0-9TZ:.\-]+$")
+_ORDER_ID_PREFIX_RE = re.compile(r"^(\d{3}-\d{7}-\d{7})(?:-.+)?$")
 _AMOUNT_TOLERANCE = 0.02
 
 
@@ -83,6 +83,12 @@ def run_invariants(conn) -> dict:
             checks["cn_failed"] = cur.fetchone()[0]
 
             cur.execute(
+                "SELECT count(*) FROM amazon_us_cn_log "
+                "WHERE status = 'posting' AND updated_at < now() - interval '30 minutes'"
+            )
+            checks["cn_stuck_posting"] = cur.fetchone()[0]
+
+            cur.execute(
                 "SELECT count(*) FROM amazon_us_orders "
                 "WHERE stage = 'fetched' AND last_error LIKE 'Unmapped SKUs%'"
             )
@@ -106,6 +112,8 @@ def run_invariants(conn) -> dict:
             breaches.append(f"{checks['failed_exhausted']} orders failed with retries exhausted")
         if checks["cn_failed"]:
             breaches.append(f"{checks['cn_failed']} credit-note events in failed state")
+        if checks["cn_stuck_posting"]:
+            breaches.append(f"{checks['cn_stuck_posting']} credit-note events stuck in 'posting' >30min")
         if watermark_age_h is None or watermark_age_h > 6:
             breaches.append(f"order-fetch watermark stale ({watermark_age_h}h) — fetch may be dead")
         if checks["shipped_not_posted"] > 50:
@@ -211,7 +219,8 @@ def fetch_sap_side(period_from: str, period_to: str) -> dict[str, dict]:
         )
         for num_at_card, total in cur.fetchall() or []:
             raw = str(num_at_card).strip()
-            oid = raw if _ORDER_ID_RE.match(raw) else _CN_SUFFIX_RE.sub("", raw)
+            prefix_match = _ORDER_ID_PREFIX_RE.match(raw)
+            oid = prefix_match.group(1) if prefix_match else raw
             if _ORDER_ID_RE.match(oid):
                 bucket = result.setdefault(oid, {"sales": 0.0, "refunds": 0.0})
                 bucket["refunds"] = round(bucket["refunds"] + float(total or 0), 2)

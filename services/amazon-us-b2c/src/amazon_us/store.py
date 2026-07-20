@@ -249,15 +249,22 @@ def mark_failed(conn: psycopg.Connection, amazon_order_id: str, error: str) -> N
 
 
 def set_actual_ship_dates(conn: psycopg.Connection, ship_dates: dict[str, str]) -> int:
-    """Bulk-update actual_ship_date for staged orders; returns rows updated."""
+    """Bulk-update actual_ship_date for staged orders; returns rows updated.
+
+    Each call only sees the earliest ship date within its own report window,
+    so this never overwrites a date with a *later* one (a rolling window
+    that ages out a partial shipment's earliest record must not drag the
+    stored date forward) and never touches an order that's already
+    'posted' (its SAP DocDate is already fixed — see README rule #2)."""
     updated = 0
     with conn.cursor() as cur:
         for oid, ship_date in ship_dates.items():
             cur.execute(
                 """
-                UPDATE amazon_us_orders SET actual_ship_date = %s, updated_at = now()
+                UPDATE amazon_us_orders SET actual_ship_date = %s::date, updated_at = now()
                 WHERE amazon_order_id = %s
-                  AND (actual_ship_date IS DISTINCT FROM %s::date)
+                  AND stage != 'posted'
+                  AND (actual_ship_date IS NULL OR actual_ship_date > %s::date)
                 """,
                 (ship_date, oid, ship_date),
             )
@@ -341,6 +348,32 @@ def get_cn_log(conn: psycopg.Connection, refund_id: str) -> dict | None:
     if not row:
         return None
     return dict(zip(("refund_id", "status", "sap_doc_entry", "sap_doc_num", "attempt_count"), row))
+
+
+def claim_cn(conn: psycopg.Connection, refund_id: str, amazon_order_id: str, posted_date: str | None) -> bool:
+    """Atomically claim a refund event for posting (marks it 'posting').
+    False means it's already posted, or another run claimed it <30min ago —
+    the caller must not post in either case. A stale 'posting' claim (crashed
+    worker) is reclaimable after 30 minutes, same threshold as the order
+    stage's stuck-posting invariant."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO amazon_us_cn_log (refund_id, amazon_order_id, posted_date, status, attempt_count)
+            VALUES (%s, %s, %s, 'posting', 1)
+            ON CONFLICT (refund_id) DO UPDATE SET
+              status = 'posting',
+              attempt_count = amazon_us_cn_log.attempt_count + 1,
+              updated_at = now()
+            WHERE amazon_us_cn_log.status != 'posted'
+              AND (amazon_us_cn_log.status != 'posting'
+                   OR amazon_us_cn_log.updated_at < now() - interval '30 minutes')
+            """,
+            (refund_id, amazon_order_id, posted_date),
+        )
+        claimed = cur.rowcount == 1
+    conn.commit()
+    return claimed
 
 
 def upsert_cn_log(
@@ -472,6 +505,10 @@ def start_sync_log(
 def finish_sync_log(
     conn: psycopg.Connection, run_id: int, status: str, counts: dict | None = None, error: str | None = None
 ) -> None:
+    # A DB error earlier in this run can leave the transaction aborted; without
+    # this rollback the UPDATE below would itself raise and the error status
+    # (and message) would never get written, masking the real failure.
+    conn.rollback()
     with conn.cursor() as cur:
         cur.execute(
             """
