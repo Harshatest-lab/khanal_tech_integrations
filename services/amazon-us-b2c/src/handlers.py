@@ -7,19 +7,21 @@ honest).
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import sys
 import traceback
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 # Lambda package root is ``src/``; local modules use ``from amazon_us.*``.
 _SRC = Path(__file__).resolve().parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from amazon_us import fetch_sync, post_credit_notes, post_invoices, recon, store
+from amazon_us import dashboard_queries, fetch_sync, post_credit_notes, post_invoices, recon, store
 from amazon_us.alerts import send_alert
 from amazon_us.fba_ship_sync import sync_ship_dates
 
@@ -127,3 +129,112 @@ def recon_handler(event, context):
             raise ValueError(f"Unknown recon mode: {mode}")
 
     return _run(f"recon[{mode}]", _go)
+
+
+# ── Dashboard HTTP API (read-only + a couple of manual-retry actions) ──────
+
+def _json_response(status_code: int, body: Any) -> dict[str, Any]:
+    return {
+        "statusCode": status_code,
+        "headers": {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Content-Type,Authorization",
+            "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+        },
+        "body": json.dumps(body, default=str),
+    }
+
+
+def _http_method(event: dict[str, Any]) -> str:
+    http = (event.get("requestContext") or {}).get("http") or {}
+    return str(http.get("method") or event.get("httpMethod") or "GET").upper()
+
+
+def _path(event: dict[str, Any]) -> str:
+    return str(event.get("rawPath") or event.get("path") or "")
+
+
+def _query_params(event: dict[str, Any]) -> dict[str, str]:
+    params = event.get("queryStringParameters") or {}
+    return {str(k): str(v) for k, v in params.items() if v is not None} if isinstance(params, dict) else {}
+
+
+def dashboard_handler(event, context):
+    method = _http_method(event)
+    if method == "OPTIONS":
+        return _json_response(200, {"ok": True})
+
+    path = _path(event)
+    q = _query_params(event)
+
+    try:
+        if path.endswith("/v1/amazon/retry-invoices") and method == "POST":
+            with store.connect() as conn:
+                limit = int(q.get("limit") or 50)
+                return _json_response(200, post_invoices.retry_failed_orders(conn, limit=limit))
+
+        if path.endswith("/v1/amazon/retry-cn") and method == "POST":
+            with store.connect() as conn:
+                posted_after = q.get("posted_after") or (
+                    datetime.now(timezone.utc) - timedelta(days=45)
+                ).strftime("%Y-%m-%dT%H:%M:%SZ")
+                dry_run = (q.get("dry_run") or "").lower() in ("1", "true")
+                return _json_response(
+                    200,
+                    post_credit_notes.post_refunds(
+                        conn, posted_after, q.get("posted_before"), dry_run=dry_run
+                    ),
+                )
+
+        if path.endswith("/v1/amazon/order-detail") and not (q.get("amazon_order_id") or "").strip():
+            return _json_response(400, {"error": "amazon_order_id is required"})
+
+        with store.connect() as conn:
+            if path.endswith("/v1/amazon/stats"):
+                return _json_response(200, dashboard_queries.fetch_stats(conn))
+
+            if path.endswith("/v1/amazon/orders"):
+                limit = dashboard_queries._clamp_limit(q.get("limit"))
+                offset = dashboard_queries._clamp_offset(q.get("offset"))
+                return _json_response(
+                    200,
+                    dashboard_queries.fetch_orders(
+                        conn,
+                        limit=limit,
+                        offset=offset,
+                        stage=q.get("stage") or None,
+                        amazon_order_id=(q.get("amazon_order_id") or "").strip() or None,
+                        order_date_from=q.get("order_date_from") or None,
+                        order_date_to=q.get("order_date_to") or None,
+                        sort_by=q.get("sort_by") or None,
+                        sort_dir=q.get("sort_dir") or None,
+                    ),
+                )
+
+            if path.endswith("/v1/amazon/order-detail"):
+                oid = (q.get("amazon_order_id") or "").strip()
+                detail = dashboard_queries.fetch_order_detail(conn, oid)
+                if detail["header"] is None:
+                    return _json_response(404, {"error": "Order not found", "amazon_order_id": oid})
+                return _json_response(200, detail)
+
+            if path.endswith("/v1/amazon/invoice-failures"):
+                limit = dashboard_queries._clamp_limit(q.get("limit"), default=50)
+                return _json_response(200, dashboard_queries.fetch_invoice_failures(conn, limit=limit))
+
+            if path.endswith("/v1/amazon/cn-log"):
+                limit = dashboard_queries._clamp_limit(q.get("limit"))
+                return _json_response(
+                    200, dashboard_queries.fetch_cn_log(conn, limit=limit, status=q.get("status") or None)
+                )
+
+            if path.endswith("/v1/amazon/sync-log"):
+                limit = dashboard_queries._clamp_limit(q.get("limit"), default=20)
+                items = dashboard_queries.fetch_sync_log(conn, limit=limit, mode=q.get("mode") or None)
+                return _json_response(200, {"items": items})
+
+        return _json_response(404, {"error": "Not found", "path": path})
+    except Exception as exc:
+        logger.error("dashboard_api_error path=%s error=%s", path, exc)
+        return _json_response(500, {"error": str(exc)})
