@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any
+from urllib.parse import quote
 
 from khanal_shared.sap_sl import build_opener_and_base_via_ssm, sap_sl_request_json
 from khanal_shared.sap_sl.ssm_session import param_b1_session
@@ -125,9 +126,10 @@ def find_credit_note_by_ref(refund_id: str) -> dict | None:
 
 def _find_by_num_at_card(endpoint: str, ref: str) -> dict | None:
     escaped = ref.replace("'", "''")
-    path = (
+    path = quote(
         f"{endpoint}?$filter=NumAtCard eq '{escaped}' and CancelStatus eq 'csNo'"
-        "&$select=DocEntry,DocNum&$top=1"
+        "&$select=DocEntry,DocNum&$top=1",
+        safe="/?$&=',",
     )
     try:
         status, body = _request("GET", path)

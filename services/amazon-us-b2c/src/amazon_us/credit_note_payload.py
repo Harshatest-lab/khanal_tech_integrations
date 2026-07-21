@@ -130,6 +130,7 @@ def build_credit_note_payload(
         "Series": constants.SAP_CN_SERIES,
         "NumAtCard": refund_event.refund_id,
         "PayToCode": constants.SAP_PAY_TO_CODE,
+        "U_CreatedBy": constants.SAP_CREATED_BY,
         "DocumentLines": doc_lines,
     }
     return payload, skipped
