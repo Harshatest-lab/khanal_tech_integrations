@@ -20,12 +20,40 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from amazon_us import constants, report_parser, reports_api, sp_api, store
-from amazon_us.dates import date_chunks, pacific_day_to_utc, parse_utc, utc_to_pacific
+from amazon_us.dates import (
+    date_chunks,
+    pacific_day_to_utc,
+    parse_utc,
+    utc_to_pacific,
+    utc_to_pacific_date,
+)
 
 logger = logging.getLogger(__name__)
 
 _SHIPPED = "Shipped"
 _WATERMARK = "orders_last_updated_after"
+
+
+_MFN_CHANNEL_VALUES = {"MFN", "Merchant"}  # Orders API says "MFN"; flat-file report says "Merchant"
+
+
+def _mfn_ship_date(fulfillment_channel: str, order_status: str, last_update_raw: str) -> str | None:
+    """MFN ship-date proxy: Amazon exposes no true ship date for
+    merchant-fulfilled orders (confirmed against SP-API docs/known gaps —
+    the non-PII order reports dropped ship-date columns and never got them
+    back). Use last-updated-date at the moment order_status becomes
+    Shipped instead — that's Amazon's own timestamp of OUR shipment
+    confirmation, the closest available proxy. AFN (Amazon-fulfilled)
+    orders keep using the real ship date from the FBA shipments report
+    (fba_ship_sync) — unaffected by this.
+
+    Two different vocabularies carry the same concept: the Orders API
+    returns literal "AFN"/"MFN", the flat-file orders report returns
+    "Amazon"/"Merchant" for the same field. Both are checked here since
+    this function is called from both fetch paths."""
+    if fulfillment_channel not in _MFN_CHANNEL_VALUES or order_status != _SHIPPED:
+        return None
+    return utc_to_pacific_date(last_update_raw)
 
 
 def refresh_sku_map(conn) -> dict[str, str]:
@@ -90,6 +118,7 @@ def sync_via_report(conn, from_date: str, to_date: str, lookback_days: int | Non
     try:
         mapping = refresh_sku_map(conn)
         totals = {"orders": 0, "created": 0, "updated": 0, "refreshed": 0, "ready": 0}
+        mfn_ship_dates: dict[str, str] = {}
 
         for chunk_from, chunk_to in date_chunks(fetch_from, to_date, max_days=30):
             report_id = reports_api.create_report(
@@ -105,10 +134,21 @@ def sync_via_report(conn, from_date: str, to_date: str, lookback_days: int | Non
             orders = report_parser.parse_orders_report(content)
             totals["orders"] += len(orders)
             for header in orders.values():
+                ship_date = _mfn_ship_date(
+                    header.get("fulfillment_channel", ""),
+                    header.get("order_status", ""),
+                    header.get("last_updated_date", ""),
+                )
+                if ship_date:
+                    mfn_ship_dates[header["amazon_order_id"]] = ship_date
+
                 result = _stage_one(conn, header, mapping)
                 totals[result] = totals.get(result, 0) + 1
                 if result != "refreshed" and header.get("_staged_ready"):
                     totals["ready"] += 1
+
+        if mfn_ship_dates:
+            totals["mfn_ship_dates_set"] = store.set_actual_ship_dates(conn, mfn_ship_dates)
 
         promoted = store.promote_fetched_orders(conn, mapping)
         totals["promoted"] = promoted
@@ -140,6 +180,7 @@ def _stage_one(conn, header: dict, mapping: dict[str, str]) -> str:
 
 def _stage_from_orders_api(conn, raw_orders: list[dict], mapping: dict[str, str]) -> dict:
     counts = {"orders": len(raw_orders), "created": 0, "updated": 0, "refreshed": 0, "ready": 0}
+    mfn_ship_dates: dict[str, str] = {}
     for raw in raw_orders:
         oid = raw.get("AmazonOrderId", "")
         if not oid:
@@ -177,11 +218,21 @@ def _stage_from_orders_api(conn, raw_orders: list[dict], mapping: dict[str, str]
             "ship_postal_code": (address.get("PostalCode") or "")[:20],
             "ship_country": (address.get("CountryCode") or "")[:10],
             "buyer_name": ((raw.get("BuyerInfo") or {}).get("BuyerName") or "")[:120],
+            "fulfillment_channel": raw.get("FulfillmentChannel", ""),
             "last_error": ("Unmapped SKUs: " + ", ".join(unmapped)) if unmapped else None,
             "raw_payload": {"order": raw, "items": items_raw},
         }
+        ship_date = _mfn_ship_date(
+            fields["fulfillment_channel"], fields["order_status"], raw.get("LastUpdateDate", "")
+        )
+        if ship_date:
+            mfn_ship_dates[oid] = ship_date
+
         result = store.upsert_order(conn, fields, lines)
         counts[result] = counts.get(result, 0) + 1
+
+    if mfn_ship_dates:
+        counts["mfn_ship_dates_set"] = store.set_actual_ship_dates(conn, mfn_ship_dates)
     return counts
 
 
