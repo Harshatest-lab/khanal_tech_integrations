@@ -63,6 +63,14 @@
           <span class="nav-icon">↻</span>
           Sync history
         </a>
+        <a class="nav-item" href="#" data-panel="health-panel">
+          <span class="nav-icon">♥</span>
+          Pipeline health
+        </a>
+        <a class="nav-item" href="#" data-panel="finance-panel">
+          <span class="nav-icon">$</span>
+          Finance reconciliation
+        </a>
       </nav>
       <div class="sidebar-footer">
         <span class="dot"></span>
@@ -214,6 +222,30 @@
               </tr>
             </thead>
             <tbody id="sync-body"><tr><td colspan="8" class="loading-cell">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="health-panel" class="panel hidden">
+        <div id="health-body" style="padding: 1.35rem">
+          <p class="muted">Loading…</p>
+        </div>
+      </section>
+
+      <section id="finance-panel" class="panel hidden">
+        <div class="table-scroll">
+          <table class="report-table" id="finance-table">
+            <thead>
+              <tr>
+                <th class="col-idx">#</th>
+                <th>Period</th>
+                <th>Status</th>
+                <th>Matched</th>
+                <th>Categories</th>
+                <th class="col-action">Detail CSV</th>
+              </tr>
+            </thead>
+            <tbody id="finance-body"><tr><td colspan="6" class="loading-cell">Loading…</td></tr></tbody>
           </table>
         </div>
       </section>

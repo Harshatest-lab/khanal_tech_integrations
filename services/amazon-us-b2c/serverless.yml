@@ -222,6 +222,11 @@ functions:
           method: post
           authorizer:
             name: dashboardCognitoJwt
+      - httpApi:
+          path: /v1/amazon/recon-download
+          method: get
+          authorizer:
+            name: dashboardCognitoJwt
 
 resources:
   Resources:

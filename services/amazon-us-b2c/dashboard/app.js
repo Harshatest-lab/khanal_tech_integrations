@@ -273,12 +273,14 @@ function cnStatusBadge(status) {
 
 // ── Panel switching ─────────────────────────────────────────────────────
 
-const PANELS = ["orders-panel", "failures-panel", "cn-panel", "sync-panel"];
+const PANELS = ["orders-panel", "failures-panel", "cn-panel", "sync-panel", "health-panel", "finance-panel"];
 const PANEL_TITLES = {
   "orders-panel": "Orders",
   "failures-panel": "Invoice failures",
   "cn-panel": "Credit notes",
   "sync-panel": "Sync history",
+  "health-panel": "Pipeline health",
+  "finance-panel": "Finance reconciliation",
 };
 let activePanel = "orders-panel";
 
@@ -318,6 +320,8 @@ async function loadPanel(panelId) {
   if (panelId === "failures-panel") return loadFailures();
   if (panelId === "cn-panel") return loadCnLog();
   if (panelId === "sync-panel") return loadSyncLog();
+  if (panelId === "health-panel") return loadHealth();
+  if (panelId === "finance-panel") return loadFinanceRecon();
 }
 
 document.querySelectorAll(".nav-item[data-panel]").forEach((a) => {
@@ -329,8 +333,11 @@ document.querySelectorAll(".nav-item[data-panel]").forEach((a) => {
 
 // ── Stats ────────────────────────────────────────────────────────────────
 
+let lastStats = null;
+
 async function loadStats() {
   const stats = await apiGet("/v1/amazon/stats");
+  lastStats = stats;
   const chips = document.getElementById("stat-chips");
   const byStage = stats.by_stage || {};
   const failed = byStage.failed || 0;
@@ -348,6 +355,154 @@ async function loadStats() {
     <span class="stat-chip stat-chip--success">${escapeHtml(String(cnPosted))} CN posted</span>
     <span class="stat-chip ${cnFailed > 0 ? "stat-chip--danger" : "stat-chip--muted"}">${escapeHtml(String(cnFailed))} CN failed</span>
   `;
+}
+
+// ── Pipeline health panel ────────────────────────────────────────────────
+
+const MODE_LABELS = {
+  incremental: "Incremental fetch",
+  report: "Report fetch",
+  fba: "FBA ship-date sync",
+  post: "Invoice posting",
+  cn: "Credit-note posting",
+  recon: "Daily invariants",
+  mtr_recon: "Monthly MTR recon",
+};
+
+async function loadHealth() {
+  hideError();
+  await loadStats();
+  renderHealth();
+}
+
+function runStatusBadge(status) {
+  if (status === "success") return '<span class="badge badge-success">success</span>';
+  if (status === "running") return '<span class="badge badge-running">running</span>';
+  return `<span class="badge badge-failed">${escapeHtml(status || "unknown")}</span>`;
+}
+
+function renderHealth() {
+  const body = document.getElementById("health-body");
+  const runs = lastStats?.last_run_by_mode || {};
+  const recon = runs.recon;
+  const breaches = recon?.counts?.breaches || [];
+  const watermarkAge = recon?.counts?.fetch_watermark_age_hours;
+
+  const breachesHtml = breaches.length
+    ? `<div class="sap-error-inline">${breaches.map((b) => escapeHtml(b)).join("<br>")}</div>`
+    : `<p class="muted" style="margin:0 0 1rem">No invariant breaches on the last run${recon ? ` (${formatDate(recon.finished_at)})` : " — recon hasn't run yet"}.</p>`;
+
+  const watermarkNote =
+    watermarkAge == null
+      ? ""
+      : `<p class="muted" style="margin:0 0 1rem">Incremental fetch watermark age: <strong>${escapeHtml(String(watermarkAge))}h</strong>${watermarkAge > 6 ? " — stale, incremental fetch may be dead" : ""}</p>`;
+
+  const modeOrder = ["incremental", "report", "fba", "post", "cn", "recon", "mtr_recon"];
+  const cards = modeOrder
+    .filter((m) => runs[m])
+    .map((m) => {
+      const r = runs[m];
+      const countsPreview = truncate(JSON.stringify(r.counts || {}), 60);
+      return `
+      <div class="trace-card" style="overflow-wrap:anywhere">
+        <span class="trace-card-label">${escapeHtml(MODE_LABELS[m] || m)}</span>
+        <span class="trace-card-value">${runStatusBadge(r.status)}</span>
+        <div class="sap-sync-meta" style="margin-top:0.4rem;word-break:break-word">Finished: ${formatDate(r.finished_at)}</div>
+        <div class="sap-sync-meta" style="word-break:break-word">${escapeHtml(countsPreview)}</div>
+        ${r.error_message ? `<div class="sap-sync-meta" style="color:var(--red);word-break:break-word">${escapeHtml(truncate(r.error_message, 60))}</div>` : ""}
+      </div>`;
+    })
+    .join("");
+
+  body.innerHTML = `
+    <div class="order-detail-box-title" style="border-radius:10px 10px 0 0">Last invariant check</div>
+    <div style="padding:1rem;border:1px solid var(--border);border-top:none;border-radius:0 0 10px 10px;margin-bottom:1.25rem">
+      ${breachesHtml}
+      ${watermarkNote}
+    </div>
+    <div class="order-detail-box-title" style="border-radius:10px 10px 0 0">Last run per mode</div>
+    <div class="trace-cards" style="padding:1rem;border:1px solid var(--border);border-top:none;border-radius:0 0 10px 10px;margin:0">
+      ${cards || '<p class="muted">No sync runs recorded yet.</p>'}
+    </div>
+  `;
+}
+
+// ── Finance reconciliation panel ─────────────────────────────────────────
+
+// recon.py's own documented categorization: these three are expected/no-action
+// (timing lag, not a real discrepancy); everything else needs Finance's attention.
+const RECON_EXPECTED_CATEGORIES = new Set([
+  "sap_not_in_mtr_timing",
+  "refunded_after_mtr_extract",
+  "pre_cutoff_excluded",
+]);
+const RECON_CATEGORY_ORDER = [
+  "matched",
+  "missing_in_sap",
+  "amount_mismatch",
+  "refund_not_yet_posted",
+  "sap_not_in_mtr_timing",
+  "refunded_after_mtr_extract",
+  "pre_cutoff_excluded",
+];
+
+function reconCategoryChip(name, count) {
+  if (!count) return "";
+  let cls = "stat-chip--danger";
+  if (name === "matched") cls = "stat-chip--success";
+  else if (RECON_EXPECTED_CATEGORIES.has(name)) cls = "stat-chip--muted";
+  return `<span class="stat-chip ${cls}">${escapeHtml(String(count))} ${escapeHtml(name.replace(/_/g, " "))}</span>`;
+}
+
+async function loadFinanceRecon() {
+  hideError();
+  const data = await apiGet("/v1/amazon/sync-log?mode=mtr_recon&limit=24");
+  const body = document.getElementById("finance-body");
+  const items = data.items || [];
+  if (!items.length) {
+    body.innerHTML = `<tr><td colspan="6" class="loading-cell">No reconciliation runs yet.</td></tr>`;
+    return;
+  }
+  body.innerHTML = items
+    .map((r, i) => {
+      const c = r.counts || {};
+      const period = `${formatDateOnly(r.window_from)} → ${formatDateOnly(r.window_to)}`;
+      const matchedText = c.total_orders != null ? `${c.matched ?? 0} / ${c.total_orders} (${c.matched_pct ?? 0}%)` : "—";
+      const chips = RECON_CATEGORY_ORDER.map((cat) => reconCategoryChip(cat, c[cat])).join(" ");
+      const downloadBtn = c.result_key
+        ? `<button type="button" class="btn-outline btn-sm" data-key="${escapeHtml(c.result_key)}">Download CSV</button>`
+        : "—";
+      return `
+      <tr>
+        <td class="cell-center cell-muted">${i + 1}</td>
+        <td class="cell-mono">${escapeHtml(period)}</td>
+        <td>${r.status === "success" ? '<span class="badge badge-success">success</span>' : `<span class="badge badge-failed">${escapeHtml(r.status)}</span>`}</td>
+        <td class="cell-mono">${escapeHtml(matchedText)}</td>
+        <td><div class="stat-chips" style="margin-top:0">${chips || "—"}</div></td>
+        <td class="cell-center">${downloadBtn}</td>
+      </tr>`;
+    })
+    .join("");
+
+  body.querySelectorAll("button[data-key]").forEach((btn) => {
+    btn.addEventListener("click", () => downloadReconCsv(btn));
+  });
+}
+
+async function downloadReconCsv(btn) {
+  const key = btn.dataset.key;
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = "Preparing…";
+  try {
+    const result = await apiGet(`/v1/amazon/recon-download?key=${encodeURIComponent(key)}`);
+    window.open(result.url, "_blank");
+  } catch (err) {
+    showError(`Download failed: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
 }
 
 // ── Orders panel ─────────────────────────────────────────────────────────
