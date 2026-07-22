@@ -49,9 +49,14 @@ def _run(label: str, fn):
 
 
 def fetch_handler(event, context):
-    """modes: incremental (default) | report | backfill.
+    """modes: incremental (default) | report | backfill | seed_watermark.
     report/backfill events: {"mode": "report", "from_date": "YYYY-MM-DD",
-    "to_date": "YYYY-MM-DD", "lookback_days": 30?}"""
+    "to_date": "YYYY-MM-DD", "lookback_days": 30?}
+    seed_watermark event: {"mode": "seed_watermark", "when": "YYYY-MM-DD HH:MM:SS"?}
+    -- sets the incremental watermark directly, defaulting to now. Run once
+    before ever enabling the incremental schedule (a missing watermark makes
+    sync_incremental try a 30-day per-order catch-up that can exhaust the
+    900s Lambda timeout without finishing)."""
     mode = (event or {}).get("mode", "incremental")
 
     def _go():
@@ -62,6 +67,9 @@ def fetch_handler(event, context):
                 from_date = event.get("from_date") or date.today().replace(day=1).isoformat()
                 to_date = event.get("to_date") or date.today().isoformat()
                 return fetch_sync.sync_via_report(conn, from_date, to_date, event.get("lookback_days"))
+            if mode == "seed_watermark":
+                value = fetch_sync.seed_watermark(conn, event.get("when"))
+                return {"watermark_set_to": value}
             raise ValueError(f"Unknown fetch mode: {mode}")
 
     return _run(f"fetch[{mode}]", _go)
@@ -113,9 +121,14 @@ def post_credit_notes_handler(event, context):
 
 
 def recon_handler(event, context):
-    """modes: invariants (default) | mtr.
+    """modes: invariants (default) | mtr | close_stuck_run.
     mtr event: {"mode": "mtr", "s3_bucket": ..., "s3_key": ...,
-    "period_from": "YYYY-MM-DD", "period_to": "YYYY-MM-DD"}."""
+    "period_from": "YYYY-MM-DD", "period_to": "YYYY-MM-DD"}.
+    close_stuck_run event: {"mode": "close_stuck_run", "run_id": int,
+    "status": "error"?, "error": str?} -- a handler that dies via hard
+    timeout (Sandbox.Timedout) never reaches finish_sync_log, leaving its
+    amazon_us_sync_log row permanently stuck at status='running'. This
+    closes it out manually; status defaults to "error"."""
     mode = (event or {}).get("mode", "invariants")
 
     def _go():
@@ -126,6 +139,12 @@ def recon_handler(event, context):
                 return recon.run_mtr_recon(
                     conn, event["s3_bucket"], event["s3_key"], event["period_from"], event["period_to"]
                 )
+            if mode == "close_stuck_run":
+                run_id = int(event["run_id"])
+                store.finish_sync_log(
+                    conn, run_id, event.get("status", "error"), error=event.get("error")
+                )
+                return {"closed_run_id": run_id}
             raise ValueError(f"Unknown recon mode: {mode}")
 
     return _run(f"recon[{mode}]", _go)
