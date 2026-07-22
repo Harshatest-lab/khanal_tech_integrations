@@ -121,9 +121,14 @@ def post_credit_notes_handler(event, context):
 
 
 def recon_handler(event, context):
-    """modes: invariants (default) | mtr.
+    """modes: invariants (default) | mtr | close_stuck_run.
     mtr event: {"mode": "mtr", "s3_bucket": ..., "s3_key": ...,
-    "period_from": "YYYY-MM-DD", "period_to": "YYYY-MM-DD"}."""
+    "period_from": "YYYY-MM-DD", "period_to": "YYYY-MM-DD"}.
+    close_stuck_run event: {"mode": "close_stuck_run", "run_id": int,
+    "status": "error"?, "error": str?} -- a handler that dies via hard
+    timeout (Sandbox.Timedout) never reaches finish_sync_log, leaving its
+    amazon_us_sync_log row permanently stuck at status='running'. This
+    closes it out manually; status defaults to "error"."""
     mode = (event or {}).get("mode", "invariants")
 
     def _go():
@@ -134,6 +139,12 @@ def recon_handler(event, context):
                 return recon.run_mtr_recon(
                     conn, event["s3_bucket"], event["s3_key"], event["period_from"], event["period_to"]
                 )
+            if mode == "close_stuck_run":
+                run_id = int(event["run_id"])
+                store.finish_sync_log(
+                    conn, run_id, event.get("status", "error"), error=event.get("error")
+                )
+                return {"closed_run_id": run_id}
             raise ValueError(f"Unknown recon mode: {mode}")
 
     return _run(f"recon[{mode}]", _go)
