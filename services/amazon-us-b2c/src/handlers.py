@@ -49,9 +49,14 @@ def _run(label: str, fn):
 
 
 def fetch_handler(event, context):
-    """modes: incremental (default) | report | backfill.
+    """modes: incremental (default) | report | backfill | seed_watermark.
     report/backfill events: {"mode": "report", "from_date": "YYYY-MM-DD",
-    "to_date": "YYYY-MM-DD", "lookback_days": 30?}"""
+    "to_date": "YYYY-MM-DD", "lookback_days": 30?}
+    seed_watermark event: {"mode": "seed_watermark", "when": "YYYY-MM-DD HH:MM:SS"?}
+    -- sets the incremental watermark directly, defaulting to now. Run once
+    before ever enabling the incremental schedule (a missing watermark makes
+    sync_incremental try a 30-day per-order catch-up that can exhaust the
+    900s Lambda timeout without finishing)."""
     mode = (event or {}).get("mode", "incremental")
 
     def _go():
@@ -62,6 +67,9 @@ def fetch_handler(event, context):
                 from_date = event.get("from_date") or date.today().replace(day=1).isoformat()
                 to_date = event.get("to_date") or date.today().isoformat()
                 return fetch_sync.sync_via_report(conn, from_date, to_date, event.get("lookback_days"))
+            if mode == "seed_watermark":
+                value = fetch_sync.seed_watermark(conn, event.get("when"))
+                return {"watermark_set_to": value}
             raise ValueError(f"Unknown fetch mode: {mode}")
 
     return _run(f"fetch[{mode}]", _go)

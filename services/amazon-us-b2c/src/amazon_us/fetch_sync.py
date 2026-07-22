@@ -73,6 +73,21 @@ def refresh_sku_map(conn) -> dict[str, str]:
     return store.get_sku_mapping(conn)
 
 
+def seed_watermark(conn, when: str | None = None) -> str:
+    """Manually set the incremental watermark, skipping the expensive 30-day
+    cold-start catch-up a missing watermark triggers (sync_incremental does
+    per-order Orders API calls, sized for dozens/hour, not a month of
+    backlog — a cold start against this account's throttling tier can burn
+    the full 900s Lambda timeout without finishing even the first page of
+    /orders/v0/orders). Call once before enabling the incremental schedule,
+    and again after recovering from any stuck/aborted incremental run.
+    `when` defaults to now; pass an explicit 'YYYY-MM-DD HH:MM:SS' UTC
+    string to backdate it instead."""
+    value = when or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    store.set_watermark(conn, _WATERMARK, value)
+    return value
+
+
 def sync_incremental(conn) -> dict:
     """Orders API watermark sync. Slow per-order item calls are fine here:
     hourly increments are dozens of orders, not thousands."""
