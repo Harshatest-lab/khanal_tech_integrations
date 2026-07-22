@@ -21,7 +21,7 @@ _SRC = Path(__file__).resolve().parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from amazon_us import dashboard_queries, fetch_sync, post_credit_notes, post_invoices, recon, store
+from amazon_us import constants, dashboard_queries, fetch_sync, post_credit_notes, post_invoices, recon, store
 from amazon_us.alerts import send_alert
 from amazon_us.fba_ship_sync import sync_ship_dates
 
@@ -205,6 +205,20 @@ def dashboard_handler(event, context):
                         conn, posted_after, q.get("posted_before"), dry_run=dry_run
                     ),
                 )
+
+        if path.endswith("/v1/amazon/recon-download") and method == "GET":
+            key = (q.get("key") or "").strip()
+            if not key.startswith("recon/"):
+                return _json_response(400, {"error": "invalid key"})
+            import boto3
+
+            s3 = boto3.client("s3")
+            url = s3.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": constants.RECON_BUCKET, "Key": key},
+                ExpiresIn=300,
+            )
+            return _json_response(200, {"url": url})
 
         if path.endswith("/v1/amazon/order-detail") and not (q.get("amazon_order_id") or "").strip():
             return _json_response(400, {"error": "amazon_order_id is required"})

@@ -39,3 +39,7 @@ LWA_TOKEN_URL = _env("AMZ_LWA_TOKEN_URL", "https://api.amazon.com/auth/o2/token"
 # date: a June MTR contains orders purchased weeks earlier. 30 days covers
 # every gap observed in the June 2026 reconciliation (7 was too short).
 FETCH_LOOKBACK_DAYS = int(_env("AMZ_FETCH_LOOKBACK_DAYS", "30"))
+
+# MTR recon detail CSVs land here (recon.run_mtr_recon writes them under the
+# "recon/" prefix); the dashboard's recon-download route presigns from here.
+RECON_BUCKET = _env("AMZ_RECON_BUCKET")

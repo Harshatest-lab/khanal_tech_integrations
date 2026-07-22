@@ -273,13 +273,14 @@ function cnStatusBadge(status) {
 
 // ── Panel switching ─────────────────────────────────────────────────────
 
-const PANELS = ["orders-panel", "failures-panel", "cn-panel", "sync-panel", "health-panel"];
+const PANELS = ["orders-panel", "failures-panel", "cn-panel", "sync-panel", "health-panel", "finance-panel"];
 const PANEL_TITLES = {
   "orders-panel": "Orders",
   "failures-panel": "Invoice failures",
   "cn-panel": "Credit notes",
   "sync-panel": "Sync history",
   "health-panel": "Pipeline health",
+  "finance-panel": "Finance reconciliation",
 };
 let activePanel = "orders-panel";
 
@@ -320,6 +321,7 @@ async function loadPanel(panelId) {
   if (panelId === "cn-panel") return loadCnLog();
   if (panelId === "sync-panel") return loadSyncLog();
   if (panelId === "health-panel") return loadHealth();
+  if (panelId === "finance-panel") return loadFinanceRecon();
 }
 
 document.querySelectorAll(".nav-item[data-panel]").forEach((a) => {
@@ -423,6 +425,84 @@ function renderHealth() {
       ${cards || '<p class="muted">No sync runs recorded yet.</p>'}
     </div>
   `;
+}
+
+// ── Finance reconciliation panel ─────────────────────────────────────────
+
+// recon.py's own documented categorization: these three are expected/no-action
+// (timing lag, not a real discrepancy); everything else needs Finance's attention.
+const RECON_EXPECTED_CATEGORIES = new Set([
+  "sap_not_in_mtr_timing",
+  "refunded_after_mtr_extract",
+  "pre_cutoff_excluded",
+]);
+const RECON_CATEGORY_ORDER = [
+  "matched",
+  "missing_in_sap",
+  "amount_mismatch",
+  "refund_not_yet_posted",
+  "sap_not_in_mtr_timing",
+  "refunded_after_mtr_extract",
+  "pre_cutoff_excluded",
+];
+
+function reconCategoryChip(name, count) {
+  if (!count) return "";
+  let cls = "stat-chip--danger";
+  if (name === "matched") cls = "stat-chip--success";
+  else if (RECON_EXPECTED_CATEGORIES.has(name)) cls = "stat-chip--muted";
+  return `<span class="stat-chip ${cls}">${escapeHtml(String(count))} ${escapeHtml(name.replace(/_/g, " "))}</span>`;
+}
+
+async function loadFinanceRecon() {
+  hideError();
+  const data = await apiGet("/v1/amazon/sync-log?mode=mtr_recon&limit=24");
+  const body = document.getElementById("finance-body");
+  const items = data.items || [];
+  if (!items.length) {
+    body.innerHTML = `<tr><td colspan="6" class="loading-cell">No reconciliation runs yet.</td></tr>`;
+    return;
+  }
+  body.innerHTML = items
+    .map((r, i) => {
+      const c = r.counts || {};
+      const period = `${formatDateOnly(r.window_from)} → ${formatDateOnly(r.window_to)}`;
+      const matchedText = c.total_orders != null ? `${c.matched ?? 0} / ${c.total_orders} (${c.matched_pct ?? 0}%)` : "—";
+      const chips = RECON_CATEGORY_ORDER.map((cat) => reconCategoryChip(cat, c[cat])).join(" ");
+      const downloadBtn = c.result_key
+        ? `<button type="button" class="btn-outline btn-sm" data-key="${escapeHtml(c.result_key)}">Download CSV</button>`
+        : "—";
+      return `
+      <tr>
+        <td class="cell-center cell-muted">${i + 1}</td>
+        <td class="cell-mono">${escapeHtml(period)}</td>
+        <td>${r.status === "success" ? '<span class="badge badge-success">success</span>' : `<span class="badge badge-failed">${escapeHtml(r.status)}</span>`}</td>
+        <td class="cell-mono">${escapeHtml(matchedText)}</td>
+        <td><div class="stat-chips" style="margin-top:0">${chips || "—"}</div></td>
+        <td class="cell-center">${downloadBtn}</td>
+      </tr>`;
+    })
+    .join("");
+
+  body.querySelectorAll("button[data-key]").forEach((btn) => {
+    btn.addEventListener("click", () => downloadReconCsv(btn));
+  });
+}
+
+async function downloadReconCsv(btn) {
+  const key = btn.dataset.key;
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = "Preparing…";
+  try {
+    const result = await apiGet(`/v1/amazon/recon-download?key=${encodeURIComponent(key)}`);
+    window.open(result.url, "_blank");
+  } catch (err) {
+    showError(`Download failed: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
 }
 
 // ── Orders panel ─────────────────────────────────────────────────────────
