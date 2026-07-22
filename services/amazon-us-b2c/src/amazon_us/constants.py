@@ -20,6 +20,7 @@ SAP_CN_SERIES = int(_env("AMZ_SAP_CN_SERIES", "104"))            # KFIB2C26
 SAP_WAREHOUSE = _env("AMZ_SAP_WAREHOUSE", "AMZ-FBA")
 SAP_TAX_CODE = _env("AMZ_SAP_TAX_CODE", "etax0")  # exact lowercase; OData filters are case-sensitive
 SAP_PAY_TO_CODE = _env("AMZ_SAP_PAY_TO_CODE", "Amazon USA-B2C")
+SAP_CREATED_BY = _env("AMZ_SAP_CREATED_BY", "Posted By Amazon API")  # OINV/ORIN mandatory UDF
 
 SAP_TAX_ITEM_CODE = "EXP000003"                    # "Tax-Sum"
 SAP_TAX_GL_FORMAT = "22200000-01-001-01"           # Sales Tax Accrual (_SYS00000000059)

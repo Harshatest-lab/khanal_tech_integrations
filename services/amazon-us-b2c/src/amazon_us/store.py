@@ -254,8 +254,10 @@ def set_actual_ship_dates(conn: psycopg.Connection, ship_dates: dict[str, str]) 
     Each call only sees the earliest ship date within its own report window,
     so this never overwrites a date with a *later* one (a rolling window
     that ages out a partial shipment's earliest record must not drag the
-    stored date forward) and never touches an order that's already
-    'posted' (its SAP DocDate is already fixed — see README rule #2)."""
+    stored date forward) and never touches an order that's 'posted' or
+    currently 'posting' (its SAP DocDate is already fixed, or about to be,
+    from whatever ship date the in-flight post already snapshotted —
+    same protection upsert_order gives the header via _PROTECTED_STAGES)."""
     updated = 0
     with conn.cursor() as cur:
         for oid, ship_date in ship_dates.items():
@@ -263,7 +265,7 @@ def set_actual_ship_dates(conn: psycopg.Connection, ship_dates: dict[str, str]) 
                 """
                 UPDATE amazon_us_orders SET actual_ship_date = %s::date, updated_at = now()
                 WHERE amazon_order_id = %s
-                  AND stage != 'posted'
+                  AND stage NOT IN ('posting', 'posted')
                   AND (actual_ship_date IS NULL OR actual_ship_date > %s::date)
                 """,
                 (ship_date, oid, ship_date),

@@ -33,7 +33,7 @@ def create_report(report_type: str, marketplace_id: str, data_start_time: str, d
     return resp.json().get("reportId")
 
 
-def poll_report(report_id: str, poll_interval: int = 30, max_wait: int = 600) -> str:
+def poll_report(report_id: str, poll_interval: int = 30, max_wait: int = 840) -> str:
     """Poll until DONE; returns reportDocumentId. Raises on FATAL/CANCELLED/timeout."""
     deadline = time.time() + max_wait
     while time.time() < deadline:

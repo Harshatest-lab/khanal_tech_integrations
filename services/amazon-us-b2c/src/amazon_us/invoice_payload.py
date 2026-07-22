@@ -128,6 +128,7 @@ def build_invoice_payload(
         "Series": constants.SAP_INVOICE_SERIES,
         "NumAtCard": order["amazon_order_id"],
         "PayToCode": constants.SAP_PAY_TO_CODE,
+        "U_CreatedBy": constants.SAP_CREATED_BY,
         "DocumentLines": doc_lines,
     }
     return payload, []
