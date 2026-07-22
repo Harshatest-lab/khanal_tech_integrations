@@ -63,6 +63,10 @@
           <span class="nav-icon">↻</span>
           Sync history
         </a>
+        <a class="nav-item" href="#" data-panel="health-panel">
+          <span class="nav-icon">♥</span>
+          Pipeline health
+        </a>
       </nav>
       <div class="sidebar-footer">
         <span class="dot"></span>
@@ -215,6 +219,12 @@
             </thead>
             <tbody id="sync-body"><tr><td colspan="8" class="loading-cell">Loading…</td></tr></tbody>
           </table>
+        </div>
+      </section>
+
+      <section id="health-panel" class="panel hidden">
+        <div id="health-body" style="padding: 1.35rem">
+          <p class="muted">Loading…</p>
         </div>
       </section>
     </main>

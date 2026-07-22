@@ -273,12 +273,13 @@ function cnStatusBadge(status) {
 
 // ── Panel switching ─────────────────────────────────────────────────────
 
-const PANELS = ["orders-panel", "failures-panel", "cn-panel", "sync-panel"];
+const PANELS = ["orders-panel", "failures-panel", "cn-panel", "sync-panel", "health-panel"];
 const PANEL_TITLES = {
   "orders-panel": "Orders",
   "failures-panel": "Invoice failures",
   "cn-panel": "Credit notes",
   "sync-panel": "Sync history",
+  "health-panel": "Pipeline health",
 };
 let activePanel = "orders-panel";
 
@@ -318,6 +319,7 @@ async function loadPanel(panelId) {
   if (panelId === "failures-panel") return loadFailures();
   if (panelId === "cn-panel") return loadCnLog();
   if (panelId === "sync-panel") return loadSyncLog();
+  if (panelId === "health-panel") return loadHealth();
 }
 
 document.querySelectorAll(".nav-item[data-panel]").forEach((a) => {
@@ -329,8 +331,11 @@ document.querySelectorAll(".nav-item[data-panel]").forEach((a) => {
 
 // ── Stats ────────────────────────────────────────────────────────────────
 
+let lastStats = null;
+
 async function loadStats() {
   const stats = await apiGet("/v1/amazon/stats");
+  lastStats = stats;
   const chips = document.getElementById("stat-chips");
   const byStage = stats.by_stage || {};
   const failed = byStage.failed || 0;
@@ -347,6 +352,76 @@ async function loadStats() {
     <span class="stat-chip ${failed > 0 ? "stat-chip--danger" : "stat-chip--muted"}">${escapeHtml(String(failed))} failed</span>
     <span class="stat-chip stat-chip--success">${escapeHtml(String(cnPosted))} CN posted</span>
     <span class="stat-chip ${cnFailed > 0 ? "stat-chip--danger" : "stat-chip--muted"}">${escapeHtml(String(cnFailed))} CN failed</span>
+  `;
+}
+
+// ── Pipeline health panel ────────────────────────────────────────────────
+
+const MODE_LABELS = {
+  incremental: "Incremental fetch",
+  report: "Report fetch",
+  fba: "FBA ship-date sync",
+  post: "Invoice posting",
+  cn: "Credit-note posting",
+  recon: "Daily invariants",
+  mtr_recon: "Monthly MTR recon",
+};
+
+async function loadHealth() {
+  hideError();
+  await loadStats();
+  renderHealth();
+}
+
+function runStatusBadge(status) {
+  if (status === "success") return '<span class="badge badge-success">success</span>';
+  if (status === "running") return '<span class="badge badge-running">running</span>';
+  return `<span class="badge badge-failed">${escapeHtml(status || "unknown")}</span>`;
+}
+
+function renderHealth() {
+  const body = document.getElementById("health-body");
+  const runs = lastStats?.last_run_by_mode || {};
+  const recon = runs.recon;
+  const breaches = recon?.counts?.breaches || [];
+  const watermarkAge = recon?.counts?.fetch_watermark_age_hours;
+
+  const breachesHtml = breaches.length
+    ? `<div class="sap-error-inline">${breaches.map((b) => escapeHtml(b)).join("<br>")}</div>`
+    : `<p class="muted" style="margin:0 0 1rem">No invariant breaches on the last run${recon ? ` (${formatDate(recon.finished_at)})` : " — recon hasn't run yet"}.</p>`;
+
+  const watermarkNote =
+    watermarkAge == null
+      ? ""
+      : `<p class="muted" style="margin:0 0 1rem">Incremental fetch watermark age: <strong>${escapeHtml(String(watermarkAge))}h</strong>${watermarkAge > 6 ? " — stale, incremental fetch may be dead" : ""}</p>`;
+
+  const modeOrder = ["incremental", "report", "fba", "post", "cn", "recon", "mtr_recon"];
+  const cards = modeOrder
+    .filter((m) => runs[m])
+    .map((m) => {
+      const r = runs[m];
+      const countsPreview = truncate(JSON.stringify(r.counts || {}), 60);
+      return `
+      <div class="trace-card" style="overflow-wrap:anywhere">
+        <span class="trace-card-label">${escapeHtml(MODE_LABELS[m] || m)}</span>
+        <span class="trace-card-value">${runStatusBadge(r.status)}</span>
+        <div class="sap-sync-meta" style="margin-top:0.4rem;word-break:break-word">Finished: ${formatDate(r.finished_at)}</div>
+        <div class="sap-sync-meta" style="word-break:break-word">${escapeHtml(countsPreview)}</div>
+        ${r.error_message ? `<div class="sap-sync-meta" style="color:var(--red);word-break:break-word">${escapeHtml(truncate(r.error_message, 60))}</div>` : ""}
+      </div>`;
+    })
+    .join("");
+
+  body.innerHTML = `
+    <div class="order-detail-box-title" style="border-radius:10px 10px 0 0">Last invariant check</div>
+    <div style="padding:1rem;border:1px solid var(--border);border-top:none;border-radius:0 0 10px 10px;margin-bottom:1.25rem">
+      ${breachesHtml}
+      ${watermarkNote}
+    </div>
+    <div class="order-detail-box-title" style="border-radius:10px 10px 0 0">Last run per mode</div>
+    <div class="trace-cards" style="padding:1rem;border:1px solid var(--border);border-top:none;border-radius:0 0 10px 10px;margin:0">
+      ${cards || '<p class="muted">No sync runs recorded yet.</p>'}
+    </div>
   `;
 }
 
