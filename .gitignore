@@ -35,3 +35,8 @@ htmlcov/
 dist/
 *.egg-info/
 .python-version
+
+# Lambda shared layer — rebuilt by scripts/build_shared_layer.sh before every
+# package/deploy (CI and deploy.yml both do this); committing it just adds
+# platform-specific binary wheels and diff noise.
+layers/build/

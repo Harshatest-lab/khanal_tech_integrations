@@ -1,0 +1,9 @@
+# Pinned dependency versions for the shared Lambda layer (layers/build).
+# scripts/build_shared_layer.sh installs exactly these versions, not open
+# ranges, so every build (local, CI, deploy) produces the same layer content.
+# Bump deliberately, then re-run scripts/build_shared_layer.sh to verify.
+#
+# hdbcli is pinned separately in build_shared_layer.sh (it needs
+# --platform/--only-binary flags for cross-platform Lambda wheels).
+psycopg[binary,pool]==3.3.4
+requests==2.34.2

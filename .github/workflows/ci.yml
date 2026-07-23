@@ -48,6 +48,12 @@ jobs:
           npm install
           npx serverless package --stage dev
 
+      - name: Serverless package (B2C_Invoice)
+        working-directory: services/B2C_Invoice
+        run: |
+          npm install
+          npx serverless package --stage dev
+
       - name: Serverless package (amazon-us-b2c)
         working-directory: services/amazon-us-b2c
         run: |
