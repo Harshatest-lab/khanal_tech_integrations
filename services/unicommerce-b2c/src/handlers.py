@@ -4,9 +4,9 @@ Every handler alerts via SES on an unhandled crash and re-raises so the
 invocation is marked failed in CloudWatch (EventBridge metrics stay
 honest) -- same pattern as amazon-us-b2c's handlers.py.
 
-Only fetchOrders is implemented so far -- see docs/migration/03-unicommerce-b2c.md
-for the full 7-function plan (post invoices, post credit notes, PO/GRN,
-inventory sync, recon, dashboard API still to come).
+fetchOrders and postInvoices are implemented so far -- see
+docs/migration/03-unicommerce-b2c.md for the full 7-function plan (post
+credit notes, PO/GRN, inventory sync, recon, dashboard API still to come).
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ _SRC = Path(__file__).resolve().parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unicommerce import fetch_sync, store
+from unicommerce import fetch_sync, post_invoices, store
 from unicommerce.alerts import send_alert
 
 logging.getLogger().setLevel(logging.INFO)
@@ -65,3 +65,20 @@ def fetch_handler(event, context):
             )
 
     return _run("fetch_orders", _go)
+
+
+def post_invoices_handler(event, context):
+    """{"limit": 50?, "channel_name": str?} — bulk posting run (recovery +
+    verify + ready-order posting, same as the scheduled cron).
+    {"uniware_id": str} — manual single-order retry, bypassing the limit."""
+    ev = event or {}
+
+    def _go():
+        with store.connect() as conn:
+            if ev.get("uniware_id"):
+                return post_invoices.post_one_order(conn, ev["uniware_id"])
+            return post_invoices.post_ready_orders(
+                conn, limit=int(ev.get("limit") or 50), channel_name=ev.get("channel_name")
+            )
+
+    return _run("post_invoices", _go)

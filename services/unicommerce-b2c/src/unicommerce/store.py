@@ -256,3 +256,258 @@ def finish_sync_log(conn: psycopg.Connection, run_id: int, status: str, counts: 
             (status, json.dumps(counts or {}, default=str), error[:2000] if error else None, run_id),
         )
     conn.commit()
+
+
+# ── Invoice posting pipeline ──────────────────────────────────────────────
+# Ported from khanal_tech_integrations/unicommerce/workers/invoice.py's
+# store-layer operations (frappe.db.set_value / frappe.db.sql calls).
+
+def get_ready_orders(conn: psycopg.Connection, limit: int, ready_before=None, channel_name: str | None = None) -> list[dict]:
+    where = ["pipeline_status = 'ready'"]
+    params: list = []
+    if ready_before is not None:
+        where.append("updated_at < %s")
+        params.append(ready_before)
+    if channel_name:
+        where.append("channel_name = %s")
+        params.append(channel_name)
+    params.append(limit)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT uniware_id, channel_name, order_date, order_json, attempt_count
+            FROM unicommerce_orders
+            WHERE {' AND '.join(where)}
+            ORDER BY order_date ASC, created_at ASC
+            LIMIT %s
+            """,
+            params,
+        )
+        cols = [d.name for d in cur.description]
+        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    return rows
+
+
+def claim_ready_order(conn: psycopg.Connection, uniware_id: str) -> bool:
+    """Atomically move an order from 'ready' to 'posting'. False = another
+    worker already claimed it (protects against two concurrent posting
+    runs, or a manual retry racing a scheduled run, double-posting the
+    same order to SAP -- exactly the class of bug fixed in the Frappe
+    source's khanal_tech_integrations PR #1301-#1304)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE unicommerce_orders
+            SET pipeline_status = 'posting', posting_started_at = now(), updated_at = now()
+            WHERE uniware_id = %s AND pipeline_status = 'ready'
+            """,
+            (uniware_id,),
+        )
+        claimed = cur.rowcount == 1
+    conn.commit()
+    return claimed
+
+
+def unclaim_order(conn: psycopg.Connection, uniware_id: str, to_status: str = "ready") -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE unicommerce_orders SET pipeline_status = %s, updated_at = now() WHERE uniware_id = %s",
+            (to_status, uniware_id),
+        )
+    conn.commit()
+
+
+def mark_posted(conn: psycopg.Connection, uniware_id: str, doc_entry: str, doc_num: str, tax_actual: float, payload_json: dict | None) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE unicommerce_orders SET
+              pipeline_status = 'posted', sap_ar_invoice_docentry = %s, sap_ar_invoice_docnum = %s,
+              ar_invoice_tax_actual = %s, batch_hold_since = NULL, last_error = '',
+              payload_json = %s, updated_at = now()
+            WHERE uniware_id = %s
+            """,
+            (doc_entry, doc_num, tax_actual, json.dumps(payload_json, default=str) if payload_json else None, uniware_id),
+        )
+    conn.commit()
+
+
+def mark_failed(conn: psycopg.Connection, uniware_id: str, error: str, max_retry_attempts: int) -> str:
+    """Returns the resulting status ('failed' or 'dead')."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT attempt_count FROM unicommerce_orders WHERE uniware_id = %s", (uniware_id,))
+        row = cur.fetchone()
+        attempt = int((row[0] if row else 0) or 0) + 1
+        new_status = "dead" if attempt >= max(8, max_retry_attempts) else "failed"
+        cur.execute(
+            """
+            UPDATE unicommerce_orders SET
+              pipeline_status = %s, attempt_count = %s, last_error = %s,
+              batch_hold_since = NULL, updated_at = now()
+            WHERE uniware_id = %s
+            """,
+            (new_status, attempt, error[:2000], uniware_id),
+        )
+    conn.commit()
+    return new_status
+
+
+def mark_batch_hold(conn: psycopg.Connection, uniware_id: str, error: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE unicommerce_orders SET
+              pipeline_status = 'batch_hold', last_error = %s, updated_at = now(),
+              batch_hold_since = COALESCE(batch_hold_since, now())
+            WHERE uniware_id = %s
+            """,
+            (error[:2000], uniware_id),
+        )
+    conn.commit()
+
+
+def recover_stuck_posting(conn: psycopg.Connection, timeout_mins: int) -> int:
+    """A handler that dies via hard Lambda timeout never reaches
+    mark_posted/mark_failed, leaving the order stuck at 'posting' forever
+    -- move it to 'verify' after timeout_mins so the next cycle checks SAP
+    directly for whether it actually posted before it died."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE unicommerce_orders
+            SET pipeline_status = 'verify', updated_at = now()
+            WHERE pipeline_status = 'posting'
+              AND (posting_started_at IS NULL OR posting_started_at < now() - (%s || ' minutes')::interval)
+            """,
+            (timeout_mins,),
+        )
+        affected = cur.rowcount
+    conn.commit()
+    return affected
+
+
+def recover_failed_orders(conn: psycopg.Connection, limit: int) -> int:
+    """Exponential backoff (10 min * 2^(attempt-1), capped at 180 min)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT uniware_id, attempt_count, updated_at FROM unicommerce_orders
+            WHERE pipeline_status = 'failed'
+            ORDER BY updated_at ASC LIMIT %s
+            """,
+            (limit,),
+        )
+        rows = cur.fetchall()
+        recovered = 0
+        for uniware_id, attempt_count, updated_at in rows:
+            attempt = max(int(attempt_count or 1), 1)
+            cooldown_mins = min(180, 10 * (2 ** max(attempt - 1, 0)))
+            cur.execute("SELECT EXTRACT(EPOCH FROM (now() - %s))", (updated_at,))
+            elapsed_sec = cur.fetchone()[0]
+            if elapsed_sec is None or elapsed_sec < (cooldown_mins * 60):
+                continue
+            cur.execute(
+                "UPDATE unicommerce_orders SET pipeline_status = 'ready', updated_at = now() WHERE uniware_id = %s",
+                (uniware_id,),
+            )
+            recovered += 1
+    conn.commit()
+    return recovered
+
+
+def recover_batch_hold_orders(conn: psycopg.Connection, limit: int, max_attempts: int, max_hours: int) -> dict:
+    """Flat 30-min cooldown (not exponential -- waiting for stock
+    replenishment, not a transient error). Escalates to 'dead' at either
+    max_attempts or max_hours since batch_hold_since, whichever trips first."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT uniware_id, attempt_count, batch_hold_since, updated_at, last_error
+            FROM unicommerce_orders WHERE pipeline_status = 'batch_hold'
+            ORDER BY updated_at ASC LIMIT %s
+            """,
+            (limit,),
+        )
+        rows = cur.fetchall()
+        recovered = escalated = 0
+        for uniware_id, attempt_count, batch_hold_since, updated_at, last_error in rows:
+            attempt = int(attempt_count or 0)
+            hold_since = batch_hold_since or updated_at
+            cur.execute("SELECT EXTRACT(EPOCH FROM (now() - %s)) / 3600.0", (hold_since,))
+            hours_held = float(cur.fetchone()[0] or 0)
+
+            if attempt >= max_attempts or hours_held >= max_hours:
+                reason = (
+                    f"Batch hold exceeded cap (attempts={attempt}/{max_attempts}, hours={hours_held:.1f}/{max_hours}). "
+                    f"Last shortage: {(last_error or 'n/a')[:700]}"
+                )
+                cur.execute(
+                    "UPDATE unicommerce_orders SET pipeline_status = 'dead', last_error = %s, updated_at = now() WHERE uniware_id = %s",
+                    (reason[:2000], uniware_id),
+                )
+                escalated += 1
+                continue
+
+            is_reservation_conflict = "reservation_conflict" in str(last_error or "").lower()
+            cur.execute("SELECT EXTRACT(EPOCH FROM (now() - %s))", (updated_at,))
+            elapsed_sec = cur.fetchone()[0]
+            if not is_reservation_conflict and (elapsed_sec is None or elapsed_sec < 1800):
+                continue
+            cur.execute(
+                "UPDATE unicommerce_orders SET pipeline_status = 'ready', attempt_count = attempt_count + 1, updated_at = now() WHERE uniware_id = %s",
+                (uniware_id,),
+            )
+            recovered += 1
+    conn.commit()
+    return {"recovered": recovered, "escalated": escalated}
+
+
+def get_verify_orders(conn: psycopg.Connection, limit: int) -> list[dict]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT uniware_id, attempt_count FROM unicommerce_orders WHERE pipeline_status = 'verify' ORDER BY updated_at ASC LIMIT %s",
+            (limit,),
+        )
+        cols = [d.name for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def requeue_or_dead_from_verify(conn: psycopg.Connection, uniware_id: str, max_retries: int, error_msg: str) -> str:
+    with conn.cursor() as cur:
+        cur.execute("SELECT attempt_count FROM unicommerce_orders WHERE uniware_id = %s", (uniware_id,))
+        row = cur.fetchone()
+        attempt = int((row[0] if row else 0) or 0) + 1
+        if attempt >= max_retries:
+            cur.execute(
+                "UPDATE unicommerce_orders SET pipeline_status = 'dead', attempt_count = %s, last_error = %s, updated_at = now() WHERE uniware_id = %s",
+                (attempt, error_msg[:2000], uniware_id),
+            )
+            conn.commit()
+            return "dead"
+        cur.execute(
+            "UPDATE unicommerce_orders SET pipeline_status = 'ready', attempt_count = %s, last_error = %s, updated_at = now() WHERE uniware_id = %s",
+            (attempt, error_msg[:2000], uniware_id),
+        )
+    conn.commit()
+    return "ready"
+
+
+def update_reconciliation_diffs(conn: psycopg.Connection, uniware_id: str, tax_expected: float, actual_tax: float, unit_diff: float, expected_unit: float, actual_unit: float) -> None:
+    is_matched = (abs(tax_expected - actual_tax) <= 1.0) and (unit_diff <= 1.0)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE unicommerce_orders SET
+              ar_invoice_tax_actual = %s, ar_invoice_tax_expected = %s, ar_invoice_tax_diff = %s,
+              ar_invoice_unit_price_expected = %s, ar_invoice_unit_price_actual = %s, ar_invoice_unit_price_diff = %s,
+              ar_invoice_reconciled = %s, ar_invoice_reconciliation_status = %s
+            WHERE uniware_id = %s
+            """,
+            (
+                actual_tax, round(tax_expected, 2), round(abs(tax_expected - actual_tax), 2),
+                round(expected_unit, 2), round(actual_unit, 2), round(unit_diff, 2),
+                int(is_matched), "Reconciled and matched with SAP" if is_matched else "Mismatch (SAP vs expected)",
+                uniware_id,
+            ),
+        )
+    conn.commit()
