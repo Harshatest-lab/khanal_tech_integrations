@@ -5,40 +5,37 @@ single place to check "where are we" without re-reading every phase doc.
 
 ## Right now — action items
 
-1. **Test PR #1301** (Unicommerce fixes, `khanal_tech_integrations`) on a
-   staging/dev bench — no CI exists in that repo, this is fully manual.
-   Exercise all 6 flows; specifically try to trigger the 3 fixed races on
-   purpose (manual retry racing a scheduler tick) to confirm they're
-   actually blocked.
-2. If SAP's Service Layer cert is self-signed, add
-   `"sap_sl_verify_ssl": false` to `site_config.json` **before** deploying
-   #1301 — otherwise the TLS fix will correctly refuse to connect until
-   that's set.
-3. Merge #1301, deploy to the production EC2 box manually (`git pull` /
-   `bench update` + restart — no auto-deploy exists), watch one full
-   cycle before moving on.
-4. Merge PR #13 (`Khanal_tech_serverless`, docs-only) whenever — no
-   dependency on the above.
-5. Only after #1301 is stable in production: start Phase 0 (delete
-   SafeExpress + DSR) and begin the Phase 1 Lambda build.
-6. Separately, whenever there's time: 640 Dependabot vulnerabilities
+1. **Start Phase 0** — delete SafeExpress + DSR code (business stopped,
+   confirmed). Unicommerce fix pass is done and verified, no longer
+   blocking this.
+2. Merge PR #13 (`Khanal_tech_serverless`, docs-only) whenever — no
+   dependency on anything else.
+3. Separately, whenever there's time: 640 Dependabot vulnerabilities
    (7 critical) flagged on `khanal_tech_integrations`'s `main` —
    unrelated to this migration, not yet looked at.
+4. Separately: `amazon_us` module has the same hardcoded
+   `SAP_VERIFY_SSL = False` issue Unicommerce had (`amazon_us/__init__.py:5`)
+   — offered to fix, no answer yet from the user.
 
 ## Repo / PR status
 
 | Repo | Branch | PR | State |
 |---|---|---|---|
 | `Khanal_tech_serverless` | `worktree-typed-squishing-panda` | [#13](https://github.com/Khanal-Tech/Khanal_tech_serverless/pull/13) | Draft — migration blueprint docs (`docs/migration/*`) + serverless-repo hygiene fixes. Docs-only + config fixes, safe to merge anytime. |
-| `khanal_tech_integrations` | `Unicommerce_Fixes_Yogesha_23072026` | [#1301](https://github.com/Khanal-Tech/khanal_tech_integrations/pull/1301) | Draft — TLS/permission/race fixes in the Unicommerce module. **Not deployed. Not merged. Needs manual verification first** (see action items above). |
+| `khanal_tech_integrations` | `Unicommerce_Fixes_Yogesha_23072026` | [#1301](https://github.com/Khanal-Tech/khanal_tech_integrations/pull/1301) | ✅ Merged + deployed to production (`khanaltech.com`), 2026-07-23. |
+| `khanal_tech_integrations` | `ApiLogError_Fix_Yogesha_23072026` | [#1302](https://github.com/Khanal-Tech/khanal_tech_integrations/pull/1302) | ✅ Merged + deployed. Fixed a `frappe.log_error` arg-order crash found while verifying #1301. |
+| `khanal_tech_integrations` | `PoGrn_ClaimRelease_Fix_Yogesha_23072026` | [#1303](https://github.com/Khanal-Tech/khanal_tech_integrations/pull/1303) | ✅ Merged + deployed (1 of 2 commits — see #1304). Fixed claim-not-released-on-exception found while verifying #1301. |
+| `khanal_tech_integrations` | `PoGrn_ClaimRelease_Fix_Yogesha_23072026` | [#1304](https://github.com/Khanal-Tech/khanal_tech_integrations/pull/1304) | ✅ Merged + deployed. #1303's second commit, split out after a merge-timing gap — fixed a `comments`-field-length truncation bug (500 assumed, 140 actual) found while re-verifying #1303. |
+
+**All four PRs above are merged, deployed to production, and manually verified live** (TLS, permission check, 3 atomic claims, 1 idempotency gap, plus the 2 bugs found along the way) — see memory file `frappe_exit_migration_program.md` for full verification detail. Two stuck production records (`54661`, `24798`) were reset as part of this. Unicommerce fix pass is **done**.
 
 ## Phase status
 
 | Phase | What | Status |
 |---|---|---|
 | Serverless repo hygiene | `layers/build` untracked, CI/deploy service-list sync, pinned layer deps, HTTP API timeout fix | ✅ Done, in PR #13 |
-| Unicommerce fix pass | TLS, permission check, 3 race conditions, 1 idempotency gap — in the **existing Frappe code**, not yet the Lambda port | ✅ Fixed, in PR #1301 — **awaiting verification + deploy**, not yet merged/deployed |
-| Phase 0 | Delete SafeExpress + DSR (business stopped, confirmed) | Not started — blocked behind Unicommerce fix pass landing first, per your sequencing |
+| Unicommerce fix pass | TLS, permission check, 3 race conditions + 2 bugs found while verifying, 1 idempotency gap — in the **existing Frappe code**, not yet the Lambda port | ✅ **Done** — merged, deployed, verified live in production (PRs #1301–#1304) |
+| Phase 0 | Delete SafeExpress + DSR (business stopped, confirmed) | **Starting now** |
 | Phase 0.5 | Finish the half-built Amazon US Lambda cutover (test DB creds, schedules disabled) | Not started |
 | Phase 1 | Unicommerce → Lambda (7 functions — see `03-unicommerce-b2c.md`) | Not started. Now scoped in detail (6 real flows + recon + ops layer, confirmed by reading the actual code, not just file names) |
 | Phase 2 | B2B PO automation (6 marketplaces, IMAP-based) → Lambda | Not started. Open question: confirm Flipkart is actually scheduled (not found in `hooks.py`'s cron block) |
