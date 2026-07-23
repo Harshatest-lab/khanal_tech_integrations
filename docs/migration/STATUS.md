@@ -5,15 +5,17 @@ single place to check "where are we" without re-reading every phase doc.
 
 ## Right now — action items
 
-1. **Reprioritized 2026-07-23**: build **Phase 1** (Unicommerce → Lambda)
-   next, not Phase 0. Phase 0 (SafeExpress/DSR removal) turned out more
-   entangled than the blueprint assumed — real, live `import` dependencies
-   from unrelated areas (GST verification, the `SAP AR Invoice Detail`
-   doctype controller, a customer-facing tracking page, dashboard trigger
-   buttons) — see "Phase 0 investigation notes" below. User's call:
-   finish the Lambda migration first, clean up SafeExpress/DSR later.
-2. Merge PR #13 (`Khanal_tech_serverless`, docs-only) whenever — no
-   dependency on anything else.
+1. **Phase 1 build in progress** (`Khanal_tech_serverless`, same PR #13
+   branch). `unicommerceFetch` — function 1 of 7 — is built, tested (14
+   new tests, 60 total passing), packages clean, registered in ci.yml +
+   deploy.yml + pytest.ini. **Not deployed anywhere** (schedule
+   `enabled: false`, same dual-run-safe pattern as every other cutover).
+   6 functions remain: post invoices, post credit notes, PO/GRN creation,
+   inventory sync, reconciliation, dashboard API — see
+   `03-unicommerce-b2c.md`'s function table.
+2. Merge PR #13 (`Khanal_tech_serverless`, docs-only + Phase 1 code so
+   far) whenever — no dependency on anything else, and nothing in it
+   deploys automatically (no CI/CD auto-deploy exists in either repo).
 3. Separately, whenever there's time: 640 Dependabot vulnerabilities
    (7 critical) flagged on `khanal_tech_integrations`'s `main` —
    unrelated to this migration, not yet looked at.
@@ -54,7 +56,7 @@ in the conversation history for the exact questions.
 
 | Repo | Branch | PR | State |
 |---|---|---|---|
-| `Khanal_tech_serverless` | `worktree-typed-squishing-panda` | [#13](https://github.com/Khanal-Tech/Khanal_tech_serverless/pull/13) | Draft — migration blueprint docs (`docs/migration/*`) + serverless-repo hygiene fixes. Docs-only + config fixes, safe to merge anytime. |
+| `Khanal_tech_serverless` | `worktree-typed-squishing-panda` | [#13](https://github.com/Khanal-Tech/Khanal_tech_serverless/pull/13) | Draft — migration blueprint docs + serverless-repo hygiene fixes + Phase 1 build in progress (`services/unicommerce-b2c`, 1 of 7 functions done). Safe to merge anytime — nothing in it deploys automatically. |
 | `khanal_tech_integrations` | `Unicommerce_Fixes_Yogesha_23072026` | [#1301](https://github.com/Khanal-Tech/khanal_tech_integrations/pull/1301) | ✅ Merged + deployed to production (`khanaltech.com`), 2026-07-23. |
 | `khanal_tech_integrations` | `ApiLogError_Fix_Yogesha_23072026` | [#1302](https://github.com/Khanal-Tech/khanal_tech_integrations/pull/1302) | ✅ Merged + deployed. Fixed a `frappe.log_error` arg-order crash found while verifying #1301. |
 | `khanal_tech_integrations` | `PoGrn_ClaimRelease_Fix_Yogesha_23072026` | [#1303](https://github.com/Khanal-Tech/khanal_tech_integrations/pull/1303) | ✅ Merged + deployed (1 of 2 commits — see #1304). Fixed claim-not-released-on-exception found while verifying #1301. |
@@ -70,7 +72,7 @@ in the conversation history for the exact questions.
 | Unicommerce fix pass | TLS, permission check, 3 race conditions + 2 bugs found while verifying, 1 idempotency gap — in the **existing Frappe code**, not yet the Lambda port | ✅ **Done** — merged, deployed, verified live in production (PRs #1301–#1304) |
 | Phase 0 | Delete SafeExpress + DSR (business stopped, confirmed) | **Paused** — investigation started, found real cross-module dependencies (see notes above), deprioritized behind Phase 1 per user's 2026-07-23 call |
 | Phase 0.5 | Finish the half-built Amazon US Lambda cutover (test DB creds, schedules disabled) | Not started |
-| Phase 1 | Unicommerce → Lambda (7 functions — see `03-unicommerce-b2c.md`) | **In progress, started 2026-07-23.** Scoped in detail (6 real flows + recon + ops layer, confirmed by reading the actual code, not just file names) |
+| Phase 1 | Unicommerce → Lambda (7 functions — see `03-unicommerce-b2c.md`) | **In progress.** `unicommerceFetch` (1/7) built + tested 2026-07-23, not deployed. 6 to go: post invoices, post credit notes, PO/GRN, inventory sync, recon, dashboard API |
 | Phase 2 | B2B PO automation (6 marketplaces, IMAP-based) → Lambda | Not started. Open question: confirm Flipkart is actually scheduled (not found in `hooks.py`'s cron block) |
 | Phase 3a | consumables → Lambda + Postgres | Not started |
 | Phase 3b | real_aquatics, wowpets → Lambda + Postgres (both live, daily users — higher stakes) | Not started. Order between the two not yet decided |
