@@ -1,6 +1,8 @@
 # Frappe → Lambda migration blueprint — overview
 
-**Status:** planning. No cutover has started as of 2026-07-23.
+**Status:** planning + first fix pass landed. See
+[STATUS.md](STATUS.md) for the live progress tracker (what's done, what's
+in PRs, what's next) — update that file as phases move, not this one.
 
 This is the index for the full migration blueprint. Each phase has its own
 doc with architecture decisions, infrastructure, a cutover runbook, risks,
