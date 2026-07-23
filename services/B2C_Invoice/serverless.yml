@@ -141,7 +141,7 @@ functions:
   walmartDashboardApi:
     handler: src.handlers.walmart_api.handler
     memorySize: 512
-    timeout: 120
+    timeout: 30
     environment:
       SAP_SL_USE_SSM: ${env:SAP_SL_USE_SSM, ''}
       SAP_SL_VERIFY_SSL: ${env:SAP_SL_VERIFY_SSL, 'true'}
