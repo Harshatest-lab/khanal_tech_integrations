@@ -4,14 +4,44 @@
 
 `khanal_tech_integrations/unicommerce/`:
 
-- `workers/fetch.py` — `fetch_orders`, `fetch_returns`
-- `workers/invoice.py` — `post_invoices`
-- `workers/credit_note.py` — `post_credit_notes`
-- `workers/grn.py` — `sync_grns`
-- `workers/inventory.py` — `sync_inventory`
-- `validators/reconcile.py` — `run_reconciliation_refresh`
-- `client/unicommerce.py`, `client/sap.py`, `mappers/sap_payload.py`,
-  `mappers/tax.py`, `validators/batches.py`, `validators/pre_check.py`
+Confirmed by reading the actual code (not just the file tree) on 2026-07-23,
+during the Unicommerce fix pass (`Unicommerce_Fixes_Yogesha_23072026`) —
+this is **six distinct flows**, not one generic "sync" job:
+
+1. **Fetch** — orders + returns from Unicommerce (`workers/fetch.py`:
+   `fetch_orders`, `fetch_returns`)
+2. **Post AR Invoices** to SAP for fetched orders (`workers/invoice.py`:
+   `post_invoices` — the heaviest one: atomic ready→posting claims,
+   tri-state batch-managed caches, FEFO allocation, a reservation ledger
+   to stop concurrent orders over-allocating the same batch, series/FY
+   fallback logic)
+3. **Post Credit Notes** to SAP for returns (`workers/credit_note.py`:
+   `post_credit_notes`)
+4. **Create + approve Purchase Orders in Unicommerce** — reverse
+   direction, SAP Inventory Transfer → UC PO (`workers/grn.py`: `push_po`)
+5. **Create GRNs in Unicommerce** after PO approval — completes the
+   receipt cycle for #4 (`grn.py` / `po_grn.py`: `_push_grn_rounds`,
+   `MAX_GRN_ROUNDS`)
+6. **Push inventory adjustments to Unicommerce** — when SAP moves stock
+   internally (EC-FG→EC-B2C), UC's shelf stock gets decremented to match
+   (`workers/inventory.py`: `sync_inventory` / `_sync_one_transfer`)
+
+Plus two things that ride on top of all six, not separate data flows:
+
+- **Reconciliation/audit** — SAP vs UC vs expected-value matching
+  (`validators/reconcile.py`, `fetch.py`'s `audit_staged_order_completeness`
+  / `audit_staged_business_coverage`)
+- **Ops Center** — retry, force-post, activity monitoring, failure alerts
+  (`api/ops.py`) — this is the layer the (unmerged)
+  `Unicommerce_Dashboard_Fix_Yogesha_03072026` and
+  `Unicommerce_OrderHarmony_Yogesha_21072026` branches were rebuilding on
+  the Frappe side; it becomes the Lambda dashboard API here instead.
+
+Supporting code: `client/unicommerce.py`, `client/sap.py`,
+`mappers/sap_payload.py`, `mappers/tax.py`, `validators/batches.py`,
+`validators/pre_check.py`, `geo.py` (state/tax-bucket resolution),
+`health.py`, `returns.py`.
+
 - Doctypes: `unicommerce_orders`, `unicommerce_returns`,
   `unicommerce_sap_update_log`, `unicommerce_settings`,
   `unicommerce_alert_recipient`
@@ -35,11 +65,22 @@ model to reimplement. It follows the exact shape of `amazon-us-b2c`
 almost line for line:
 
 - New stack: `services/unicommerce-b2c/`
-- One Lambda function per worker (`fetchOrders`, `fetchReturns`,
-  `postInvoices`, `postCreditNotes`, `syncGrns`, `syncInventory`,
-  `reconRefresh`), each on its own `schedule` event at the same cadence
-  as today, **deployed with `enabled: false` initially** — same
-  dual-run-safe pattern as Phase 0.5 taught us the hard way.
+- **Seven functions** (matches `amazon-us-b2c`'s ~6-function shape for a
+  similarly-scoped integration — one function per flow above, not one
+  per doctype):
+
+  | Function | Frappe source | Trigger |
+  |---|---|---|
+  | `unicommerceFetch` | `fetch_orders` + `fetch_returns` (one handler, `input.mode` like `amazonFetch`'s `incremental`/`report`) | schedule, 30-min offset |
+  | `unicommercePostInvoices` | `post_invoices` | schedule, 30-min offset |
+  | `unicommercePostCreditNotes` | `post_credit_notes` | schedule, 30-min offset |
+  | `unicommercePoGrn` | `push_po` + `_push_grn_rounds` (one handler, `input.mode`) | schedule, 30-min offset |
+  | `unicommerceInventorySync` | `sync_inventory` | schedule, 30-min offset |
+  | `unicommerceRecon` | `run_reconciliation_refresh` + the two audit functions | schedule, daily |
+  | `unicommerceDashboardApi` | `api/ops.py` (Ops Center) | HTTP API, Cognito-gated |
+
+  All scheduled functions **deployed with `enabled: false` initially** —
+  same dual-run-safe pattern as Phase 0.5 taught us the hard way.
 - One `unicommerceDashboardApi` function behind HTTP API + a new
   Cognito user pool (`unicommerce-b2c-<stage>-dashboard`), serving the
   same shape of endpoints `amazon-us-b2c` does
@@ -66,19 +107,60 @@ almost line for line:
   parameters + an env var list, same as `AMZ_ALERT_ADMIN_EMAIL` in
   `amazon-us-b2c`.
 
+## Concurrency safety — carry forward from the Frappe fix pass
+
+The 2026-07-23 Unicommerce fix pass (see
+[`Unicommerce_Fixes_Yogesha_23072026`](https://github.com/Khanal-Tech/khanal_tech_integrations/tree/Unicommerce_Fixes_Yogesha_23072026)
+in the Frappe repo) closed three double-submission races that exist
+**because the Frappe code lets a manual "retry now" click and a scheduled
+tick both act on the same row with no lock in between**. The Lambda
+rewrite must not reintroduce these — the same three claim points need a
+direct equivalent:
+
+1. **Order posting** — `_claim_ready_order`'s pattern
+   (`UPDATE ... SET status='posting' WHERE status='ready'`, check
+   `rowcount`) translates directly to Postgres: `UPDATE unicommerce.orders
+   SET status='posting' WHERE id=$1 AND status='ready' RETURNING id` —
+   zero rows back means another invocation already owns it.
+2. **PO creation** — same technique on `unicommerce.po_status`, sentinel
+   value before calling UC's `purchaseOrder/create`.
+3. **Inventory sync** — same technique on the inventory-transfer row's
+   sync status before calling UC's `inventory/adjust/bulk`.
+
+This matters more in Lambda than it did in Frappe: `unicommercePostInvoices`
+running on a fixed schedule **and** being manually re-invoked (e.g. from
+the Ops Center dashboard's "retry" button, once it exists) is the exact
+same race shape, and concurrent Lambda invocations are if anything *more*
+likely than concurrent Frappe background jobs, not less.
+
 ## Infrastructure changes
 
 - No VPC (RDS already public+SG-gated).
-- IAM: per-parameter `ssm:GetParameter`/`PutParameter` scoped to
-  `/sap/inc/*` and any new `/uc/*` params, `ses:SendEmail` for alerts,
-  `s3:GetObject/PutObject` on a new `unicommerce-b2c-recon-<stage>`
-  bucket if reconciliation exports files (mirrors `amazon-us-b2c`'s
-  `ReconBucket`).
-- CI: add `unicommerce-b2c` to the `service` input choices in
-  `.github/workflows/deploy.yml`, plus any new secrets
-  (`UC_API_KEY`/whatever Unicommerce's auth scheme requires — check
-  `unicommerce/client/unicommerce.py` for the exact auth mechanism before
-  assuming API-key vs OAuth).
+- **Confirm which SAP company Unicommerce posts to before wiring IAM.**
+  Unicommerce is India B2C (GST tax-bucket logic, `KAB2C`/`TNB2C`/`MHB2C`
+  series names, `KA` origin state) — this is very likely the **same
+  India entity `delivery-api` already uses (`/sap/*`, no `inc` suffix)**,
+  not the US entity (`/sap/inc/*`) `amazon-us-b2c`/`B2C_Invoice` use.
+  Don't assume — verify against the actual SAP company DB before scoping
+  IAM, since pointing this at the wrong company would post real invoices
+  into the wrong SAP ledger.
+- IAM: per-parameter `ssm:GetParameter`/`PutParameter` scoped to the
+  confirmed `/sap/*` (or `/sap/inc/*`) family, plus a **new** SSM family
+  for Unicommerce's own API credentials (`/unicommerce/api_credentials` —
+  today these live in the `Unicommerce Settings` doctype, not SAP's own
+  secrets), `ses:SendEmail` for alerts, `s3:GetObject/PutObject` on a new
+  `unicommerce-b2c-recon-<stage>` bucket if reconciliation exports files
+  (mirrors `amazon-us-b2c`'s `ReconBucket`).
+- **Don't repeat the CI/deploy drift this repo just had fixed** (see
+  `layers/build` untracking + CI/deploy service-list sync, 2026-07-23):
+  add `unicommerce-b2c` to **both** `.github/workflows/ci.yml`'s package
+  steps **and** `.github/workflows/deploy.yml`'s `service` input
+  description **in the same PR that adds the service**, not after.
+- Reuse the existing shared layer (`layers/build`, built by
+  `scripts/build_shared_layer.sh`) as-is — Unicommerce's UC REST client
+  only needs `requests`, already in the layer for `amazon-us-b2c`'s
+  SP-API client. No new layer dependency needed unless a UC-specific
+  library shows up during the port.
 
 ## Cutover runbook
 
@@ -100,10 +182,15 @@ almost line for line:
    because two fetch paths reading from Unicommerce don't conflict with
    each other or with SAP.
 5. Once fetch matches for a few days, cut over the **write** paths
-   (`postInvoices`, `postCreditNotes`, `syncGrns`, `syncInventory`,
-   `reconRefresh`) one at a time — disable the corresponding Frappe cron
-   entry immediately before enabling the matching Lambda schedule, same
-   back-to-back discipline as Phase 0.5.
+   (`unicommercePostInvoices`, `unicommercePostCreditNotes`,
+   `unicommercePoGrn`, `unicommerceInventorySync`, `unicommerceRecon`) one
+   at a time — disable the corresponding Frappe cron entry immediately
+   before enabling the matching Lambda schedule, same back-to-back
+   discipline as Phase 0.5. Post invoices first (highest business value,
+   most heavily reworked in the Frappe fix pass so its edge cases are
+   freshest), inventory sync last (it's the one most likely to double-act
+   if the atomic claim above isn't ported correctly, so prove the pattern
+   on lower-stakes flows first).
 6. Repoint `kiosk-frontend`'s Unicommerce dashboard at the new API +
    Cognito pool.
 7. After a stable verification window (your call, no deadline), delete
@@ -119,6 +206,13 @@ almost line for line:
 - Two systems fetching Unicommerce orders simultaneously could hit rate
   limits — check Unicommerce's API rate limit before running Frappe +
   Lambda fetch in parallel during step 4.
+- Wrong SAP company DB if the `/sap/*` vs `/sap/inc/*` entity isn't
+  confirmed before deploy (see Infrastructure changes above) — this is a
+  "verify once, in writing" risk, not a hard technical one.
+- Dropping the atomic-claim pattern during the port (see Concurrency
+  safety above) silently reintroduces the exact three races the Frappe
+  fix pass just closed — write a test for each claim point specifically,
+  don't assume "porting the logic" automatically ports the locking.
 
 ## Cost estimate (incremental, `ap-south-1`)
 
