@@ -59,3 +59,9 @@ jobs:
         run: |
           npm install
           npx serverless package --stage dev
+
+      - name: Serverless package (unicommerce-b2c)
+        working-directory: services/unicommerce-b2c
+        run: |
+          npm install
+          npx serverless package --stage dev

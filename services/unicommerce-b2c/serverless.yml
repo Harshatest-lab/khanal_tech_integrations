@@ -1,0 +1,93 @@
+service: unicommerce-b2c
+
+frameworkVersion: "3"
+
+provider:
+  name: aws
+  runtime: python3.12
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'ap-south-1'}
+  memorySize: 512
+  timeout: 900
+  iam:
+    role:
+      statements:
+        # Unicommerce REST API credentials (base_url, username, password, facility_code).
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+          Resource:
+            - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.ucApiParamName}
+        # Failure alerts.
+        - Effect: Allow
+          Action:
+            - ses:SendEmail
+            - ses:SendRawEmail
+          Resource: "*"
+        # SAP Service Layer + HANA — not used by fetchOrders yet, but this
+        # service is India entity /sap/* (delivery-api's, confirmed via a
+        # direct self-signed-cert check against the SAP host, 2026-07-23 —
+        # NOT amazon-us-b2c/B2C_Invoice's /sap/inc/*). Uncomment when
+        # unicommercePostInvoices etc. are added.
+        # - Effect: Allow
+        #   Action:
+        #     - ssm:GetParameter
+        #   Resource:
+        #     - arn:aws:ssm:${self:provider.region}:*:parameter/sap/hana_config
+        #     - arn:aws:ssm:${self:provider.region}:*:parameter/sap/hana_credentials
+        #     - arn:aws:ssm:${self:provider.region}:*:parameter/sap/sl_config
+        #     - arn:aws:ssm:${self:provider.region}:*:parameter/sap/credentials
+        # - Effect: Allow
+        #   Action:
+        #     - ssm:GetParameter
+        #     - ssm:PutParameter
+        #   Resource:
+        #     - arn:aws:ssm:${self:provider.region}:*:parameter/sap/b1_session
+  environment:
+    STAGE: ${self:provider.stage}
+    LOG_LEVEL: ${env:LOG_LEVEL, 'INFO'}
+    DATABASE_URL: ${env:DATABASE_URL, ''}
+    UC_API_PARAM_NAME: ${self:custom.ucApiParamName}
+    UC_ALERT_ADMIN_EMAIL: ${env:UC_ALERT_ADMIN_EMAIL, ''}
+    UC_ALERT_FROM_EMAIL: ${env:UC_ALERT_FROM_EMAIL, ''}
+    UC_SES_REGION: ${env:UC_SES_REGION, 'ap-south-1'}
+    # No SAP_SL_PROFILE set on purpose — default (/sap/*), India entity,
+    # matching delivery-api. Only relevant once posting functions are added.
+    SAP_SL_USE_SSM: ${env:SAP_SL_USE_SSM, 'true'}
+    SAP_SL_VERIFY_SSL: ${env:SAP_SL_VERIFY_SSL, 'true'}
+
+custom:
+  ucApiParamName: ${env:UC_API_PARAM_NAME, '/unicommerce/api_credentials'}
+
+layers:
+  shared:
+    name: ${self:service}-${self:provider.stage}-shared
+    path: ../../layers/build
+    package:
+      patterns:
+        - "python/**"
+    compatibleRuntimes:
+      - python3.12
+
+package:
+  patterns:
+    - "!**"
+    - "src/**"
+    - "!src/unicommerce/credentials_local.py"
+    - "!**/__pycache__/**"
+    - "!**/*.pyc"
+
+functions:
+  unicommerceFetch:
+    handler: src.handlers.fetch_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+    events:
+      # 30-min offset so future posting/credit-note/PO/inventory functions
+      # (same cadence as the Frappe cron) don't collide — see
+      # docs/migration/03-unicommerce-b2c.md's function table.
+      # Deployed disabled until verified in a dual-run against Frappe's
+      # own fetch_orders, same dual-run-safe pattern used for every other
+      # cutover in this migration.
+      - schedule:
+          rate: cron(2,32 * * * ? *)
+          enabled: false

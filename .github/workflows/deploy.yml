@@ -8,7 +8,7 @@ on:
         required: true
         default: dev
       service:
-        description: "Service folder: delivery-api | B2C_Invoice | amazon-us-b2c | dogseeus-invoice"
+        description: "Service folder: delivery-api | B2C_Invoice | amazon-us-b2c | dogseeus-invoice | unicommerce-b2c"
         required: true
         default: delivery-api
 
@@ -63,6 +63,11 @@ jobs:
           AMZ_ALERT_ADMIN_EMAIL: ${{ secrets.AMZ_ALERT_ADMIN_EMAIL }}
           AMZ_ALERT_FROM_EMAIL: ${{ secrets.AMZ_ALERT_FROM_EMAIL }}
           AMZ_SES_REGION: ${{ secrets.AMZ_SES_REGION }}
+          # unicommerce-b2c only — falls back to serverless.yml defaults if unset.
+          UC_API_PARAM_NAME: ${{ secrets.UC_API_PARAM_NAME }}
+          UC_ALERT_ADMIN_EMAIL: ${{ secrets.UC_ALERT_ADMIN_EMAIL }}
+          UC_ALERT_FROM_EMAIL: ${{ secrets.UC_ALERT_FROM_EMAIL }}
+          UC_SES_REGION: ${{ secrets.UC_SES_REGION }}
         run: |
           npm install
           npx serverless deploy --stage ${{ inputs.stage }} --region ${{ secrets.AWS_REGION }}

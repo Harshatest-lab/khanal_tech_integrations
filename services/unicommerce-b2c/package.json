@@ -1,0 +1,9 @@
+{
+  "name": "unicommerce-b2c",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Unicommerce REST API -> SAP B1 pipeline (orders, invoices, credit notes, PO/GRN, inventory sync, reconciliation)",
+  "devDependencies": {
+    "serverless": "^3.38.0"
+  }
+}
