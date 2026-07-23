@@ -136,16 +136,21 @@ likely than concurrent Frappe background jobs, not less.
 ## Infrastructure changes
 
 - No VPC (RDS already public+SG-gated).
-- **Confirm which SAP company Unicommerce posts to before wiring IAM.**
-  Unicommerce is India B2C (GST tax-bucket logic, `KAB2C`/`TNB2C`/`MHB2C`
-  series names, `KA` origin state) — this is very likely the **same
-  India entity `delivery-api` already uses (`/sap/*`, no `inc` suffix)**,
-  not the US entity (`/sap/inc/*`) `amazon-us-b2c`/`B2C_Invoice` use.
-  Don't assume — verify against the actual SAP company DB before scoping
-  IAM, since pointing this at the wrong company would post real invoices
-  into the wrong SAP ledger.
+- **Confirmed 2026-07-23**: Unicommerce is India B2C, hitting the same
+  physical SAP Service Layer host `delivery-api` already talks to
+  (`103.69.202.108:50000`, self-signed cert, `CN=INHYDMSRDVSA135` —
+  verified directly via `openssl s_client`). So this is `delivery-api`'s
+  `/sap/*` entity family, **not** `/sap/inc/*` (the US entity
+  `amazon-us-b2c`/`B2C_Invoice` use). No longer an open question.
+- **TLS**: this SAP host's cert is self-signed (confirmed above), so
+  every Unicommerce Lambda function needs `SAP_SL_VERIFY_SSL:
+  ${env:SAP_SL_VERIFY_SSL, 'true'}` in `serverless.yml` (copy from
+  `delivery-api`'s) **and** the GitHub Actions `SAP_SL_VERIFY_SSL` secret
+  set to `false` for this service's deploy — same as `delivery-api`
+  already requires. `khanal_shared.sap_sl.http` already implements this
+  toggle; nothing new to write, just wire the same env/secret through.
 - IAM: per-parameter `ssm:GetParameter`/`PutParameter` scoped to the
-  confirmed `/sap/*` (or `/sap/inc/*`) family, plus a **new** SSM family
+  confirmed `/sap/*` family, plus a **new** SSM family
   for Unicommerce's own API credentials (`/unicommerce/api_credentials` —
   today these live in the `Unicommerce Settings` doctype, not SAP's own
   secrets), `ses:SendEmail` for alerts, `s3:GetObject/PutObject` on a new
@@ -206,9 +211,9 @@ likely than concurrent Frappe background jobs, not less.
 - Two systems fetching Unicommerce orders simultaneously could hit rate
   limits — check Unicommerce's API rate limit before running Frappe +
   Lambda fetch in parallel during step 4.
-- Wrong SAP company DB if the `/sap/*` vs `/sap/inc/*` entity isn't
-  confirmed before deploy (see Infrastructure changes above) — this is a
-  "verify once, in writing" risk, not a hard technical one.
+- ~~Wrong SAP company DB if the `/sap/*` vs `/sap/inc/*` entity isn't
+  confirmed before deploy~~ — resolved 2026-07-23, confirmed `/sap/*`
+  (see Infrastructure changes above).
 - Dropping the atomic-claim pattern during the port (see Concurrency
   safety above) silently reintroduces the exact three races the Frappe
   fix pass just closed — write a test for each claim point specifically,
