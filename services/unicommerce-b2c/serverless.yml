@@ -110,3 +110,14 @@ functions:
       - schedule:
           rate: cron(7,37 * * * ? *)
           enabled: false
+
+  unicommercePostCreditNotes:
+    handler: src.handlers.post_credit_notes_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+    events:
+      # Same 30-min offset pattern as the Frappe cron (17,47 * * * *).
+      # Deployed disabled until verified in a dual-run against Frappe's
+      # own post_credit_notes.
+      - schedule:
+          rate: cron(17,47 * * * ? *)
+          enabled: false

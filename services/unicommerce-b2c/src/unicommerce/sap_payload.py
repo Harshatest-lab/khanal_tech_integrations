@@ -1,19 +1,16 @@
-"""Build SAP B1 Service Layer AR Invoice payloads from staged UC orders.
+"""Build SAP B1 Service Layer AR Invoice / Credit Note payloads from staged
+UC orders and returns.
 
 Ported from khanal_tech_integrations/unicommerce/mappers/sap_payload.py.
 frappe.get_single("Unicommerce Settings") becomes a required `settings`
 argument (unicommerce.settings.UnicommerceSettings); frappe.throw becomes
 raise ValueError; json.loads(settings.x or "{}") becomes settings.x
 directly since our settings dataclass already holds parsed dicts.
-
-credit_note_payload() is NOT ported yet (needs unicommerce.returns'
-load_parent_order/resolve_actual_uc_order_id, which need Postgres lookups
-of the parent order -- next slice of this build, once invoice posting is
-proven).
 """
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 from unicommerce.geo import classify_tax_bucket, extract_shipping_state, normalize_state_code, resolve_mapped_value, resolve_origin_state_code
@@ -41,9 +38,19 @@ CHANNEL_WAREHOUSE_MAP: dict[str, str] = {
     "AMAZON_FBA_IN_BLR8": "AMZ-BLR8",
 }
 DEFAULT_WAREHOUSE = "EC-FG"
+RETURN_WAREHOUSE_CODE = "EC-QA"
 
 # Must match BATCH_QTY_TOLERANCE in the (not yet ported) posting worker.
 BATCH_QTY_TOLERANCE = 0.01
+
+
+def resolve_customer_code(settings: UnicommerceSettings, channel: str) -> str:
+    customer_code = resolve_mapped_value(settings.channel_customer_map, channel) or resolve_mapped_value(
+        settings.channel_customer_map, "default"
+    )
+    if not customer_code:
+        raise ValueError(f"No SAP customer mapped for channel: {channel}")
+    return str(customer_code)
 
 
 def _resolve_ar_invoice_series(settings: UnicommerceSettings, channel: str) -> int:
@@ -472,12 +479,8 @@ def ar_invoice_payload(
 
     Returns (payload, total_tax_expected).
     """
-    channel_map = settings.channel_customer_map
     tax_inclusive_map = settings.tax_inclusive_map
-
-    customer_code = resolve_mapped_value(channel_map, channel) or resolve_mapped_value(channel_map, "default")
-    if not customer_code:
-        raise ValueError(f"No SAP customer mapped for channel: {channel}")
+    customer_code = resolve_customer_code(settings, channel)
 
     items = parse_line_items(uc_data)
     if not items:
@@ -626,3 +629,130 @@ def ar_invoice_payload(
         payload["TransportationCode"] = int(transport_code)
 
     return payload, round(total_tax_expected, 2)
+
+
+def _allocate_return_batches(source_batches: list[dict], return_qty: float) -> list[dict]:
+    """Split return_qty across the parent invoice line's batches, in the
+    order they were posted (not re-sorted by expiry -- a return draws
+    down whatever the original sale actually shipped from)."""
+    qty_needed = round(float(return_qty or 0), 3)
+    if qty_needed <= 0:
+        return []
+    normalized = []
+    for row in source_batches or []:
+        batch_no = normalize_text((row or {}).get("BatchNumber"))
+        if not batch_no:
+            continue
+        try:
+            batch_qty = float((row or {}).get("Quantity") or 0)
+        except Exception:
+            batch_qty = 0.0
+        if batch_qty <= 0:
+            continue
+        normalized.append({"BatchNumber": batch_no, "Quantity": round(batch_qty, 3)})
+    if not normalized:
+        return []
+
+    allocations = []
+    remaining = qty_needed
+    for row in normalized:
+        if remaining <= 0:
+            break
+        take = min(float(row.get("Quantity") or 0), remaining)
+        if take <= 0:
+            continue
+        allocations.append({"BatchNumber": row["BatchNumber"], "Quantity": round(float(take), 3)})
+        remaining = round(remaining - float(take), 3)
+
+    if remaining > 0 and allocations:
+        # Return qty slightly exceeds the parent line's recorded batch qty
+        # (rounding drift) -- absorb it into the last allocation rather
+        # than reject the whole credit note over a fraction of a unit.
+        allocations[-1]["Quantity"] = round(float(allocations[-1]["Quantity"]) + remaining, 3)
+    return allocations
+
+
+def credit_note_payload(cn: dict, parent_order: dict, settings: UnicommerceSettings) -> dict:
+    """Build the SAP B1 Credit Note payload for one staged return.
+
+    cn: a row from unicommerce_cn_staging (uc_return_id, uc_order_id,
+    parent_sap_doc_entry, return_date, items) -- items already resolved
+    by unicommerce.returns.prepare_credit_note_items (each has
+    sapBaseLine/sapItemCode/sapAccountCode/sapBatchNumbers set).
+    parent_order: the row from unicommerce_orders (channel_name, state).
+
+    Ported from khanal_tech_integrations/unicommerce/mappers/sap_payload.py's
+    credit_note_payload; frappe.throw -> raise ValueError, and the
+    Frappe doc's live parent-order refetch is replaced by the parent_order
+    dict the caller already loaded.
+    """
+    if not cn.get("parent_sap_doc_entry"):
+        raise ValueError(f"Missing parent_sap_doc_entry for return {cn.get('uc_return_id')}")
+    if not settings.credit_note_series:
+        raise ValueError("credit_note_series is not configured")
+
+    items = cn.get("items") or []
+    if not items:
+        raise ValueError(f"No return items found for return {cn.get('uc_return_id')}")
+
+    parent_channel = (parent_order or {}).get("channel_name") or ""
+    parent_ship_state = normalize_state_code((parent_order or {}).get("state") or "")
+    parent_origin_state = resolve_origin_state_code(parent_channel, settings)
+    parent_tax_bucket = classify_tax_bucket(parent_ship_state, None, parent_origin_state)
+
+    lines = []
+    for item in items:
+        item_code = normalize_text(item.get("itemSku") or item.get("sapItemCode"))
+        qty = float(item.get("quantity", 0) or 0)
+        source_batches = item.get("sapBatchNumbers") or []
+        source_account_code = normalize_text(item.get("sapAccountCode"))
+        if item.get("sapBaseLine") in (None, ""):
+            raise ValueError(f"Missing SAP base line for return item {item_code or 'unknown'} in {cn.get('uc_return_id')}")
+        if not item_code:
+            raise ValueError(f"Missing itemSku in return {cn.get('uc_return_id')}")
+        if qty <= 0:
+            raise ValueError(f"Invalid quantity for return item {item_code} in {cn.get('uc_return_id')}")
+        if not source_batches:
+            raise ValueError(f"Missing parent invoice batch mapping for return item {item_code} in {cn.get('uc_return_id')}")
+
+        # Warehouse for return: FBA channels use their originating AMZ-* warehouse;
+        # all other channels use the QA quarantine warehouse (EC-QA).
+        item_uc_wh = normalize_text(item.get("warehouseCode"))
+        channel_upper = parent_channel.strip().upper()
+        if channel_upper in CHANNEL_WAREHOUSE_MAP:
+            return_wh = CHANNEL_WAREHOUSE_MAP[channel_upper]
+        else:
+            return_wh = _resolve_sap_warehouse(settings, parent_channel, item_uc_wh) or RETURN_WAREHOUSE_CODE
+
+        line = {
+            "ItemCode": item_code,
+            "Quantity": qty,
+            "WarehouseCode": return_wh,
+            "BaseType": 13,  # AR Invoice
+            "BaseEntry": int(cn["parent_sap_doc_entry"]),
+            "BaseLine": int(item.get("sapBaseLine", 0) or 0),
+            "BatchNumbers": _allocate_return_batches(source_batches, qty),
+        }
+        if not line.get("BatchNumbers"):
+            raise ValueError(f"Could not allocate return qty from parent invoice batches for {item_code} in {cn.get('uc_return_id')}")
+
+        account_code = source_account_code
+        if not account_code and parent_channel:
+            account_code = _resolve_gl_account_code(
+                settings=settings, channel=parent_channel, ship_state=parent_ship_state,
+                tax_bucket=parent_tax_bucket, line_kind="product",
+            ) or ""
+        if account_code:
+            line["AccountCode"] = account_code
+
+        lines.append(line)
+
+    cn_doc_date = str(cn.get("return_date") or date.today())
+    return {
+        "CardCode": resolve_customer_code(settings, parent_channel),
+        "DocDate": cn_doc_date,
+        "Series": int(settings.credit_note_series),
+        "U_UCReturnID": cn.get("uc_return_id"),
+        "DocumentLines": lines,
+        "Comments": f"Return for UC Order: {cn.get('uc_order_id')}",
+    }

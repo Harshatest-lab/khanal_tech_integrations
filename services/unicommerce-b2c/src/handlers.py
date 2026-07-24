@@ -4,9 +4,9 @@ Every handler alerts via SES on an unhandled crash and re-raises so the
 invocation is marked failed in CloudWatch (EventBridge metrics stay
 honest) -- same pattern as amazon-us-b2c's handlers.py.
 
-fetchOrders and postInvoices are implemented so far -- see
-docs/migration/03-unicommerce-b2c.md for the full 7-function plan (post
-credit notes, PO/GRN, inventory sync, recon, dashboard API still to come).
+fetchOrders, postInvoices, and postCreditNotes are implemented so far --
+see docs/migration/03-unicommerce-b2c.md for the full 7-function plan
+(PO/GRN, inventory sync, recon, dashboard API still to come).
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ _SRC = Path(__file__).resolve().parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unicommerce import fetch_sync, post_invoices, store
+from unicommerce import credit_notes, fetch_sync, post_invoices, store
 from unicommerce.alerts import send_alert
 
 logging.getLogger().setLevel(logging.INFO)
@@ -82,3 +82,25 @@ def post_invoices_handler(event, context):
             )
 
     return _run("post_invoices", _go)
+
+
+def post_credit_notes_handler(event, context):
+    """{"limit": 50?, "start_date": "YYYY-MM-DD"?, "end_date": "YYYY-MM-DD"?,
+    "channel_name": str?} — bulk posting run, date range keys off the
+    parent order's order_date (same UX as the Ops Center date picker).
+    {"uc_return_id": str} — manual single-return retry, bypassing the limit."""
+    ev = event or {}
+
+    def _go():
+        with store.connect() as conn:
+            if ev.get("uc_return_id"):
+                return credit_notes.post_one_credit_note(conn, ev["uc_return_id"])
+            return credit_notes.post_credit_notes(
+                conn,
+                limit=int(ev.get("limit") or 50),
+                start_date=ev.get("start_date"),
+                end_date=ev.get("end_date"),
+                channel_name=ev.get("channel_name"),
+            )
+
+    return _run("post_credit_notes", _go)

@@ -492,6 +492,221 @@ def requeue_or_dead_from_verify(conn: psycopg.Connection, uniware_id: str, max_r
     return "ready"
 
 
+# ── Credit note posting pipeline ──────────────────────────────────────────
+# Ported from khanal_tech_integrations/unicommerce/workers/credit_note.py's
+# store-layer operations.
+
+def get_order(conn: psycopg.Connection, uniware_id: str) -> dict | None:
+    """Parent order lookup for credit-note prep (channel, ship state, raw
+    UC status, pipeline status, posted invoice DocEntry + its payload)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT uniware_id, channel_name, state, status, pipeline_status,
+                   sap_ar_invoice_docentry, payload_json
+            FROM unicommerce_orders WHERE uniware_id = %s
+            """,
+            (uniware_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        cols = [d.name for d in cur.description]
+    return dict(zip(cols, row))
+
+
+def get_pending_credit_notes(
+    conn: psycopg.Connection,
+    limit: int,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    channel_name: str | None = None,
+) -> list[dict]:
+    """Pending/failed CN staging rows, optionally restricted to CNs whose
+    **parent order's** order_date falls in [start_date, end_date] and/or
+    whose parent order is on channel_name -- matches the Ops Center
+    "Post Credit Notes" date-range UX, which keys off the UC sale order
+    date (not the return date)."""
+    where = ["cn.status IN ('pending', 'failed')"]
+    params: list = []
+    if start_date or end_date or channel_name:
+        where.append("o.uniware_id IS NOT NULL")
+        if start_date and end_date:
+            where.append("o.order_date BETWEEN %s AND %s")
+            params.extend([start_date, end_date])
+        elif start_date:
+            where.append("o.order_date >= %s")
+            params.append(start_date)
+        elif end_date:
+            where.append("o.order_date <= %s")
+            params.append(end_date)
+        if channel_name:
+            where.append("o.channel_name = %s")
+            params.append(channel_name)
+    params.append(limit)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT cn.uc_return_id, cn.uc_order_id, cn.attempt_count, cn.sap_cn_docentry
+            FROM unicommerce_cn_staging cn
+            LEFT JOIN unicommerce_orders o ON o.uniware_id = cn.uc_order_id
+            WHERE {' AND '.join(where)}
+            ORDER BY cn.return_date ASC, cn.created_at ASC
+            LIMIT %s
+            """,
+            params,
+        )
+        cols = [d.name for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def get_cn(conn: psycopg.Connection, uc_return_id: str) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT uc_return_id, uc_order_id, parent_sap_doc_entry, return_date,
+                   items_json, status, sap_cn_docentry, attempt_count
+            FROM unicommerce_cn_staging WHERE uc_return_id = %s
+            """,
+            (uc_return_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        cols = [d.name for d in cur.description]
+    result = dict(zip(cols, row))
+    result["items"] = json.loads(result.pop("items_json") or "[]")
+    return result
+
+
+def claim_credit_note(conn: psycopg.Connection, uc_return_id: str) -> bool:
+    """Atomically move a CN staging row from pending/failed to 'posting' --
+    same double-submission guard as claim_ready_order, for a scheduled run
+    racing a manual retry. Not present in the Frappe source (its CN worker
+    does a plain frappe.db.set_value with no WHERE-status guard); added
+    here since we're writing this store layer fresh and the invoice
+    pipeline already established the atomic-claim pattern for exactly
+    this race shape."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE unicommerce_cn_staging
+            SET status = 'posting', updated_at = now()
+            WHERE uc_return_id = %s AND status IN ('pending', 'failed')
+            """,
+            (uc_return_id,),
+        )
+        claimed = cur.rowcount == 1
+    conn.commit()
+    return claimed
+
+
+def set_cn_prepared(
+    conn: psycopg.Connection,
+    uc_return_id: str,
+    status: str,
+    uc_order_id: str | None = None,
+    parent_sap_doc_entry: str | None = None,
+    items: list[dict] | None = None,
+    last_error: str = "",
+) -> None:
+    """Write the outcome of _prepare_credit_note: status transition plus
+    whatever got resolved this pass (uc_order_id once the parent's real
+    name is known, parent_sap_doc_entry, and items_json with sapBaseLine/
+    sapBatchNumbers filled in so a retry doesn't redo the resolution)."""
+    sets = ["status = %s", "updated_at = now()"]
+    params: list = [status]
+    if uc_order_id is not None:
+        sets.append("uc_order_id = %s")
+        params.append(uc_order_id)
+    if parent_sap_doc_entry is not None:
+        sets.append("parent_sap_doc_entry = %s")
+        params.append(parent_sap_doc_entry)
+    if items is not None:
+        sets.append("items_json = %s")
+        params.append(json.dumps(items, default=str))
+    sets.append("last_error = %s")
+    params.append(last_error[:2000])
+    params.append(uc_return_id)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE unicommerce_cn_staging SET {', '.join(sets)} WHERE uc_return_id = %s",
+            params,
+        )
+    conn.commit()
+
+
+def mark_cn_posted(conn: psycopg.Connection, uc_return_id: str, doc_entry: str, doc_num: str, uc_order_id: str | None) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE unicommerce_cn_staging SET
+              status = 'posted', sap_cn_docentry = %s, sap_cn_docnum = %s, last_error = '', updated_at = now()
+            WHERE uc_return_id = %s
+            """,
+            (doc_entry, doc_num, uc_return_id),
+        )
+        if uc_order_id:
+            cur.execute(
+                "UPDATE unicommerce_orders SET sap_ar_creditnote_docentry = %s, updated_at = now() WHERE uniware_id = %s",
+                (doc_entry, uc_order_id),
+            )
+    conn.commit()
+
+
+def mark_cn_failed(conn: psycopg.Connection, uc_return_id: str, error: str, max_retry_attempts: int) -> str:
+    """Returns the resulting status ('failed' or 'dead'). Credit notes get
+    a higher retry floor than the shared setting (8, same as the Frappe
+    source's _mark_failed) -- they fail for transient SAP reasons (base
+    doc not finalised, series exhaustion, session timeout), not permanent
+    ones, so they shouldn't die before the invoice-posting side of a
+    stuck parent has had several cycles to catch up."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT attempt_count FROM unicommerce_cn_staging WHERE uc_return_id = %s", (uc_return_id,))
+        row = cur.fetchone()
+        attempt = int((row[0] if row else 0) or 0) + 1
+        new_status = "dead" if attempt >= max(8, max_retry_attempts) else "failed"
+        cur.execute(
+            """
+            UPDATE unicommerce_cn_staging SET
+              status = %s, attempt_count = %s, last_error = %s, updated_at = now()
+            WHERE uc_return_id = %s
+            """,
+            (new_status, attempt, error[:2000], uc_return_id),
+        )
+    conn.commit()
+    return new_status
+
+
+def set_cn_last_error(conn: psycopg.Connection, uc_return_id: str, note: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE unicommerce_cn_staging SET last_error = %s, updated_at = now() WHERE uc_return_id = %s",
+            (note[:2000], uc_return_id),
+        )
+    conn.commit()
+
+
+def update_cn_reconciliation(conn: psycopg.Connection, uc_order_id: str, unit_actual: float, tax_actual: float) -> None:
+    """CN DocumentLines carry no UnitPrice (SAP fills it from the base
+    invoice), so expected == actual by construction here -- what SAP
+    computed is the definitive value, same reasoning as the Frappe
+    source's post_credit_note reconciliation write."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE unicommerce_orders SET
+              ar_creditnote_unit_price_expected = %s, ar_creditnote_unit_price_actual = %s, ar_creditnote_unit_price_diff = 0,
+              ar_creditnote_tax_expected = %s, ar_creditnote_tax_actual = %s, ar_creditnote_tax_diff = 0,
+              ar_creditnote_reconciled = 1, ar_creditnote_reconciliation_status = 'Reconciled and matched with SAP',
+              updated_at = now()
+            WHERE uniware_id = %s
+            """,
+            (round(unit_actual, 2), round(unit_actual, 2), round(tax_actual, 2), round(tax_actual, 2), uc_order_id),
+        )
+    conn.commit()
+
+
 def update_reconciliation_diffs(conn: psycopg.Connection, uniware_id: str, tax_expected: float, actual_tax: float, unit_diff: float, expected_unit: float, actual_unit: float) -> None:
     is_matched = (abs(tax_expected - actual_tax) <= 1.0) and (unit_diff <= 1.0)
     with conn.cursor() as cur:

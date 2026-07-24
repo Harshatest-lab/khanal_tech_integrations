@@ -6,23 +6,31 @@ single place to check "where are we" without re-reading every phase doc.
 ## Right now — action items
 
 1. **Phase 1 build in progress** (`Khanal_tech_serverless`, same PR #13
-   branch). 2 of 7 functions done: `unicommerceFetch` and
-   `unicommercePostInvoices`. 83 tests passing, packages clean, registered
-   in ci.yml + deploy.yml + pytest.ini. **Not deployed anywhere** (schedule
-   `enabled: false` on both, same dual-run-safe pattern as every other
-   cutover). New per-service SSM params needed before any real deploy:
-   `/unicommerce/api_credentials`, `/unicommerce/settings` (replaces the
-   Frappe "Unicommerce Settings" doctype — see `settings.py`'s docstring
-   for the expected JSON shape). 5 functions remain: post credit notes,
-   PO/GRN creation, inventory sync, reconciliation, dashboard API — see
-   `03-unicommerce-b2c.md`'s function table.
+   branch). 3 of 7 functions done: `unicommerceFetch`,
+   `unicommercePostInvoices`, `unicommercePostCreditNotes`. Packages
+   clean, registered in ci.yml + deploy.yml + pytest.ini. **Not deployed
+   anywhere** (schedule `enabled: false` on all three, same dual-run-safe
+   pattern as every other cutover). New per-service SSM params needed
+   before any real deploy: `/unicommerce/api_credentials`,
+   `/unicommerce/settings` (replaces the Frappe "Unicommerce Settings"
+   doctype — see `settings.py`'s docstring for the expected JSON shape).
+   4 functions remain: PO/GRN creation, inventory sync, reconciliation,
+   dashboard API — see `03-unicommerce-b2c.md`'s function table.
    Deliberate scope decisions made so far (all documented in-code):
    kept one inherited Frappe bug (`quantity: 0` treated as `1` in
    `mappers.eligible_line_items`) for dual-run fidelity, not yet fixed;
    skipped the "EC-FG FEFO rescue" optimization and the SQL
    reservation-ledger audit table (both non-functional niceties);
-   `credit_note_payload()` not ported yet (needs Postgres parent-order
-   lookups the fetch/invoice slices don't have).
+   credit-note posting has no data to process yet in practice —
+   `unicommerce_cn_staging` only gets populated by `fetch_returns`
+   (part of `unicommerceFetch`'s remaining scope, not yet built), so the
+   worker is correct but untested end-to-end until that lands; found and
+   fixed a real bug while building this — `unicommercePostInvoices`'s
+   `store.claim_ready_order()` calls were missing the required `conn`
+   argument (both call sites), which would have crashed every posting
+   run — caught because credit-note posting reads the same `store.py`
+   patterns and there's still no test coverage for `post_invoices.py`
+   itself (only its dependencies) to have caught it earlier.
 2. Merge PR #13 (`Khanal_tech_serverless`, docs-only + Phase 1 code so
    far) whenever — no dependency on anything else, and nothing in it
    deploys automatically (no CI/CD auto-deploy exists in either repo).
@@ -82,7 +90,7 @@ in the conversation history for the exact questions.
 | Unicommerce fix pass | TLS, permission check, 3 race conditions + 2 bugs found while verifying, 1 idempotency gap — in the **existing Frappe code**, not yet the Lambda port | ✅ **Done** — merged, deployed, verified live in production (PRs #1301–#1304) |
 | Phase 0 | Delete SafeExpress + DSR (business stopped, confirmed) | **Paused** — investigation started, found real cross-module dependencies (see notes above), deprioritized behind Phase 1 per user's 2026-07-23 call |
 | Phase 0.5 | Finish the half-built Amazon US Lambda cutover (test DB creds, schedules disabled) | Not started |
-| Phase 1 | Unicommerce → Lambda (7 functions — see `03-unicommerce-b2c.md`) | **In progress.** `unicommerceFetch` + `unicommercePostInvoices` (2/7) built + tested 2026-07-23, not deployed. 5 to go: post credit notes, PO/GRN, inventory sync, recon, dashboard API |
+| Phase 1 | Unicommerce → Lambda (7 functions — see `03-unicommerce-b2c.md`) | **In progress.** `unicommerceFetch` + `unicommercePostInvoices` + `unicommercePostCreditNotes` (3/7) built + tested, not deployed. 4 to go: PO/GRN, inventory sync, recon, dashboard API |
 | Phase 2 | B2B PO automation (6 marketplaces, IMAP-based) → Lambda | Not started. Open question: confirm Flipkart is actually scheduled (not found in `hooks.py`'s cron block) |
 | Phase 3a | consumables → Lambda + Postgres | Not started |
 | Phase 3b | real_aquatics, wowpets → Lambda + Postgres (both live, daily users — higher stakes) | Not started. Order between the two not yet decided |

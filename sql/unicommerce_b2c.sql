@@ -65,6 +65,15 @@ CREATE TABLE IF NOT EXISTS unicommerce_orders (
   ar_invoice_unit_price_diff         numeric(14,2),
   ar_invoice_reconciled             integer     NOT NULL DEFAULT 0,
   ar_invoice_reconciliation_status   text        NOT NULL DEFAULT '',
+  sap_ar_creditnote_docentry        text,        -- last-posted CN; an order can have several returns/CNs over time
+  ar_creditnote_tax_expected        numeric(14,2),
+  ar_creditnote_tax_actual          numeric(14,2),
+  ar_creditnote_tax_diff            numeric(14,2),
+  ar_creditnote_unit_price_expected numeric(14,2),
+  ar_creditnote_unit_price_actual   numeric(14,2),
+  ar_creditnote_unit_price_diff     numeric(14,2),
+  ar_creditnote_reconciled          integer     NOT NULL DEFAULT 0,
+  ar_creditnote_reconciliation_status text      NOT NULL DEFAULT '',
   payload_json                     jsonb,        -- last SAP AR Invoice payload actually posted
   posting_started_at                timestamptz,
   batch_hold_since                 timestamptz,

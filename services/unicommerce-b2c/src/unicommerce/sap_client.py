@@ -154,6 +154,133 @@ def get_invoice_by_doc_entry(doc_entry: int) -> dict:
     return body
 
 
+# ── Credit notes ──────────────────────────────────────────────────────
+# Ported from khanal_tech_integrations/unicommerce/client/sap.py's
+# CreditNotes-facing methods and workers/credit_note.py's series fallback.
+
+def post_credit_note(payload: dict) -> dict:
+    """Returns {"doc_entry": int, "doc_num": int, "response": dict}."""
+    try:
+        status, body = _request("POST", "CreditNotes", body=payload)
+    except RuntimeError as e:
+        raise SapPostError(f"SAP Credit Note failed: {_sap_error_text(str(e))}") from e
+    if status not in (200, 201) or not isinstance(body, dict) or not body.get("DocEntry"):
+        raise SapPostError(f"SAP Credit Note failed: HTTP {status}: {str(body)[:500]}")
+    return {"doc_entry": int(body["DocEntry"]), "doc_num": int(body.get("DocNum") or 0), "response": body}
+
+
+def get_credit_note_by_doc_entry(doc_entry: int) -> dict:
+    try:
+        status, body = _request("GET", f"CreditNotes({int(doc_entry)})")
+    except Exception as e:
+        raise SapLookupError(f"Credit note fetch failed for DocEntry={doc_entry}: {e}") from e
+    if status != 200 or not isinstance(body, dict):
+        raise SapLookupError(f"Credit note fetch failed for DocEntry={doc_entry}: HTTP {status}")
+    return body
+
+
+def find_credit_note_by_return_id(uc_return_id: str) -> dict | None:
+    """Duplicate guard: SAP Credit Note with U_UCReturnID == uc_return_id,
+    falling back to a Comments-contains search for manual/legacy posts
+    that predate the UDF. Raises SapLookupError on any failure -- callers
+    must NOT post then (a swallowed exception -> None -> "not posted yet"
+    is how duplicate credit notes happen)."""
+    key = str(uc_return_id or "").strip()
+    if not key:
+        return None
+    escaped = key.replace("'", "''")
+
+    try:
+        status, body = _request(
+            "GET",
+            quote(
+                f"CreditNotes?$filter=U_UCReturnID eq '{escaped}'"
+                "&$select=DocEntry,DocNum,DocTaxAmount,DocTotal&$orderby=DocEntry desc&$top=5",
+                safe="/?$&=',",
+            ),
+        )
+    except Exception as e:
+        raise SapLookupError(f"Duplicate check (U_UCReturnID) failed for {key}: {e}") from e
+    if status != 200 or not isinstance(body, dict):
+        raise SapLookupError(f"Duplicate check (U_UCReturnID) failed for {key}: HTTP {status}")
+    rows = body.get("value", [])
+    if rows:
+        return _row_to_result(rows[0])
+
+    try:
+        status, body = _request(
+            "GET",
+            quote(
+                f"CreditNotes?$filter=contains(Comments,'{escaped}')"
+                "&$select=DocEntry,DocNum,DocTaxAmount,DocTotal&$orderby=DocEntry desc&$top=20",
+                safe="/?$&=',",
+            ),
+        )
+    except Exception as e:
+        raise SapLookupError(f"Duplicate check (Comments fallback) failed for {key}: {e}") from e
+    if status != 200 or not isinstance(body, dict):
+        raise SapLookupError(f"Duplicate check (Comments fallback) failed for {key}: HTTP {status}")
+    rows = body.get("value", [])
+    return _row_to_result(rows[0]) if rows else None
+
+
+def _pick_active_credit_note_series() -> int | None:
+    filters = [
+        "ObjectCode eq 14 and Locked eq 'tNO'",
+        "ObjectCode eq '14' and Locked eq 'tNO'",
+        "ObjectCode eq 14",
+        "ObjectCode eq '14'",
+    ]
+    for expr in filters:
+        try:
+            status, body = _request(
+                "GET",
+                quote(
+                    f"Series?$filter={expr}&$select=Series,ObjectCode,Locked,DefaultSeries,NextNumber&$top=50",
+                    safe="/?$&=',",
+                ),
+            )
+            if status != 200 or not isinstance(body, dict):
+                continue
+            rows = body.get("value") or []
+            if not rows:
+                continue
+            rows.sort(
+                key=lambda r: (
+                    0 if str(r.get("DefaultSeries") or "").strip().upper() in ("TYES", "Y", "TRUE", "1") else 1,
+                    -(int(r.get("NextNumber") or 0)),
+                )
+            )
+            return int(rows[0]["Series"])
+        except Exception:
+            continue
+    return None
+
+
+def post_credit_note_with_series_fallback(payload: dict) -> dict:
+    """Post with numbering-series fallback: configured payload series ->
+    active SAP CN series -> no series."""
+    try:
+        return post_credit_note(payload)
+    except SapPostError as e:
+        if "numbering series" not in str(e).lower():
+            raise
+
+    active = _pick_active_credit_note_series()
+    if active:
+        payload_with_fallback = dict(payload)
+        payload_with_fallback["Series"] = int(active)
+        try:
+            return post_credit_note(payload_with_fallback)
+        except SapPostError as e:
+            if "numbering series" not in str(e).lower():
+                raise
+
+    payload_without_series = dict(payload)
+    payload_without_series.pop("Series", None)
+    return post_credit_note(payload_without_series)
+
+
 # ── Series / financial-year resolution ──────────────────────────────────
 # Ported from workers/invoice.py's _pick_active_invoice_series /
 # _validate_active_series / _pick_series_for_doc_date /
