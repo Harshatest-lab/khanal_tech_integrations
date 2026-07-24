@@ -9,7 +9,7 @@ keeps this simple (no cross-invocation token cache to reason about).
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import requests
@@ -19,6 +19,15 @@ from unicommerce.credentials import UcCredentials
 logger = logging.getLogger(__name__)
 
 _TIMEOUT = 30
+# UC's saleOrder/search rejects any fromDate/toDate span over 31 days
+# (SALE_ORDER_SEARCH_DATE_RANGE_LIMIT_EXCEEDED), returned as HTTP 200 with
+# "successful": false -- confirmed 2026-07-24 against the live API. Stay
+# safely under that.
+_MAX_ORDER_SEARCH_DAYS = 30
+
+
+class UcApiError(Exception):
+    """Unicommerce returned successful=false in an otherwise-200 response."""
 
 
 class UcClient:
@@ -76,7 +85,17 @@ class UcClient:
                 headers.update(extra_headers)
             resp = requests.post(url, headers=headers, json=body, timeout=_TIMEOUT)
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        # UC returns HTTP 200 with "successful": false for request-level
+        # errors (e.g. date range too wide) -- raise_for_status() above
+        # can't see this, and callers that just read data.get("elements")
+        # would otherwise silently read it as "zero results" instead of
+        # an error. Confirmed 2026-07-24 (SALE_ORDER_SEARCH_DATE_RANGE_LIMIT_EXCEEDED).
+        if isinstance(data, dict) and data.get("successful") is False:
+            errors = data.get("errors") or []
+            detail = "; ".join(str(e.get("description") or e.get("message") or e) for e in errors)
+            raise UcApiError(f"{endpoint}: {detail or data.get('message') or 'successful=false'}")
+        return data
 
     @staticmethod
     def _to_utc_iso(dt_value: str) -> str:
@@ -97,7 +116,36 @@ class UcClient:
         self, from_date: str, to_date: str, channel: str | None = None
     ) -> list[dict]:
         """Fetch sale orders between explicit UTC datetime bounds
-        ('YYYY-MM-DD HH:MM:SS' strings)."""
+        ('YYYY-MM-DD HH:MM:SS' strings). Splits into <=30-day windows --
+        UC rejects a single search spanning more than 31 days. This
+        matters here specifically because fetch_sync's default cold-start
+        lookback is 60 days; a fresh cursor (first-ever run, or a long
+        gap) would otherwise send one 60-day request and get rejected.
+        Same 60-day default exists in the Frappe source
+        (workers/fetch.py's default_since), so this bug is latent there
+        too -- just never triggered since its cursor normally stays
+        within a day or two once the scheduler is running continuously."""
+        from_dt = datetime.strptime(from_date[:19], "%Y-%m-%d %H:%M:%S")
+        to_dt = datetime.strptime(to_date[:19], "%Y-%m-%d %H:%M:%S")
+
+        all_orders: list[dict] = []
+        chunk_start = from_dt
+        while chunk_start < to_dt:
+            chunk_end = min(chunk_start + timedelta(days=_MAX_ORDER_SEARCH_DAYS), to_dt)
+            all_orders.extend(
+                self._search_orders_window(
+                    chunk_start.strftime("%Y-%m-%d %H:%M:%S"),
+                    chunk_end.strftime("%Y-%m-%d %H:%M:%S"),
+                    channel=channel,
+                )
+            )
+            chunk_start = chunk_end + timedelta(seconds=1)
+        return all_orders
+
+    def _search_orders_window(
+        self, from_date: str, to_date: str, channel: str | None = None
+    ) -> list[dict]:
+        """Paginated sale order search within a single <=31-day window."""
         all_orders: list[dict] = []
         page_size = 1000
         display_start = 0
