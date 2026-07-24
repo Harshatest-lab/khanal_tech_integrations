@@ -333,7 +333,7 @@ def post_ready_orders(conn, limit: int = 50, channel_name: str | None = None) ->
 
     processed = posted = batch_hold = verify = failed = skipped_claimed = 0
     for row in orders:
-        if not store.claim_ready_order(row["uniware_id"]):
+        if not store.claim_ready_order(conn, row["uniware_id"]):
             skipped_claimed += 1
             continue
         processed += 1
@@ -391,7 +391,7 @@ def post_one_order(conn, uniware_id: str) -> dict:
     equivalent -- reproduce the fix here, not the original bug)."""
     settings = get_settings()
     store.unclaim_order(conn, uniware_id, "ready")
-    if not store.claim_ready_order(uniware_id):
+    if not store.claim_ready_order(conn, uniware_id):
         return {"status": "already_claimed", "uniware_id": uniware_id}
 
     with conn.cursor() as cur:
