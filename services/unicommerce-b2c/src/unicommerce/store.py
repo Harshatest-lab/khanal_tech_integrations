@@ -65,17 +65,27 @@ def upsert_order(conn: psycopg.Connection, uniware_id: str, order: dict) -> str:
     }
     # Ensure every column referenced in the SQL below has a key even when
     # extract_order_scalar_fields() didn't produce one for this order
-    # (e.g. no shipping package present yet).
-    for col in (
-        "channel_id", "status", "created", "updated", "displayorderdatetime", "cod",
-        "customer_name", "city", "state", "district", "pin_code",
-        "shipment_status", "shipment_date", "return_code", "statuscode",
-        "shippingprovider", "trackingnumber", "trackingstatus", "providerstatus",
-        "putawaycode", "returninvoicecode", "returninvoicedisplaycode", "actioncode",
-        "type", "returncompleteddate", "inventoryreceiveddate", "returnfacilitycode",
-        "uc_taxable_value", "uc_cgst", "uc_sgst", "uc_igst", "uc_shipping", "uc_total",
-    ):
+    # (e.g. no shipping package/return present -- extract_shipping_package_fields
+    # and extract_return_fields both return {} in that case, which is the
+    # common case: most orders have no return at all). Defaults must match
+    # each column's actual nullability -- a genuinely nullable timestamptz/
+    # integer column is fine as NULL, but the schema's `text NOT NULL
+    # DEFAULT ''` columns reject an explicit NULL outright (the column
+    # DEFAULT only applies when the column is omitted from the INSERT
+    # entirely, not when NULL is passed for it) -- confirmed 2026-07-24,
+    # this crashed on the very first real order fetched.
+    for col in ("created", "updated", "displayorderdatetime", "shipment_date", "pin_code"):
         params.setdefault(col, None)
+    for col in (
+        "channel_id", "status", "cod", "customer_name", "city", "state", "district",
+        "shipment_status", "return_code", "statuscode", "shippingprovider",
+        "trackingnumber", "trackingstatus", "providerstatus", "putawaycode",
+        "returninvoicecode", "returninvoicedisplaycode", "actioncode", "type",
+        "returncompleteddate", "inventoryreceiveddate", "returnfacilitycode",
+    ):
+        params.setdefault(col, "")
+    for col in ("uc_taxable_value", "uc_cgst", "uc_sgst", "uc_igst", "uc_shipping", "uc_total"):
+        params.setdefault(col, 0)
 
     with conn.cursor() as cur:
         if set_status_to_fetched:
