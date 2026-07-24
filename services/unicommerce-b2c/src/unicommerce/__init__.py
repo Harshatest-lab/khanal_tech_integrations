@@ -1,11 +1,15 @@
 """Unicommerce B2C: Unicommerce REST API -> SAP B1 pipeline (India entity).
 
-SAP profile: unset / default (SAP_SL_PROFILE not set) -> /sap/* SSM params,
-same entity delivery-api already uses -- confirmed 2026-07-23 via a direct
-openssl s_client check against the SAP Service Layer host
-(103.69.202.108:50000, self-signed cert CN=INHYDMSRDVSA135), the same host
-the Frappe Unicommerce integration talks to. NOT amazon-us-b2c/B2C_Invoice's
-/sap/inc/* (US entity).
+SAP profile: "india_test" -> /sap/india_test/* SSM params (separate param
+family + session cache from delivery-api's live /sap/* default, so this
+still-unverified service can never touch delivery-api's prod SAP
+session) while this service is unverified. India entity confirmed
+2026-07-23 via a direct openssl s_client check against the SAP Service
+Layer host (103.69.202.108:50000, self-signed cert CN=INHYDMSRDVSA135),
+the same host the Frappe Unicommerce integration and delivery-api talk
+to. NOT amazon-us-b2c/B2C_Invoice's /sap/inc/* (US entity) either. Cut
+over to delivery-api's real /sap/* default at go-live -- see
+serverless.yml's environment block comment for how.
 
 Ported from khanal_tech_integrations/unicommerce/ (Frappe). See
 docs/migration/03-unicommerce-b2c.md for the full architecture and the

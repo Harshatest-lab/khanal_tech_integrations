@@ -140,8 +140,18 @@ likely than concurrent Frappe background jobs, not less.
   physical SAP Service Layer host `delivery-api` already talks to
   (`103.69.202.108:50000`, self-signed cert, `CN=INHYDMSRDVSA135` —
   verified directly via `openssl s_client`). So this is `delivery-api`'s
-  `/sap/*` entity family, **not** `/sap/inc/*` (the US entity
+  entity family, **not** `/sap/inc/*` (the US entity
   `amazon-us-b2c`/`B2C_Invoice` use). No longer an open question.
+- **Test isolation (2026-07-24)**: `delivery-api` already runs this
+  entity **live in production** at the default `/sap/*` SSM param
+  family, so `unicommerce-b2c` (still fully unverified) does NOT point
+  at `/sap/*` — it uses its own profile, `SAP_SL_PROFILE`/`HANA_PROFILE
+  = india_test` -> `/sap/india_test/*`, a confirmed-existing test
+  company DB in the same SAP B1 instance. Separate SSM param family +
+  session cache, so nothing here can ever touch delivery-api's live
+  session. Cut over to the real India entity at go-live by removing the
+  profile override in `serverless.yml` (falls back to default `/sap/*`)
+  — never repoint `/sap/india_test/*`'s values to the prod company DB.
 - **TLS**: this SAP host's cert is self-signed (confirmed above), so
   every Unicommerce Lambda function needs `SAP_SL_VERIFY_SSL:
   ${env:SAP_SL_VERIFY_SSL, 'true'}` in `serverless.yml` (copy from
@@ -150,7 +160,8 @@ likely than concurrent Frappe background jobs, not less.
   already requires. `khanal_shared.sap_sl.http` already implements this
   toggle; nothing new to write, just wire the same env/secret through.
 - IAM: per-parameter `ssm:GetParameter`/`PutParameter` scoped to the
-  confirmed `/sap/*` family, plus a **new** SSM family
+  `/sap/india_test/*` family (not `/sap/*` — see test isolation above),
+  plus a **new** SSM family
   for Unicommerce's own API credentials (`/unicommerce/api_credentials` —
   today these live in the `Unicommerce Settings` doctype, not SAP's own
   secrets), `ses:SendEmail` for alerts, `s3:GetObject/PutObject` on a new

@@ -1,8 +1,9 @@
-"""SAP B1 Service Layer access for Unicommerce AR Invoices.
+"""SAP B1 Service Layer access for Unicommerce AR Invoices + Credit Notes.
 
-Built on khanal_shared.sap_sl (SSM-cached B1 session with lock, default
-/sap/* profile -- India entity, same as delivery-api and, once posting
-lands here, this service). Ported from
+Built on khanal_shared.sap_sl (SSM-cached B1 session with lock, profile
+"india_test" -- India entity, same physical SAP host as delivery-api,
+but a separate SSM param family/session cache while this service is
+unverified -- see serverless.yml's environment block). Ported from
 khanal_tech_integrations/unicommerce/client/sap.py's SAP-facing methods
 and workers/invoice.py's series/FY resolution.
 
