@@ -49,12 +49,15 @@ def _run(label: str, fn):
 
 
 def fetch_handler(event, context):
-    """{"max_orders": int?, "from_date": "YYYY-MM-DD"?, "to_date": "YYYY-MM-DD"?,
-    "channel_name": str?}. from_date present -> explicit backfill window,
-    cursor not advanced. Omitted -> cursor-driven incremental fetch."""
+    """{"mode": "orders"|"returns" (default "orders"), "max_orders"|"max_returns": int?,
+    "from_date": "YYYY-MM-DD"?, "to_date": "YYYY-MM-DD"?, "channel_name": str? (orders only)}.
+    from_date present -> explicit backfill window, cursor not advanced.
+    Omitted -> cursor-driven incremental fetch. One handler covers both
+    UC fetch flows (mirrors amazonFetch's mode input)."""
     ev = event or {}
+    mode = (ev.get("mode") or "orders").strip().lower()
 
-    def _go():
+    def _go_orders():
         with store.connect() as conn:
             return fetch_sync.fetch_orders(
                 conn,
@@ -64,7 +67,18 @@ def fetch_handler(event, context):
                 channel_name=ev.get("channel_name"),
             )
 
-    return _run("fetch_orders", _go)
+    def _go_returns():
+        with store.connect() as conn:
+            return fetch_sync.fetch_returns(
+                conn,
+                max_returns=ev.get("max_returns") or ev.get("max_orders"),
+                from_date=ev.get("from_date"),
+                to_date=ev.get("to_date"),
+            )
+
+    if mode == "returns":
+        return _run("fetch_returns", _go_returns)
+    return _run("fetch_orders", _go_orders)
 
 
 def post_invoices_handler(event, context):

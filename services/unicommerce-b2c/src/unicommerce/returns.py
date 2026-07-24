@@ -12,9 +12,85 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from datetime import date, datetime, timezone
 from typing import Any
 
 from unicommerce.mappers import normalize_text
+
+
+def _pick_text(*values: Any) -> str | None:
+    for value in values:
+        txt = str(value or "").strip()
+        if txt:
+            return txt
+    return None
+
+
+def extract_return_ids(ret: dict) -> tuple[str | None, str | None, list[str]]:
+    """(uc_return_id, uc_order_id_or_None, fallback_item_codes).
+
+    Ported from khanal_tech_integrations/unicommerce/workers/fetch.py's
+    _extract_return_ids. When the parent order id can't be read directly
+    off the return payload, fallback_item_codes lets the caller derive it
+    from staged order-line codes (store.find_order_ref_by_line_codes) --
+    the Frappe source does the same against Order Line Items."""
+    rsov = ret.get("returnSaleOrderValue") or {}
+    uc_return_id = _pick_text(
+        rsov.get("reversePickupCode"), rsov.get("shipmentCode"), rsov.get("code"), rsov.get("returnCode"),
+        ret.get("reversePickupCode"), ret.get("shipmentCode"), ret.get("code"), ret.get("returnCode"),
+    )
+    uc_order_id = _pick_text(
+        rsov.get("saleOrderCode"), rsov.get("saleordercode"), rsov.get("orderCode"), rsov.get("ucOrderCode"),
+        ret.get("saleOrderCode"), ret.get("saleordercode"), ret.get("orderCode"), ret.get("ucOrderCode"),
+    )
+    if uc_order_id:
+        return uc_return_id, uc_order_id, []
+
+    item_codes: list[str] = []
+    for row in ret.get("returnSaleOrderItems") or []:
+        code = _pick_text(
+            (row or {}).get("saleOrderItemCode"), (row or {}).get("code"), (row or {}).get("channelSaleOrderItemCode")
+        )
+        if code:
+            item_codes.append(code)
+    return uc_return_id, None, sorted(set(item_codes))
+
+
+def extract_return_date(ret: dict) -> str:
+    """SAP CN DocDate: prefer the most final event (completed > received >
+    delivery > created). Handles ISO strings and epoch (s or ms)."""
+    rsov = ret.get("returnSaleOrderValue") or {}
+    raw = (
+        rsov.get("returnCompletedDate")
+        or rsov.get("inventoryReceivedDate")
+        or rsov.get("returnDeliveryDate")
+        or rsov.get("returnCreatedDate")
+        or ret.get("created")
+        or ""
+    )
+    if not raw:
+        return date.today().isoformat()
+    if isinstance(raw, (int, float)) or (isinstance(raw, str) and str(raw).isdigit()):
+        try:
+            epoch = int(raw)
+            if epoch > 10_000_000_000:
+                epoch = int(epoch / 1000)
+            return datetime.fromtimestamp(epoch, tz=timezone.utc).date().isoformat()
+        except Exception:
+            return date.today().isoformat()
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).date().isoformat()
+    except Exception:
+        return str(raw)[:10]
+
+
+def extract_return_items(ret: dict) -> list:
+    return ret.get("returnSaleOrderItems") or []
+
+
+def extract_return_type(ret: dict) -> str:
+    rsov = ret.get("returnSaleOrderValue") or {}
+    return "courier" if rsov.get("rtoReason") else "customer"
 
 
 def _safe_json_loads(raw_value: Any) -> dict:

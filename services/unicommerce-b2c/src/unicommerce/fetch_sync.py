@@ -17,6 +17,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
+from unicommerce import returns as returns_mod
 from unicommerce import store
 from unicommerce.credentials import UcCredentials, get_uc_credentials
 from unicommerce.dates import parse_source_datetime
@@ -26,8 +27,11 @@ from unicommerce.uc_client import UcClient
 logger = logging.getLogger(__name__)
 
 ORDER_CURSOR_OVERLAP_MINUTES = 20
+RETURN_CURSOR_OVERLAP_MINUTES = 45
 _WATERMARK_ORDERS = "orders"
+_WATERMARK_RETURNS = "returns"
 _DEFAULT_LOOKBACK_DAYS = 60
+_DEFAULT_RETURN_LOOKBACK_DAYS = 90
 
 
 def _order_event_timestamp(order: dict):
@@ -39,15 +43,33 @@ def _order_event_timestamp(order: dict):
     )
 
 
+def _return_event_timestamp(ret: dict):
+    rsov = ret.get("returnSaleOrderValue") or {}
+    return (
+        parse_source_datetime(rsov.get("returnCompletedDate"))
+        or parse_source_datetime(rsov.get("inventoryReceivedDate"))
+        or parse_source_datetime(rsov.get("returnCreatedDate"))
+        or parse_source_datetime(ret.get("updated"))
+        or parse_source_datetime(ret.get("created"))
+    )
+
+
 def _format(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _next_cursor(since: str, cycle_ended_at: datetime, seen: list[datetime], deferred: list[datetime]) -> str:
+def _next_cursor(
+    since: str,
+    cycle_ended_at: datetime,
+    seen: list[datetime],
+    deferred: list[datetime],
+    overlap_minutes: int = ORDER_CURSOR_OVERLAP_MINUTES,
+    default_lookback_days: int = _DEFAULT_LOOKBACK_DAYS,
+) -> str:
     try:
         base_since = datetime.strptime(since[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
     except Exception:
-        base_since = datetime.now(timezone.utc) - timedelta(days=_DEFAULT_LOOKBACK_DAYS)
+        base_since = datetime.now(timezone.utc) - timedelta(days=default_lookback_days)
 
     if deferred:
         anchor = min(deferred)
@@ -56,7 +78,7 @@ def _next_cursor(since: str, cycle_ended_at: datetime, seen: list[datetime], def
     else:
         anchor = cycle_ended_at
 
-    candidate = anchor - timedelta(minutes=abs(ORDER_CURSOR_OVERLAP_MINUTES))
+    candidate = anchor - timedelta(minutes=abs(overlap_minutes))
     if candidate < base_since:
         candidate = base_since
     return _format(candidate)
@@ -189,3 +211,130 @@ def promote_fetched_to_ready(
         if store.mark_ready(conn, row["uniware_id"]):
             moved += 1
     return {"moved_to_ready": moved, "deferred": deferred}
+
+
+def fetch_returns(
+    conn,
+    max_returns: int | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+) -> dict:
+    """Fetch UC returns (CIR + RTO) and stage them as credit notes.
+
+    Ported from khanal_tech_integrations/unicommerce/workers/fetch.py's
+    fetch_returns. Read-only against Unicommerce + Postgres (no SAP
+    writes). A return whose parent sale order isn't staged yet is
+    skipped (fetch orders for that window first). Cursor mode uses UC's
+    updatedFrom/updatedTo (catch status changes on old returns); an
+    explicit range uses createdFrom/createdTo.
+    """
+    creds: UcCredentials = get_uc_credentials()
+    uc = UcClient(creds)
+    uc.login()
+
+    explicit_range = bool(from_date)
+    default_since = (datetime.now(timezone.utc) - timedelta(days=_DEFAULT_RETURN_LOOKBACK_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
+    cycle_ended_at = datetime.now(timezone.utc)
+
+    if explicit_range:
+        since = str(from_date).strip()
+        if len(since) == 10:
+            since += " 00:00:00"
+        end = str(to_date).strip() if to_date else _format(cycle_ended_at)
+        if len(end) == 10:
+            end += " 23:59:59"
+    else:
+        since = store.get_watermark(conn, _WATERMARK_RETURNS) or default_since
+        end = _format(cycle_ended_at)
+
+    run_id = store.start_sync_log(conn, "fetch_returns", since, end)
+
+    try:
+        rets = uc.get_returns_between(from_date=since, to_date=end, use_updated=not explicit_range)
+        if max_returns:
+            rets = rets[: int(max_returns)]
+
+        total = len(rets)
+        created = updated = skipped_existing = skipped_parent = skipped_no_ids = 0
+        seen_timestamps: list[datetime] = []
+        deferred_timestamps: list[datetime] = []
+
+        for ret in rets:
+            uc_return_id, uc_order_id, fallback_codes = returns_mod.extract_return_ids(ret)
+            if not uc_order_id and fallback_codes:
+                uc_order_id = store.find_order_ref_by_line_codes(conn, fallback_codes)
+            if not uc_return_id or not uc_order_id:
+                skipped_no_ids += 1
+                continue
+
+            return_ts = _return_event_timestamp(ret)
+            if return_ts:
+                seen_timestamps.append(return_ts)
+
+            if store.get_cn_status(conn, uc_return_id) == "posted":
+                skipped_existing += 1
+                continue
+
+            parent = store.get_order(conn, uc_order_id)
+            if not parent:
+                skipped_parent += 1
+                if return_ts:
+                    deferred_timestamps.append(return_ts)
+                continue
+
+            items = returns_mod.extract_return_items(ret)
+            rsov = ret.get("returnSaleOrderValue") or {}
+            fallback_warehouse = rsov.get("forwardItemFacility") or ret.get("returnFacilityCode") or ""
+            prepared = returns_mod.prepare_credit_note_items(parent, items, fallback_warehouse=fallback_warehouse)
+
+            parent_ready = parent.get("pipeline_status") == "posted" and bool(parent.get("sap_ar_invoice_docentry"))
+            if not parent_ready or prepared["unresolved_count"]:
+                if return_ts:
+                    deferred_timestamps.append(return_ts)
+            last_error = ""
+            if not parent_ready:
+                last_error = "Parent order is not posted to SAP yet"
+            elif prepared["unresolved_count"]:
+                last_error = f"Awaiting SAP base-line mapping for {prepared['unresolved_count']} return item(s)"
+
+            outcome = store.upsert_cn_staging(
+                conn,
+                uc_return_id=uc_return_id,
+                uc_order_id=parent["uniware_id"],
+                parent_sap_doc_entry=parent["sap_ar_invoice_docentry"] if parent_ready else "",
+                return_date=returns_mod.extract_return_date(ret),
+                return_type=returns_mod.extract_return_type(ret),
+                items=prepared["items"],
+                status="pending",
+                last_error=last_error,
+            )
+            if outcome == "created":
+                created += 1
+            elif outcome == "updated":
+                updated += 1
+            elif outcome == "skipped_posted":
+                skipped_existing += 1
+
+        if explicit_range:
+            next_cursor = since
+        else:
+            next_cursor = _next_cursor(
+                since, cycle_ended_at, seen_timestamps, deferred_timestamps,
+                overlap_minutes=RETURN_CURSOR_OVERLAP_MINUTES,
+                default_lookback_days=_DEFAULT_RETURN_LOOKBACK_DAYS,
+            )
+            store.set_watermark(conn, _WATERMARK_RETURNS, next_cursor)
+
+        counts = {
+            "fetched": total,
+            "created": created,
+            "updated": updated,
+            "skipped_existing": skipped_existing,
+            "skipped_parent_not_found": skipped_parent,
+            "skipped_no_ids": skipped_no_ids,
+        }
+        store.finish_sync_log(conn, run_id, "success", counts)
+        return {**counts, "since": since, "to": end, "explicit_range": explicit_range, "next_cursor": next_cursor}
+    except Exception as e:
+        store.finish_sync_log(conn, run_id, "error", error=str(e))
+        raise

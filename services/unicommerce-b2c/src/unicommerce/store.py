@@ -566,6 +566,100 @@ def requeue_or_dead_from_verify(conn: psycopg.Connection, uniware_id: str, max_r
     return "ready"
 
 
+# ── Return staging (fetch_returns) ────────────────────────────────────────
+# Ported from khanal_tech_integrations/unicommerce/workers/fetch.py's
+# fetch_returns store-layer operations.
+
+def find_order_ref_by_line_codes(conn: psycopg.Connection, codes: list[str]) -> str | None:
+    """Derive a parent order's uniware_id from its staged line-item codes,
+    when the return payload didn't carry the sale-order code directly.
+    Prefers a posted parent when several match (mirrors the Frappe
+    _extract_return_ids fallback against Order Line Items)."""
+    if not codes:
+        return None
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT o.uniware_id, o.pipeline_status
+            FROM unicommerce_order_lines l
+            JOIN unicommerce_orders o ON o.uniware_id = l.uniware_id
+            WHERE l.code = ANY(%s)
+            """,
+            (list(codes),),
+        )
+        rows = cur.fetchall()
+    if not rows:
+        return None
+    refs = {r[0] for r in rows}
+    if len(refs) == 1:
+        return next(iter(refs))
+    for uniware_id, status in rows:
+        if status == "posted":
+            return uniware_id
+    return sorted(refs)[0]
+
+
+def get_cn_status(conn: psycopg.Connection, uc_return_id: str) -> str | None:
+    with conn.cursor() as cur:
+        cur.execute("SELECT status FROM unicommerce_cn_staging WHERE uc_return_id = %s", (uc_return_id,))
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def upsert_cn_staging(
+    conn: psycopg.Connection,
+    uc_return_id: str,
+    uc_order_id: str,
+    parent_sap_doc_entry: str,
+    return_date: str,
+    return_type: str,
+    items: list[dict],
+    status: str,
+    last_error: str,
+) -> str:
+    """Insert or refresh a UC return's credit-note staging row. Returns
+    'created' | 'updated' | 'skipped_posted'. A row already 'posted' is
+    never touched; a 'dead' row keeps 'dead' (a re-fetch must not revive
+    a terminal credit note) -- same rules as the Frappe fetch_returns."""
+    current = get_cn_status(conn, uc_return_id)
+    if current == "posted":
+        return "skipped_posted"
+    effective_status = "dead" if current == "dead" else status
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO unicommerce_cn_staging (
+              uc_return_id, uc_order_id, parent_sap_doc_entry, return_date,
+              return_type, items_json, status, last_error
+            ) VALUES (
+              %(uc_return_id)s, %(uc_order_id)s, %(parent_sap_doc_entry)s, %(return_date)s,
+              %(return_type)s, %(items_json)s, %(status)s, %(last_error)s
+            )
+            ON CONFLICT (uc_return_id) DO UPDATE SET
+              uc_order_id = EXCLUDED.uc_order_id,
+              parent_sap_doc_entry = EXCLUDED.parent_sap_doc_entry,
+              return_date = EXCLUDED.return_date,
+              return_type = EXCLUDED.return_type,
+              items_json = EXCLUDED.items_json,
+              status = EXCLUDED.status,
+              last_error = EXCLUDED.last_error,
+              updated_at = now()
+            """,
+            {
+                "uc_return_id": uc_return_id,
+                "uc_order_id": uc_order_id,
+                "parent_sap_doc_entry": parent_sap_doc_entry,
+                "return_date": return_date or None,
+                "return_type": return_type,
+                "items_json": json.dumps(items, default=str),
+                "status": effective_status,
+                "last_error": last_error[:2000],
+            },
+        )
+    conn.commit()
+    return "updated" if current is not None else "created"
+
+
 # ── Credit note posting pipeline ──────────────────────────────────────────
 # Ported from khanal_tech_integrations/unicommerce/workers/credit_note.py's
 # store-layer operations.
