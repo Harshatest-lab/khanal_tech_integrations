@@ -743,7 +743,10 @@ def get_cn(conn: psycopg.Connection, uc_return_id: str) -> dict | None:
             return None
         cols = [d.name for d in cur.description]
     result = dict(zip(cols, row))
-    result["items"] = json.loads(result.pop("items_json") or "[]")
+    # items_json is a jsonb column -- psycopg returns it already parsed
+    # (list), not a JSON string, so only json.loads a str.
+    raw_items = result.pop("items_json")
+    result["items"] = raw_items if isinstance(raw_items, list) else (json.loads(raw_items) if raw_items else [])
     return result
 
 
