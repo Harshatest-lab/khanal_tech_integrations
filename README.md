@@ -23,6 +23,7 @@ Shared library: [shared/khanal_shared](shared/khanal_shared) (packaged as a **La
 - [docs/DATABASE.md](docs/DATABASE.md) — PostgreSQL / RDS Proxy reference  
 - [docs/INFRA_AWS_FROM_SCRATCH.md](docs/INFRA_AWS_FROM_SCRATCH.md) — **VPC, RDS, security groups, IAM, S3/SSM endpoints** in order (greenfield / prod)  
 - [docs/LOCAL_DEV.md](docs/LOCAL_DEV.md) — local workflow  
+- [docs/migration/00-OVERVIEW.md](docs/migration/00-OVERVIEW.md) — Frappe → Lambda migration blueprint (Unicommerce, B2B PO automation, consumables/real_aquatics/wowpets, Superset reporting, EC2 decommission)
 
 ## Quick commands
 

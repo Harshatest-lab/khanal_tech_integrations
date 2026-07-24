@@ -1,0 +1,142 @@
+service: unicommerce-b2c
+
+frameworkVersion: "3"
+
+provider:
+  name: aws
+  runtime: python3.12
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'ap-south-1'}
+  memorySize: 512
+  timeout: 900
+  iam:
+    role:
+      statements:
+        # Unicommerce REST API credentials (base_url, username, password, facility_code).
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+          Resource:
+            - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.ucApiParamName}
+        # Failure alerts.
+        - Effect: Allow
+          Action:
+            - ses:SendEmail
+            - ses:SendRawEmail
+          Resource: "*"
+        # SAP Service Layer + HANA — India entity, TEST company DB while
+        # this service is still unverified (profile "india_test" ->
+        # /sap/india_test/* — same India physical host/entity delivery-api
+        # uses in prod at /sap/* default, confirmed 2026-07-23, but a
+        # separate SSM param family + session cache so nothing here can
+        # ever touch delivery-api's live session. NOT amazon-us-b2c/
+        # B2C_Invoice's /sap/inc/* (US entity) either. Cut over to the
+        # real India entity at go-live by removing the SAP_SL_PROFILE /
+        # HANA_PROFILE overrides below (falls back to default /sap/*) —
+        # do NOT repoint this param family's values to prod; add a new
+        # profile the same way instead, so dev stays isolated from prod
+        # forever, not just until someone forgets and flips a value.
+        # Resource paths here MUST match SAP_SL_PROFILE / HANA_PROFILE
+        # below exactly (IAM won't auto-follow an env var) — if the
+        # profile changes, update both places together.
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+          Resource:
+            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/india_test/hana_config
+            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/india_test/hana_credentials
+            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/india_test/sl_config
+            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/india_test/credentials
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+            - ssm:PutParameter
+          Resource:
+            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/india_test/b1_session
+        # Unicommerce posting settings (channel/customer/tax/warehouse maps —
+        # replaces the Frappe "Unicommerce Settings" doctype).
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+          Resource:
+            - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.ucSettingsParamName}
+  environment:
+    STAGE: ${self:provider.stage}
+    LOG_LEVEL: ${env:LOG_LEVEL, 'INFO'}
+    DATABASE_URL: ${env:DATABASE_URL, ''}
+    UC_API_PARAM_NAME: ${self:custom.ucApiParamName}
+    UC_SETTINGS_PARAM_NAME: ${self:custom.ucSettingsParamName}
+    UC_ALERT_ADMIN_EMAIL: ${env:UC_ALERT_ADMIN_EMAIL, ''}
+    UC_ALERT_FROM_EMAIL: ${env:UC_ALERT_FROM_EMAIL, ''}
+    UC_SES_REGION: ${env:UC_SES_REGION, 'ap-south-1'}
+    # Profile "india_test" -> /sap/india_test/* — a separate SSM param
+    # family + session cache from delivery-api's live /sap/* default, so
+    # this unverified service can never touch delivery-api's prod SAP
+    # session. Cut over to the real India entity at go-live by removing
+    # these two profile lines (falls back to unset -> default /sap/*) —
+    # do NOT repoint /sap/india_test/*'s values to the prod company DB,
+    # add a new profile the same way instead.
+    SAP_SL_PROFILE: india_test
+    HANA_PROFILE: india_test
+    SAP_SL_USE_SSM: ${env:SAP_SL_USE_SSM, 'true'}
+    SAP_SL_VERIFY_SSL: ${env:SAP_SL_VERIFY_SSL, 'true'}
+    HANA_USE_SSM: ${env:HANA_USE_SSM, '1'}
+
+custom:
+  ucApiParamName: ${env:UC_API_PARAM_NAME, '/unicommerce/api_credentials'}
+  ucSettingsParamName: ${env:UC_SETTINGS_PARAM_NAME, '/unicommerce/settings'}
+
+layers:
+  shared:
+    name: ${self:service}-${self:provider.stage}-shared
+    path: ../../layers/build
+    package:
+      patterns:
+        - "python/**"
+    compatibleRuntimes:
+      - python3.12
+
+package:
+  patterns:
+    - "!**"
+    - "src/**"
+    - "!src/unicommerce/credentials_local.py"
+    - "!**/__pycache__/**"
+    - "!**/*.pyc"
+
+functions:
+  unicommerceFetch:
+    handler: src.handlers.fetch_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+    events:
+      # 30-min offset so future posting/credit-note/PO/inventory functions
+      # (same cadence as the Frappe cron) don't collide — see
+      # docs/migration/03-unicommerce-b2c.md's function table.
+      # Deployed disabled until verified in a dual-run against Frappe's
+      # own fetch_orders, same dual-run-safe pattern used for every other
+      # cutover in this migration.
+      - schedule:
+          rate: cron(2,32 * * * ? *)
+          enabled: false
+
+  unicommercePostInvoices:
+    handler: src.handlers.post_invoices_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+    events:
+      # Same 30-min offset pattern as the Frappe cron (7,37 * * * *).
+      # Deployed disabled until verified in a dual-run against Frappe's
+      # own post_invoices.
+      - schedule:
+          rate: cron(7,37 * * * ? *)
+          enabled: false
+
+  unicommercePostCreditNotes:
+    handler: src.handlers.post_credit_notes_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+    events:
+      # Same 30-min offset pattern as the Frappe cron (17,47 * * * *).
+      # Deployed disabled until verified in a dual-run against Frappe's
+      # own post_credit_notes.
+      - schedule:
+          rate: cron(17,47 * * * ? *)
+          enabled: false

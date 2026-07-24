@@ -55,6 +55,11 @@ def fetch_stats(conn: psycopg.Connection) -> dict[str, Any]:
         total_orders = int(cur.fetchone()[0])
 
         cur.execute(
+            "SELECT fulfillment_channel, COUNT(*)::int AS count FROM amazon_us_orders GROUP BY fulfillment_channel"
+        )
+        by_fulfillment_channel = {r["fulfillment_channel"]: r["count"] for r in _rows_to_dicts(cur)}
+
+        cur.execute(
             "SELECT status, COUNT(*)::int AS count FROM amazon_us_cn_log GROUP BY status"
         )
         cn_by_status = {r["status"]: r["count"] for r in _rows_to_dicts(cur)}
@@ -72,6 +77,7 @@ def fetch_stats(conn: psycopg.Connection) -> dict[str, Any]:
     return {
         "total_orders": total_orders,
         "by_stage": by_stage,
+        "by_fulfillment_channel": by_fulfillment_channel,
         "cn_by_status": cn_by_status,
         "last_run_by_mode": last_run_by_mode,
     }
@@ -115,8 +121,8 @@ def fetch_orders(
         cur.execute(
             f"""
             SELECT amazon_order_id, order_status, stage, purchase_date, actual_ship_date,
-                   order_total_amount, ship_city, ship_state, ship_country, buyer_name,
-                   sap_doc_entry, sap_doc_num, posted_at, last_error, attempt_count, updated_at
+                   fulfillment_channel, order_total_amount, ship_city, ship_state, ship_country,
+                   buyer_name, sap_doc_entry, sap_doc_num, posted_at, last_error, attempt_count, updated_at
             FROM amazon_us_orders
             {where_sql}
             ORDER BY {sort_col} {sort_direction}

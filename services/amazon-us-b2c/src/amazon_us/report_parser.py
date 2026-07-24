@@ -29,6 +29,8 @@ def parse_orders_report(content: str) -> dict[str, dict[str, Any]]:
                 "order_status": (row.get("order-status") or "").strip(),
                 "purchase_date": utc_to_pacific((row.get("purchase-date") or "").strip()),
                 "purchase_date_utc": parse_utc((row.get("purchase-date") or "").strip()),
+                "fulfillment_channel": (row.get("fulfillment-channel") or "").strip(),
+                "last_updated_date": (row.get("last-updated-date") or "").strip(),
                 "ship_city": (row.get("ship-city") or "")[:140].strip(),
                 "ship_state": (row.get("ship-state") or "")[:140].strip(),
                 "ship_postal_code": (row.get("ship-postal-code") or "")[:20].strip(),

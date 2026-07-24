@@ -19,7 +19,13 @@ jobs:
             shared/pyproject.toml
 
       - name: Install shared package
-        run: pip install -e "./shared[dev]"
+        run: |
+          pip install -e "./shared[dev]"
+          # unicommerce/uc_client.py imports requests directly (not a
+          # khanal_shared dependency) -- without it, pytest's collection
+          # error aborts the ENTIRE test run (shared + delivery-api +
+          # dogseeus-invoice too), not just unicommerce-b2c's own tests.
+          pip install requests
 
       - name: Run pytest
         run: pytest -q
@@ -48,8 +54,20 @@ jobs:
           npm install
           npx serverless package --stage dev
 
+      - name: Serverless package (B2C_Invoice)
+        working-directory: services/B2C_Invoice
+        run: |
+          npm install
+          npx serverless package --stage dev
+
       - name: Serverless package (amazon-us-b2c)
         working-directory: services/amazon-us-b2c
+        run: |
+          npm install
+          npx serverless package --stage dev
+
+      - name: Serverless package (unicommerce-b2c)
+        working-directory: services/unicommerce-b2c
         run: |
           npm install
           npx serverless package --stage dev
