@@ -4,25 +4,27 @@ Every handler alerts via SES on an unhandled crash and re-raises so the
 invocation is marked failed in CloudWatch (EventBridge metrics stay
 honest) -- same pattern as amazon-us-b2c's handlers.py.
 
-fetchOrders, postInvoices, and postCreditNotes are implemented so far --
-see docs/migration/03-unicommerce-b2c.md for the full 7-function plan
-(PO/GRN, inventory sync, recon, dashboard API still to come).
+fetch (orders+returns), postInvoices, postCreditNotes, and the read-only
+dashboard API are implemented -- see docs/migration/03-unicommerce-b2c.md
+for the full plan (PO/GRN, inventory sync, recon still to come).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import sys
 import traceback
 from pathlib import Path
+from typing import Any
 
 # Lambda package root is ``src/``; local modules use ``from unicommerce.*``.
 _SRC = Path(__file__).resolve().parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unicommerce import credit_notes, fetch_sync, post_invoices, store
+from unicommerce import credit_notes, dashboard_queries, fetch_sync, post_invoices, store
 from unicommerce.alerts import send_alert
 
 logging.getLogger().setLevel(logging.INFO)
@@ -124,3 +126,129 @@ def post_credit_notes_handler(event, context):
             )
 
     return _run("post_credit_notes", _go)
+
+
+# ── Dashboard HTTP API (read-only + thin retry actions) ───────────────────
+# Behind HTTP API + Cognito JWT authorizer, same shape as amazon-us-b2c's
+# dashboardApi. Serves the kiosk-frontend Unicommerce Ops components.
+
+def _json_response(status_code: int, body: Any) -> dict[str, Any]:
+    return {
+        "statusCode": status_code,
+        "headers": {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Content-Type,Authorization",
+            "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+        },
+        "body": json.dumps(body, default=str),
+    }
+
+
+def _http_method(event: dict[str, Any]) -> str:
+    http = (event.get("requestContext") or {}).get("http") or {}
+    return str(http.get("method") or event.get("httpMethod") or "GET").upper()
+
+
+def _path(event: dict[str, Any]) -> str:
+    return str(event.get("rawPath") or event.get("path") or "")
+
+
+def _query_params(event: dict[str, Any]) -> dict[str, str]:
+    params = event.get("queryStringParameters") or {}
+    return {str(k): str(v) for k, v in params.items() if v is not None} if isinstance(params, dict) else {}
+
+
+def dashboard_handler(event, context):
+    method = _http_method(event)
+    if method == "OPTIONS":
+        return _json_response(200, {"ok": True})
+
+    path = _path(event)
+    q = _query_params(event)
+
+    try:
+        # ── thin write actions (retry) ──
+        if path.endswith("/v1/unicommerce/retry-invoices") and method == "POST":
+            with store.connect() as conn:
+                if (q.get("uniware_id") or "").strip():
+                    return _json_response(200, post_invoices.post_one_order(conn, q["uniware_id"].strip()))
+                return _json_response(
+                    200,
+                    post_invoices.post_ready_orders(
+                        conn, limit=int(q.get("limit") or 50),
+                        start_date=q.get("start_date") or None, end_date=q.get("end_date") or None,
+                    ),
+                )
+
+        if path.endswith("/v1/unicommerce/retry-cn") and method == "POST":
+            with store.connect() as conn:
+                if (q.get("uc_return_id") or "").strip():
+                    return _json_response(200, credit_notes.post_one_credit_note(conn, q["uc_return_id"].strip()))
+                return _json_response(
+                    200,
+                    credit_notes.post_credit_notes(
+                        conn, limit=int(q.get("limit") or 50),
+                        start_date=q.get("start_date") or None, end_date=q.get("end_date") or None,
+                    ),
+                )
+
+        if path.endswith("/v1/unicommerce/order-detail") and not (q.get("uniware_id") or "").strip():
+            return _json_response(400, {"error": "uniware_id is required"})
+
+        # ── read-only queries ──
+        with store.connect() as conn:
+            if path.endswith("/v1/unicommerce/stats"):
+                return _json_response(200, dashboard_queries.fetch_stats(conn))
+
+            if path.endswith("/v1/unicommerce/orders"):
+                return _json_response(
+                    200,
+                    dashboard_queries.fetch_orders(
+                        conn,
+                        limit=dashboard_queries._clamp_limit(q.get("limit")),
+                        offset=dashboard_queries._clamp_offset(q.get("offset")),
+                        pipeline_status=q.get("pipeline_status") or None,
+                        channel_name=q.get("channel_name") or None,
+                        uniware_id=(q.get("uniware_id") or "").strip() or None,
+                        order_date_from=q.get("order_date_from") or None,
+                        order_date_to=q.get("order_date_to") or None,
+                        sort_by=q.get("sort_by") or None,
+                        sort_dir=q.get("sort_dir") or None,
+                    ),
+                )
+
+            if path.endswith("/v1/unicommerce/order-detail"):
+                uid = (q.get("uniware_id") or "").strip()
+                detail = dashboard_queries.fetch_order_detail(conn, uid)
+                if detail["header"] is None:
+                    return _json_response(404, {"error": "Order not found", "uniware_id": uid})
+                return _json_response(200, detail)
+
+            if path.endswith("/v1/unicommerce/returns"):
+                return _json_response(
+                    200,
+                    dashboard_queries.fetch_returns(
+                        conn, limit=dashboard_queries._clamp_limit(q.get("limit")), status=q.get("status") or None
+                    ),
+                )
+
+            if path.endswith("/v1/unicommerce/sync-log"):
+                items = dashboard_queries.fetch_sync_log(
+                    conn, limit=dashboard_queries._clamp_limit(q.get("limit"), default=20), mode=q.get("mode") or None
+                )
+                return _json_response(200, {"items": items})
+
+            if path.endswith("/v1/unicommerce/recon-gaps"):
+                return _json_response(
+                    200,
+                    dashboard_queries.fetch_recon_gaps(
+                        conn, limit=dashboard_queries._clamp_limit(q.get("limit")),
+                        min_diff=float(q.get("min_diff") or 1.0),
+                    ),
+                )
+
+        return _json_response(404, {"error": "Not found", "path": path})
+    except Exception as exc:
+        logger.error("dashboard_api_error path=%s error=%s", path, exc)
+        return _json_response(500, {"error": str(exc)})

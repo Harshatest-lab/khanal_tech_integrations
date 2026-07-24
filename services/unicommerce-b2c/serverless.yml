@@ -9,6 +9,26 @@ provider:
   region: ${opt:region, 'ap-south-1'}
   memorySize: 512
   timeout: 900
+  httpApi:
+    cors:
+      allowedOrigins:
+        - "*"
+      allowedHeaders:
+        - Content-Type
+        - Authorization
+      allowedMethods:
+        - GET
+        - POST
+        - OPTIONS
+    authorizers:
+      dashboardCognitoJwt:
+        type: jwt
+        identitySource:
+          - $request.header.Authorization
+        issuerUrl:
+          Fn::Sub: "https://cognito-idp.${AWS::Region}.amazonaws.com/${UnicommerceDashboardUserPool}"
+        audience:
+          - Ref: UnicommerceDashboardUserPoolClient
   iam:
     role:
       statements:
@@ -140,3 +160,62 @@ functions:
       - schedule:
           rate: cron(17,47 * * * ? *)
           enabled: false
+
+  unicommerceDashboardApi:
+    handler: src.handlers.dashboard_handler
+    memorySize: 512
+    timeout: 30
+    layers: [{ Ref: SharedLambdaLayer }]
+    events:
+      - httpApi: { path: /v1/unicommerce/stats, method: get, authorizer: { name: dashboardCognitoJwt } }
+      - httpApi: { path: /v1/unicommerce/orders, method: get, authorizer: { name: dashboardCognitoJwt } }
+      - httpApi: { path: /v1/unicommerce/order-detail, method: get, authorizer: { name: dashboardCognitoJwt } }
+      - httpApi: { path: /v1/unicommerce/returns, method: get, authorizer: { name: dashboardCognitoJwt } }
+      - httpApi: { path: /v1/unicommerce/sync-log, method: get, authorizer: { name: dashboardCognitoJwt } }
+      - httpApi: { path: /v1/unicommerce/recon-gaps, method: get, authorizer: { name: dashboardCognitoJwt } }
+      - httpApi: { path: /v1/unicommerce/retry-invoices, method: post, authorizer: { name: dashboardCognitoJwt } }
+      - httpApi: { path: /v1/unicommerce/retry-cn, method: post, authorizer: { name: dashboardCognitoJwt } }
+
+resources:
+  Resources:
+    UnicommerceDashboardUserPool:
+      Type: AWS::Cognito::UserPool
+      Properties:
+        UserPoolName: ${self:service}-${self:provider.stage}-dashboard
+        UsernameAttributes:
+          - email
+        AutoVerifiedAttributes:
+          - email
+        Policies:
+          PasswordPolicy:
+            MinimumLength: 10
+            RequireLowercase: true
+            RequireNumbers: true
+            RequireSymbols: false
+            RequireUppercase: true
+        AccountRecoverySetting:
+          RecoveryMechanisms:
+            - Name: verified_email
+              Priority: 1
+
+    UnicommerceDashboardUserPoolClient:
+      Type: AWS::Cognito::UserPoolClient
+      Properties:
+        ClientName: ${self:service}-${self:provider.stage}-dashboard-web
+        UserPoolId: !Ref UnicommerceDashboardUserPool
+        GenerateSecret: false
+        ExplicitAuthFlows:
+          - ALLOW_USER_PASSWORD_AUTH
+          - ALLOW_REFRESH_TOKEN_AUTH
+          - ALLOW_USER_SRP_AUTH
+        PreventUserExistenceErrors: ENABLED
+        SupportedIdentityProviders:
+          - COGNITO
+
+  Outputs:
+    UnicommerceDashboardUserPoolId:
+      Description: Cognito User Pool ID for the Unicommerce dashboard login
+      Value: !Ref UnicommerceDashboardUserPool
+    UnicommerceDashboardUserPoolClientId:
+      Description: Cognito app client ID for the Unicommerce dashboard login
+      Value: !Ref UnicommerceDashboardUserPoolClient
