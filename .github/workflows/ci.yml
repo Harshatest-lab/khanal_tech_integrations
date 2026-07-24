@@ -19,7 +19,13 @@ jobs:
             shared/pyproject.toml
 
       - name: Install shared package
-        run: pip install -e "./shared[dev]"
+        run: |
+          pip install -e "./shared[dev]"
+          # unicommerce/uc_client.py imports requests directly (not a
+          # khanal_shared dependency) -- without it, pytest's collection
+          # error aborts the ENTIRE test run (shared + delivery-api +
+          # dogseeus-invoice too), not just unicommerce-b2c's own tests.
+          pip install requests
 
       - name: Run pytest
         run: pytest -q
