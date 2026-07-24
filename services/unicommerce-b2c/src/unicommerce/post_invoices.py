@@ -311,7 +311,11 @@ def _sum_tax_total(lines: list[dict]) -> float:
     return round(total, 2)
 
 
-def post_ready_orders(conn, limit: int = 50, channel_name: str | None = None) -> dict:
+def post_ready_orders(
+    conn, limit: int = 50, channel_name: str | None = None, start_date: str | None = None, end_date: str | None = None
+) -> dict:
+    from unicommerce import fetch_sync
+
     settings = get_settings()
 
     series_ok, series_msg = sap_client.validate_active_series()
@@ -319,6 +323,12 @@ def post_ready_orders(conn, limit: int = 50, channel_name: str | None = None) ->
         logger.error("post_invoices series guard ABORTED: %s", series_msg)
         return {"processed": 0, "posted": 0, "batch_hold": 0, "verify": 0, "failed": 0, "abort_reason": series_msg}
     logger.info("post_invoices series guard: %s", series_msg)
+
+    # First step of every posting run (matches Frappe workers/invoice.py):
+    # freshly-fetched orders sit at 'fetched' until this promotes the
+    # invoice-eligible ones to 'ready' -- without it the loop below sees
+    # nothing to post.
+    promoted = fetch_sync.promote_fetched_to_ready(conn, limit=limit, start_date=start_date, end_date=end_date)
 
     store.recover_stuck_posting(conn, settings.posting_timeout_mins)
     recovered_failed = store.recover_failed_orders(conn, limit)
@@ -352,6 +362,8 @@ def post_ready_orders(conn, limit: int = 50, channel_name: str | None = None) ->
             logger.error("post_ready_orders: order %s crashed: %s", row["uniware_id"], e, exc_info=True)
 
     return {
+        "promoted_to_ready": promoted["moved_to_ready"],
+        "deferred_fetched": promoted["deferred"],
         "recovered_failed": recovered_failed,
         "recovered_batch_hold": batch_recovery.get("recovered", 0),
         "escalated_batch_hold": batch_recovery.get("escalated", 0),
