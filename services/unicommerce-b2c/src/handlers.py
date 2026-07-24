@@ -68,8 +68,10 @@ def fetch_handler(event, context):
 
 
 def post_invoices_handler(event, context):
-    """{"limit": 50?, "channel_name": str?} — bulk posting run (recovery +
-    verify + ready-order posting, same as the scheduled cron).
+    """{"limit": 50?, "channel_name": str?, "start_date": "YYYY-MM-DD"?,
+    "end_date": "YYYY-MM-DD"?} — bulk posting run (promote fetched->ready +
+    recovery + verify + ready-order posting, same as the scheduled cron;
+    the date range keys off the order_date, matching the Ops Center UX).
     {"uniware_id": str} — manual single-order retry, bypassing the limit."""
     ev = event or {}
 
@@ -78,7 +80,11 @@ def post_invoices_handler(event, context):
             if ev.get("uniware_id"):
                 return post_invoices.post_one_order(conn, ev["uniware_id"])
             return post_invoices.post_ready_orders(
-                conn, limit=int(ev.get("limit") or 50), channel_name=ev.get("channel_name")
+                conn,
+                limit=int(ev.get("limit") or 50),
+                channel_name=ev.get("channel_name"),
+                start_date=ev.get("start_date"),
+                end_date=ev.get("end_date"),
             )
 
     return _run("post_invoices", _go)

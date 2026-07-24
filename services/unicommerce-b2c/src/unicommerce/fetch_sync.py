@@ -13,13 +13,14 @@ is proven in the dual-run comparison against Frappe).
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 
 from unicommerce import store
 from unicommerce.credentials import UcCredentials, get_uc_credentials
 from unicommerce.dates import parse_source_datetime
-from unicommerce.mappers import extract_uc_order_id
+from unicommerce.mappers import extract_uc_order_id, order_ready_for_invoice
 from unicommerce.uc_client import UcClient
 
 logger = logging.getLogger(__name__)
@@ -159,3 +160,32 @@ def fetch_orders(
     except Exception as e:
         store.finish_sync_log(conn, run_id, "error", error=str(e))
         raise
+
+
+def promote_fetched_to_ready(
+    conn, limit: int | None = None, start_date: str | None = None, end_date: str | None = None
+) -> dict:
+    """Move invoice-eligible 'fetched' orders to 'ready'.
+
+    Ported from khanal_tech_integrations/unicommerce/workers/fetch.py's
+    promote_fetched_to_ready. Called as the first step of every posting
+    run (workers/invoice.py:212 in the Frappe source) -- orders are
+    staged as 'fetched' and only become postable once this promotes the
+    ones that are COMPLETE with eligible line items (mappers.
+    order_ready_for_invoice). Orders that aren't ready yet stay 'fetched'
+    with a reason recorded, so a later cycle re-checks them once they
+    complete upstream in UC.
+    """
+    rows = store.get_fetched_orders(conn, limit=limit, start_date=start_date, end_date=end_date)
+    moved = deferred = 0
+    for row in rows:
+        raw = row["order_json"]
+        order = raw if isinstance(raw, dict) else (json.loads(raw) if raw else {})
+        is_ready, reason = order_ready_for_invoice(order)
+        if not is_ready:
+            store.defer_fetched(conn, row["uniware_id"], reason)
+            deferred += 1
+            continue
+        if store.mark_ready(conn, row["uniware_id"]):
+            moved += 1
+    return {"moved_to_ready": moved, "deferred": deferred}

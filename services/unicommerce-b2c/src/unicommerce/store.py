@@ -268,6 +268,70 @@ def finish_sync_log(conn: psycopg.Connection, run_id: int, status: str, counts: 
     conn.commit()
 
 
+# ── fetched -> ready promotion ────────────────────────────────────────────
+# Ported from khanal_tech_integrations/unicommerce/workers/fetch.py's
+# promote_fetched_to_ready. Orders are staged as 'fetched'; only the
+# invoice-eligible ones (COMPLETE + eligible line items -- decided by
+# mappers.order_ready_for_invoice) get promoted to 'ready', which is the
+# only status post_ready_orders processes. Without this step the whole
+# posting pipeline is a no-op -- every order stays stuck at 'fetched'.
+
+def get_fetched_orders(
+    conn: psycopg.Connection, limit: int | None = None, start_date: str | None = None, end_date: str | None = None
+) -> list[dict]:
+    where = ["pipeline_status = 'fetched'"]
+    params: list = []
+    if start_date and end_date:
+        where.append("order_date BETWEEN %s AND %s")
+        params.extend([start_date, end_date])
+    elif start_date:
+        where.append("order_date >= %s")
+        params.append(start_date)
+    elif end_date:
+        where.append("order_date <= %s")
+        params.append(end_date)
+    sql = f"""
+        SELECT uniware_id, order_json
+        FROM unicommerce_orders
+        WHERE {' AND '.join(where)}
+        ORDER BY order_date ASC, created_at ASC
+    """
+    if limit is not None:
+        sql += " LIMIT %s"
+        params.append(limit)
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        cols = [d.name for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def mark_ready(conn: psycopg.Connection, uniware_id: str) -> bool:
+    """Conditional 'fetched' -> 'ready' promotion. False = the row was no
+    longer 'fetched' (a concurrent run already moved it), so this caller
+    must not double-count it as promoted."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE unicommerce_orders SET pipeline_status = 'ready', last_error = '', updated_at = now() "
+            "WHERE uniware_id = %s AND pipeline_status = 'fetched'",
+            (uniware_id,),
+        )
+        moved = cur.rowcount == 1
+    conn.commit()
+    return moved
+
+
+def defer_fetched(conn: psycopg.Connection, uniware_id: str, reason: str) -> None:
+    """Record why an order wasn't promoted, leaving it at 'fetched' so a
+    later run re-checks it once the order completes upstream in UC."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE unicommerce_orders SET last_error = %s, updated_at = now() "
+            "WHERE uniware_id = %s AND pipeline_status = 'fetched'",
+            (reason[:2000], uniware_id),
+        )
+    conn.commit()
+
+
 # ── Invoice posting pipeline ──────────────────────────────────────────────
 # Ported from khanal_tech_integrations/unicommerce/workers/invoice.py's
 # store-layer operations (frappe.db.set_value / frappe.db.sql calls).
