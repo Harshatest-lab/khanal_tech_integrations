@@ -80,6 +80,7 @@ def upsert_order(conn: psycopg.Connection, fields: dict[str, Any], lines: list[d
         "purchase_date": fields.get("purchase_date"),
         "purchase_date_utc": fields.get("purchase_date_utc"),
         "actual_ship_date": fields.get("actual_ship_date"),
+        "fulfillment_channel": fields.get("fulfillment_channel", ""),
         "order_total_amount": fields.get("order_total_amount", 0),
         "ship_city": fields.get("ship_city", ""),
         "ship_state": fields.get("ship_state", ""),
@@ -94,11 +95,11 @@ def upsert_order(conn: psycopg.Connection, fields: dict[str, Any], lines: list[d
             """
             INSERT INTO amazon_us_orders (
               amazon_order_id, order_status, stage, purchase_date, purchase_date_utc,
-              actual_ship_date, order_total_amount, ship_city, ship_state,
+              actual_ship_date, fulfillment_channel, order_total_amount, ship_city, ship_state,
               ship_postal_code, ship_country, buyer_name, last_error, raw_payload
             ) VALUES (
               %(amazon_order_id)s, %(order_status)s, %(stage)s, %(purchase_date)s, %(purchase_date_utc)s,
-              %(actual_ship_date)s, %(order_total_amount)s, %(ship_city)s, %(ship_state)s,
+              %(actual_ship_date)s, %(fulfillment_channel)s, %(order_total_amount)s, %(ship_city)s, %(ship_state)s,
               %(ship_postal_code)s, %(ship_country)s, %(buyer_name)s, %(last_error)s, %(raw_payload)s
             )
             ON CONFLICT (amazon_order_id) DO UPDATE SET
@@ -107,6 +108,7 @@ def upsert_order(conn: psycopg.Connection, fields: dict[str, Any], lines: list[d
               purchase_date = EXCLUDED.purchase_date,
               purchase_date_utc = EXCLUDED.purchase_date_utc,
               actual_ship_date = COALESCE(EXCLUDED.actual_ship_date, amazon_us_orders.actual_ship_date),
+              fulfillment_channel = CASE WHEN EXCLUDED.fulfillment_channel = '' THEN amazon_us_orders.fulfillment_channel ELSE EXCLUDED.fulfillment_channel END,
               order_total_amount = EXCLUDED.order_total_amount,
               ship_city = EXCLUDED.ship_city,
               ship_state = EXCLUDED.ship_state,
@@ -154,7 +156,7 @@ def get_order(conn: psycopg.Connection, amazon_order_id: str) -> dict | None:
         cur.execute(
             """
             SELECT amazon_order_id, order_status, stage, purchase_date, purchase_date_utc,
-                   actual_ship_date, order_total_amount, ship_city, ship_state,
+                   actual_ship_date, fulfillment_channel, order_total_amount, ship_city, ship_state,
                    ship_postal_code, ship_country, buyer_name, sap_doc_entry, sap_doc_num,
                    last_error, attempt_count
             FROM amazon_us_orders WHERE amazon_order_id = %s

@@ -11,7 +11,11 @@ CREATE TABLE IF NOT EXISTS amazon_us_orders (
   stage               text        NOT NULL DEFAULT 'fetched',
   purchase_date       timestamp,             -- naive US/Pacific wall time (MTR-aligned)
   purchase_date_utc   timestamptz,           -- original SP-API value, audit
-  actual_ship_date    date,                  -- from FBA shipments report; SAP DocDate
+  actual_ship_date    date,                  -- AFN: FBA shipments report. MFN: Amazon has no
+                                              -- true ship-date field, so this is last-updated-date
+                                              -- at the Shipped transition (our own shipment
+                                              -- confirmation, timestamped by Amazon). SAP DocDate.
+  fulfillment_channel text        NOT NULL DEFAULT '',  -- AFN | MFN, from the Orders report/API
   order_total_amount  numeric(12,2) NOT NULL DEFAULT 0,
   ship_city           text        NOT NULL DEFAULT '',
   ship_state          text        NOT NULL DEFAULT '',   -- raw Amazon value; normalized at payload time
@@ -27,6 +31,10 @@ CREATE TABLE IF NOT EXISTS amazon_us_orders (
   created_at          timestamptz NOT NULL DEFAULT now(),
   updated_at          timestamptz NOT NULL DEFAULT now()
 );
+
+-- Idempotent for the already-migrated shared RDS (added after the initial
+-- rollout, once MFN orders turned out to need their own ship-date source).
+ALTER TABLE amazon_us_orders ADD COLUMN IF NOT EXISTS fulfillment_channel text NOT NULL DEFAULT '';
 
 CREATE INDEX IF NOT EXISTS idx_amazon_us_orders_stage
   ON amazon_us_orders (stage);

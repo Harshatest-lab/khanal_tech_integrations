@@ -88,11 +88,17 @@ def fba_ship_sync_handler(event, context):
 
 
 def post_invoices_handler(event, context):
-    """{"limit": 200?, "dry_run": false?, "mode": "post"|"retry"}"""
+    """{"limit": 200?, "dry_run": false?, "mode": "post"|"retry"}
+    {"amazon_order_id": str, "dry_run": false?} — manual pilot helper,
+    posts exactly that one order (bypasses ship-date ordering / limit)."""
 
     def _go():
         ev = event or {}
         with store.connect() as conn:
+            if ev.get("amazon_order_id"):
+                return post_invoices.post_one_order(
+                    conn, ev["amazon_order_id"], dry_run=bool(ev.get("dry_run"))
+                )
             if ev.get("mode") == "retry":
                 return post_invoices.retry_failed_orders(conn, limit=int(ev.get("limit") or 50))
             return post_invoices.post_ready_orders(
