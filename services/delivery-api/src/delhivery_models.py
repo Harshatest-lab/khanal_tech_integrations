@@ -92,7 +92,11 @@ def _parse_pod_date(payload: dict[str, Any]) -> date | None:
 
 
 def normalize_shipment_webhook(payload: dict[str, Any]) -> dict[str, Any] | None:
-    """Return flat fields for DB write; None if lrnum missing."""
+    """Return flat fields for DB write; None if lrnum missing.
+
+    ``status_date`` is the event date from this status push (often ``timestamp``).
+    When status is **Delivered**, SAP sync uses it for ``U_POD_DATE``.
+    """
     lrnum = payload.get("lrnum")
     if not isinstance(lrnum, str) or not lrnum.strip():
         return None
@@ -114,6 +118,7 @@ def normalize_shipment_webhook(payload: dict[str, Any]) -> dict[str, Any] | None
         "shipment_remark": remark_s,
         "location": loc_s,
         "waybill": waybill_s,
+        "status_date": _parse_pod_date(payload),
         "payload": payload,
     }
 
