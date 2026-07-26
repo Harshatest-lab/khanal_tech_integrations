@@ -1,4 +1,4 @@
-"""Optional SAP Service Layer: PATCH invoice ``U_FrappeGRNKey`` (and Delivered ``U_POD_DATE``) after shipment-status RDS write."""
+"""Optional SAP Service Layer: PATCH invoice GRN + Delivered ``U_POD_DATE`` after shipment-status RDS write."""
 
 from __future__ import annotations
 
@@ -17,19 +17,23 @@ from khanal_shared.sap_sl import (
     sap_sl_use_ssm,
 )
 
-from src.delhivery_models import frappe_grn_key_from_delhivery_status
-from src.delhivery_store import fetch_doc_entry_for_lr
+from src.delhivery_models import (
+    frappe_grn_key_from_delhivery_status,
+    is_delivered_like_status,
+    resolve_u_pod_date,
+)
+from src.delhivery_store import fetch_lr_sap_sync_context
 
 logger = logging.getLogger(__name__)
 
 
 def maybe_sync_invoice_grn_after_shipment_status(pool: Any, fields: dict[str, Any]) -> None:
-    """When Delhivery status is **Delivered** or **RTO**, PATCH SAP ``U_FrappeGRNKey`` (1 / 2) on the invoice.
+    """When status is delivered-like or RTO, PATCH SAP ``U_FrappeGRNKey`` (1 / 2).
 
-    On **Delivered**, also sets ``U_POD_DATE`` from this webhook's ``status_date`` (usually ``timestamp``)
-    when present — so SAP gets the delivery date even before the separate POD webhook arrives.
+    On delivered-like status, also sets ``U_POD_DATE`` from RDS resolution
+    (``last_status_webhook`` → delivered status-event → ``received_at`` → ``updated_at``).
+    Includes ``U_Pod_Link`` when a latest POD URL already exists on the LR.
 
-    Uses ``fields['delhivery_status']`` from this shipment webhook (not a second RDS read for status).
     Requires ``delhivery_lr.doc_entry``. Swallows errors after logging — RDS is already updated.
     """
     if not sap_sl_enabled():
@@ -56,7 +60,7 @@ def maybe_sync_invoice_grn_after_shipment_status(pool: Any, fields: dict[str, An
 
     try:
         with pool.connection() as conn:
-            doc_entry_raw = fetch_doc_entry_for_lr(conn, lrnum)
+            ctx = fetch_lr_sap_sync_context(conn, lrnum)
     except Exception:
         log_json(
             logger,
@@ -67,7 +71,7 @@ def maybe_sync_invoice_grn_after_shipment_status(pool: Any, fields: dict[str, An
         )
         return
 
-    if not doc_entry_raw:
+    if not ctx or not ctx.get("doc_entry"):
         log_json(
             logger,
             logging.INFO,
@@ -77,7 +81,7 @@ def maybe_sync_invoice_grn_after_shipment_status(pool: Any, fields: dict[str, An
         )
         return
 
-    de_s = str(doc_entry_raw).strip()
+    de_s = str(ctx["doc_entry"]).strip()
     if not re.fullmatch(r"-?\d+", de_s):
         log_json(
             logger,
@@ -89,6 +93,18 @@ def maybe_sync_invoice_grn_after_shipment_status(pool: Any, fields: dict[str, An
         )
         return
     doc_entry = int(de_s)
+
+    status_for_date = ctx.get("delhivery_status") or fields.get("delhivery_status")
+    u_pod_date: str | None = None
+    pod_date_origin = "none"
+    if is_delivered_like_status(status_for_date):
+        u_pod_date, pod_date_origin = resolve_u_pod_date(
+            delhivery_status=status_for_date,
+            last_status_webhook=ctx.get("last_status_webhook"),
+            delivered_event_payload=ctx.get("delivered_event_payload"),
+            delivered_event_received_at=ctx.get("delivered_event_received_at"),
+            lr_updated_at=ctx.get("updated_at"),
+        )
 
     try:
         if sap_sl_use_ssm():
@@ -135,13 +151,11 @@ def maybe_sync_invoice_grn_after_shipment_status(pool: Any, fields: dict[str, An
             "U_LRtrackno": lrnum,
             "U_FrappeGRNKey": grn,
         }
-        # Delivered only: use this status webhook's event date as U_POD_DATE (POD webhook may refine later).
-        u_pod_date: str | None = None
-        if grn == 1:
-            status_date = fields.get("status_date")
-            if status_date is not None and hasattr(status_date, "isoformat"):
-                u_pod_date = status_date.isoformat()
-                patch_body["U_POD_DATE"] = u_pod_date
+        pod_url = ctx.get("latest_pod_url")
+        if isinstance(pod_url, str) and pod_url.strip():
+            patch_body["U_Pod_Link"] = pod_url.strip()
+        if u_pod_date is not None:
+            patch_body["U_POD_DATE"] = u_pod_date
 
         patch_url = f"{base}/Invoices({doc_entry})"
         st_patch, patch_body_out = sap_sl_request_json(opener, "PATCH", patch_url, patch_body)
@@ -155,6 +169,9 @@ def maybe_sync_invoice_grn_after_shipment_status(pool: Any, fields: dict[str, An
             doc_entry=doc_entry,
             u_frappe_grn_key=grn,
             has_pod_date=u_pod_date is not None,
+            pod_date=u_pod_date,
+            pod_date_origin=pod_date_origin,
+            has_pod_link="U_Pod_Link" in patch_body,
             http_status=st_patch,
             ok=ok_http,
         )
