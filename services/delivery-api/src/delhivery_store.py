@@ -105,6 +105,31 @@ LIMIT 1
 """
 
 
+# One round-trip for SAP invoice sync: DocEntry, status, date sources, latest POD URL.
+FETCH_LR_SAP_SYNC_CONTEXT = """
+SELECT
+  NULLIF(btrim(d.doc_entry), '') AS doc_entry,
+  d.delhivery_status,
+  d.last_status_webhook,
+  d.updated_at,
+  p.pod_url AS latest_pod_url,
+  e.payload AS delivered_event_payload,
+  e.received_at AS delivered_event_received_at
+FROM delhivery_lr d
+LEFT JOIN delhivery_lr_pod p ON p.id = d.latest_pod_id
+LEFT JOIN LATERAL (
+  SELECT se.payload, se.received_at
+  FROM delhivery_lr_status_events se
+  WHERE btrim(se.lrnum) = btrim(d.lrnum)
+    AND lower(coalesce(se.payload->>'status', '')) LIKE '%%deliver%%'
+  ORDER BY se.received_at DESC
+  LIMIT 1
+) e ON true
+WHERE btrim(d.lrnum) = btrim(%(lrnum)s)
+LIMIT 1
+"""
+
+
 UPDATE_POD_SAP_AUDIT = """
 UPDATE delhivery_lr_pod SET sap_pod_response = (%(doc)s)::jsonb WHERE id = %(pod_id)s
 """
@@ -125,6 +150,62 @@ def fetch_doc_entry_for_lr(conn: Any, lrnum: str) -> str | None:
         if row is None or row[0] is None:
             return None
         return str(row[0]).strip()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.autocommit = prev
+
+
+def fetch_lr_sap_sync_context(conn: Any, lrnum: str) -> dict[str, Any] | None:
+    """Load DocEntry + status + POD URL + date-resolution sources for one LR.
+
+    Returns a dict with keys:
+      ``doc_entry``, ``delhivery_status``, ``last_status_webhook``, ``updated_at``,
+      ``latest_pod_url``, ``delivered_event_payload``, ``delivered_event_received_at``
+    or ``None`` if the LR row is missing.
+    """
+    prev = conn.autocommit
+    conn.autocommit = True
+    try:
+        cur = conn.execute(FETCH_LR_SAP_SYNC_CONTEXT, {"lrnum": lrnum})
+        row = cur.fetchone()
+        if row is None:
+            return None
+        cols = [d.name for d in cur.description] if cur.description else []
+        if isinstance(row, dict):
+            mapped: dict[str, Any] = row
+        elif cols:
+            mapped = {cols[i]: row[i] for i in range(min(len(cols), len(row)))}
+        else:
+            try:
+                mapped = dict(row)
+            except Exception:
+                return None
+
+        def _as_dict(val: Any) -> dict[str, Any] | None:
+            if isinstance(val, dict):
+                return val
+            if isinstance(val, str):
+                try:
+                    parsed = json.loads(val)
+                except json.JSONDecodeError:
+                    return None
+                return parsed if isinstance(parsed, dict) else None
+            return None
+
+        de = mapped.get("doc_entry")
+        st = mapped.get("delhivery_status")
+        url = mapped.get("latest_pod_url")
+        return {
+            "doc_entry": str(de).strip() if de is not None and str(de).strip() else None,
+            "delhivery_status": str(st).strip() if st is not None and str(st).strip() else None,
+            "last_status_webhook": _as_dict(mapped.get("last_status_webhook")),
+            "updated_at": mapped.get("updated_at"),
+            "latest_pod_url": str(url).strip() if isinstance(url, str) and url.strip() else None,
+            "delivered_event_payload": _as_dict(mapped.get("delivered_event_payload")),
+            "delivered_event_received_at": mapped.get("delivered_event_received_at"),
+        }
     except Exception:
         conn.rollback()
         raise
