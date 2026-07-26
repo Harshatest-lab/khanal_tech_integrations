@@ -1,3 +1,5 @@
+from datetime import date
+
 from src.delhivery_models import (
     body_json,
     frappe_grn_key_from_delhivery_status,
@@ -19,6 +21,7 @@ def test_normalize_shipment_webhook() -> None:
         "shipment_remark": "ok",
         "location": "Hub",
         "mwn": "85334610000033",
+        "timestamp": 1609459200,
     }
     out = normalize_shipment_webhook(payload)
     assert out is not None
@@ -26,10 +29,17 @@ def test_normalize_shipment_webhook() -> None:
     assert out["delhivery_status"] == "DELIVERED"
     assert out["status_type"] == "DL"
     assert out["waybill"] == "85334610000033"
+    assert out["status_date"] == date(2021, 1, 1)
 
 
 def test_normalize_shipment_webhook_missing_lrnum() -> None:
     assert normalize_shipment_webhook({"status": "X"}) is None
+
+
+def test_normalize_shipment_webhook_no_timestamp() -> None:
+    out = normalize_shipment_webhook({"lrnum": "1", "status": "Manifested"})
+    assert out is not None
+    assert out["status_date"] is None
 
 
 def test_body_json() -> None:

@@ -46,7 +46,9 @@ def maybe_sync_invoice_pod_after_db(
 ) -> None:
     """If SAP env is set and ``delhivery_lr.doc_entry`` exists, verify ``U_LRtrackno`` then PATCH POD fields.
 
-    ``U_FrappeGRNKey`` is updated from the **shipment-status** webhook (see ``sap_sl_shipment``), not here.
+    ``U_FrappeGRNKey`` (and Delivered ``U_POD_DATE`` from status ``timestamp``) are updated from the
+    **shipment-status** webhook (see ``sap_sl_shipment``). This POD path still PATCHes ``U_POD_DATE``
+    when the POD payload carries a date (may overwrite the earlier Delivered timestamp).
 
     Outcome is stored on **this POD row** in ``delhivery_lr_pod.sap_pod_response`` (not ``delhivery_lr.sap_response``,
     which is reserved for Frappe). Swallows errors after logging — POD is already in Postgres; SAP must not poison SQS retries.
@@ -206,17 +208,17 @@ def maybe_sync_invoice_pod_after_db(
             return
 
         pod_date = fields.get("pod_date")
-        u_pod_date: str | None
+        u_pod_date: str | None = None
         if pod_date is not None and hasattr(pod_date, "isoformat"):
             u_pod_date = pod_date.isoformat()
-        else:
-            u_pod_date = None
 
+        # Omit U_POD_DATE when absent so we do not clear a Delivered date set by shipment-status.
         patch_body: dict[str, Any] = {
             "U_Pod_Link": pod_url.strip(),
             "U_LRtrackno": str(resolved_lrnum).strip(),
-            "U_POD_DATE": u_pod_date,
         }
+        if u_pod_date is not None:
+            patch_body["U_POD_DATE"] = u_pod_date
 
         patch_url = f"{base}/Invoices({doc_entry})"
         st_patch, patch_body_out = sap_sl_request_json(opener, "PATCH", patch_url, patch_body)

@@ -1,4 +1,4 @@
-"""Optional SAP Service Layer: PATCH invoice ``U_FrappeGRNKey`` after shipment-status RDS write."""
+"""Optional SAP Service Layer: PATCH invoice ``U_FrappeGRNKey`` (and Delivered ``U_POD_DATE``) after shipment-status RDS write."""
 
 from __future__ import annotations
 
@@ -25,6 +25,9 @@ logger = logging.getLogger(__name__)
 
 def maybe_sync_invoice_grn_after_shipment_status(pool: Any, fields: dict[str, Any]) -> None:
     """When Delhivery status is **Delivered** or **RTO**, PATCH SAP ``U_FrappeGRNKey`` (1 / 2) on the invoice.
+
+    On **Delivered**, also sets ``U_POD_DATE`` from this webhook's ``status_date`` (usually ``timestamp``)
+    when present — so SAP gets the delivery date even before the separate POD webhook arrives.
 
     Uses ``fields['delhivery_status']`` from this shipment webhook (not a second RDS read for status).
     Requires ``delhivery_lr.doc_entry``. Swallows errors after logging — RDS is already updated.
@@ -132,6 +135,14 @@ def maybe_sync_invoice_grn_after_shipment_status(pool: Any, fields: dict[str, An
             "U_LRtrackno": lrnum,
             "U_FrappeGRNKey": grn,
         }
+        # Delivered only: use this status webhook's event date as U_POD_DATE (POD webhook may refine later).
+        u_pod_date: str | None = None
+        if grn == 1:
+            status_date = fields.get("status_date")
+            if status_date is not None and hasattr(status_date, "isoformat"):
+                u_pod_date = status_date.isoformat()
+                patch_body["U_POD_DATE"] = u_pod_date
+
         patch_url = f"{base}/Invoices({doc_entry})"
         st_patch, patch_body_out = sap_sl_request_json(opener, "PATCH", patch_url, patch_body)
         ok_http = st_patch in (200, 204)
@@ -143,6 +154,7 @@ def maybe_sync_invoice_grn_after_shipment_status(pool: Any, fields: dict[str, An
             lrnum=lrnum,
             doc_entry=doc_entry,
             u_frappe_grn_key=grn,
+            has_pod_date=u_pod_date is not None,
             http_status=st_patch,
             ok=ok_http,
         )
