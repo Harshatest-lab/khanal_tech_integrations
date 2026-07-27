@@ -355,6 +355,8 @@ def post_ready_orders(
                 batch_hold += 1
             elif outcome == "verify":
                 verify += 1
+            elif outcome == "failed":
+                failed += 1
         except Exception as e:
             failed += 1
             _release_for_order(reservation_ctx, row["uniware_id"])
