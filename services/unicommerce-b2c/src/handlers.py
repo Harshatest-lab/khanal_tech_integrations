@@ -4,9 +4,10 @@ Every handler alerts via SES on an unhandled crash and re-raises so the
 invocation is marked failed in CloudWatch (EventBridge metrics stay
 honest) -- same pattern as amazon-us-b2c's handlers.py.
 
-fetch (orders+returns), postInvoices, postCreditNotes, and the read-only
-dashboard API are implemented -- see docs/migration/03-unicommerce-b2c.md
-for the full plan (PO/GRN, inventory sync, recon still to come).
+fetch (orders+returns), postInvoices, postCreditNotes, pogrn,
+inventorySync, and the read-only dashboard API are implemented -- see
+docs/migration/03-unicommerce-b2c.md for the full plan (recon still to
+come).
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ _SRC = Path(__file__).resolve().parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unicommerce import credit_notes, dashboard_queries, fetch_sync, post_invoices, store
+from unicommerce import credit_notes, dashboard_queries, fetch_sync, inventory_sync, pogrn, post_invoices, store
 from unicommerce.alerts import send_alert
 
 logging.getLogger().setLevel(logging.INFO)
@@ -126,6 +127,39 @@ def post_credit_notes_handler(event, context):
             )
 
     return _run("post_credit_notes", _go)
+
+
+def pogrn_handler(event, context):
+    """{"limit": 20?, "dry_run": bool?} — bulk run (poll SAP transfers ->
+    stage -> claim -> create UC PO+GRN). {"sap_doc_entry": int, "dry_run":
+    bool?} — manual single-transfer retry/dry-run, bypassing the limit
+    and watermark."""
+    ev = event or {}
+
+    def _go():
+        with store.connect() as conn:
+            dry_run = bool(ev.get("dry_run") or False)
+            if ev.get("sap_doc_entry"):
+                return pogrn.process_one_transfer(conn, int(ev["sap_doc_entry"]), dry_run=dry_run)
+            return pogrn.process_ready_transfers(conn, limit=int(ev.get("limit") or 20), dry_run=dry_run)
+
+    return _run("pogrn", _go)
+
+
+def inventory_sync_handler(event, context):
+    """{"limit": 20?, "dry_run": bool?} — bulk run (poll SAP transfers ->
+    stage -> claim -> UC inventory adjust). {"sap_doc_entry": int,
+    "dry_run": bool?} — manual single-transfer retry/dry-run."""
+    ev = event or {}
+
+    def _go():
+        with store.connect() as conn:
+            dry_run = bool(ev.get("dry_run") or False)
+            if ev.get("sap_doc_entry"):
+                return inventory_sync.process_one_transfer(conn, int(ev["sap_doc_entry"]), dry_run=dry_run)
+            return inventory_sync.process_ready_transfers(conn, limit=int(ev.get("limit") or 20), dry_run=dry_run)
+
+    return _run("inventory_sync", _go)
 
 
 # ── Dashboard HTTP API (read-only + thin retry actions) ───────────────────

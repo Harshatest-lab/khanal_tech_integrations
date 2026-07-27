@@ -161,6 +161,27 @@ functions:
           rate: cron(17,47 * * * ? *)
           enabled: false
 
+  unicommercePoGrn:
+    handler: src.handlers.pogrn_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+    events:
+      # Same 30-min offset pattern as the other flows. Deployed disabled
+      # until dry_run-verified against real SAP transfer data, then a
+      # single tiny real UC write is reviewed before this ever runs
+      # unattended -- there is no UC sandbox, see
+      # docs/superpowers/specs/2026-07-27-pogrn-inventorysync-design.md.
+      - schedule:
+          rate: cron(22,52 * * * ? *)
+          enabled: false
+
+  unicommerceInventorySync:
+    handler: src.handlers.inventory_sync_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+    events:
+      - schedule:
+          rate: cron(27,57 * * * ? *)
+          enabled: false
+
   unicommerceDashboardApi:
     handler: src.handlers.dashboard_handler
     memorySize: 512
