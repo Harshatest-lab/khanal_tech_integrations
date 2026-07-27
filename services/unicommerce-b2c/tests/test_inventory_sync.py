@@ -22,7 +22,7 @@ def test_build_adjustments_one_per_batch():
             ],
         }
     ]
-    result = inventory_sync.build_adjustments(line_items, remarks="test")
+    result = inventory_sync.build_adjustments(line_items, remarks="test", facility="AMAZON_FBA_IN_BLR7")
     assert len(result) == 2
     assert result[0]["itemSKU"] == "FGHN0035"
     assert result[0]["quantity"] == 5.0
@@ -30,18 +30,22 @@ def test_build_adjustments_one_per_batch():
     assert result[0]["shelfCode"] == "DEFAULT"
     assert result[0]["inventoryType"] == "GOOD_INVENTORY"
     assert result[0]["remarks"] == "test"
+    # Regression: UC rejects an adjustment with "INVALID_FACILITY_CODE"
+    # unless facilityCode is repeated per-item, not just the request's
+    # Facility header -- confirmed live against a real adjustment.
+    assert result[0]["facilityCode"] == "AMAZON_FBA_IN_BLR7"
 
 
 def test_build_adjustments_falls_back_to_line_qty_when_no_batches():
     line_items = [{"ItemCode": "FGDC0038", "Quantity": 5.0, "BatchNumbers": []}]
-    result = inventory_sync.build_adjustments(line_items, remarks="test")
+    result = inventory_sync.build_adjustments(line_items, remarks="test", facility="EC-FG")
     assert len(result) == 1
     assert result[0]["quantity"] == 5.0
 
 
 def test_build_adjustments_skips_zero_qty():
     line_items = [{"ItemCode": "X", "BatchNumbers": [{"BatchNumber": "B1", "Quantity": 0}]}]
-    assert inventory_sync.build_adjustments(line_items, remarks="test") == []
+    assert inventory_sync.build_adjustments(line_items, remarks="test", facility="EC-FG") == []
 
 
 class _FakeUc:
