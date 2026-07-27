@@ -164,6 +164,15 @@ def test_process_claimed_dry_run_never_calls_uc():
     result = pogrn._process_claimed(None, _claimed_row(), uc=None, settings=_settings(), dry_run=True)
     assert result["status"] == "dry_run"
     assert "would_create_po" in result
+    assert "would_create_grn_rounds" in result  # full preview, not just the PO half
+
+
+def test_process_claimed_dry_run_previews_grn_even_when_po_already_created():
+    result = pogrn._process_claimed(None, _claimed_row(uc_po_id="PO_EXISTING"), uc=None, settings=_settings(), dry_run=True)
+    assert result["status"] == "dry_run"
+    assert result["uc_po_id"] == "PO_EXISTING"
+    assert "would_create_po" not in result
+    assert "would_create_grn_rounds" in result
 
 
 def test_process_claimed_raises_on_unmapped_warehouse():
