@@ -7,11 +7,16 @@ unverified -- see serverless.yml's environment block). Ported from
 khanal_tech_integrations/unicommerce/client/sap.py's SAP-facing methods
 and workers/invoice.py's series/FY resolution.
 
-Duplicate guard uses U_UCOrderID (a dedicated UDF), NOT NumAtCard like
-amazon-us-b2c/B2C_Invoice's SAP client -- Unicommerce's Frappe source
-posts U_UCOrderID = staging_doc.name specifically so this lookup works
-even when Comments (the human-readable "Unicommerce Order: X" text) gets
-edited or truncated.
+Duplicate guard: primary lookup is a direct HANA query (hana_access.
+find_invoice_by_order_id / find_credit_note_by_base_invoice) against the
+line-level U_Order UDF / standard BaseEntry link -- confirmed live that
+the header UDF U_UCOrderID this was originally built around doesn't
+exist on this SAP install's Invoices entity type at all (SAP SL rejects
+it outright), so it can never work via Service Layer here. The SL-based
+$filter lookups below are kept only as a fallback for when HANA itself
+is unreachable, matching the graceful-degrade behavior of the Frappe
+source this was ported from (its primary lookup also silently falls
+through on failure, rather than aborting the whole duplicate check).
 """
 
 from __future__ import annotations
@@ -25,6 +30,8 @@ from urllib.parse import quote
 
 from khanal_shared.sap_sl import build_opener_and_base_via_ssm, sap_sl_request_json
 from khanal_shared.sap_sl.ssm_session import param_b1_session
+
+from unicommerce import hana_access
 
 logger = logging.getLogger(__name__)
 
@@ -93,15 +100,24 @@ def post_invoice(payload: dict) -> dict:
 
 
 def find_invoice_by_uc_order_id(uc_order_id: str) -> dict | None:
-    """Duplicate guard: live (non-cancelled) AR Invoice with U_UCOrderID ==
-    uc_order_id, falling back to a Comments-contains search for
-    manual/legacy posts that predate the UDF. Raises SapLookupError on any
-    failure -- callers must NOT post then (a swallowed exception -> None
-    -> "not posted yet" is how duplicate invoices happen)."""
+    """Duplicate guard: live (non-cancelled) AR Invoice already posted for
+    this UC order. Primary check is hana_access.find_invoice_by_order_id
+    (see its docstring for why -- SAP SL's U_UCOrderID filter doesn't work
+    on this install). Only falls back to the SL-based checks below if
+    HANA itself is unreachable; if every path fails, raises
+    SapLookupError -- callers must NOT post then (a swallowed exception ->
+    None -> "not posted yet" is how duplicate invoices happen)."""
     key = str(uc_order_id or "").strip()
     if not key:
         return None
+
+    try:
+        return hana_access.find_invoice_by_order_id(key)
+    except Exception as exc:
+        logger.warning("find_invoice_by_uc_order_id: HANA lookup failed for %s (%s) -- falling back to SL", key, exc)
+
     escaped = key.replace("'", "''")
+    last_exc: Exception | None = None
 
     try:
         status, body = _request(
@@ -112,13 +128,12 @@ def find_invoice_by_uc_order_id(uc_order_id: str) -> dict | None:
                 safe="/?$&=',",
             ),
         )
-    except Exception as e:
-        raise SapLookupError(f"Duplicate check (U_UCOrderID) failed for {key}: {e}") from e
-    if status != 200 or not isinstance(body, dict):
-        raise SapLookupError(f"Duplicate check (U_UCOrderID) failed for {key}: HTTP {status}")
-    rows = body.get("value", [])
-    if rows:
-        return _row_to_result(rows[0])
+        if status == 200 and isinstance(body, dict):
+            rows = body.get("value", [])
+            if rows:
+                return _row_to_result(rows[0])
+    except Exception as exc:
+        last_exc = exc
 
     try:
         status, body = _request(
@@ -129,12 +144,14 @@ def find_invoice_by_uc_order_id(uc_order_id: str) -> dict | None:
                 safe="/?$&=',",
             ),
         )
-    except Exception as e:
-        raise SapLookupError(f"Duplicate check (Comments fallback) failed for {key}: {e}") from e
-    if status != 200 or not isinstance(body, dict):
-        raise SapLookupError(f"Duplicate check (Comments fallback) failed for {key}: HTTP {status}")
-    rows = body.get("value", [])
-    return _row_to_result(rows[0]) if rows else None
+        if status == 200 and isinstance(body, dict):
+            rows = body.get("value", [])
+            return _row_to_result(rows[0]) if rows else None
+        last_exc = last_exc or RuntimeError(f"HTTP {status}")
+    except Exception as exc:
+        last_exc = exc
+
+    raise SapLookupError(f"Duplicate check failed for {key} on every path (HANA + SL): {last_exc}")
 
 
 def _row_to_result(row: dict) -> dict:
@@ -180,16 +197,30 @@ def get_credit_note_by_doc_entry(doc_entry: int) -> dict:
     return body
 
 
-def find_credit_note_by_return_id(uc_return_id: str) -> dict | None:
-    """Duplicate guard: SAP Credit Note with U_UCReturnID == uc_return_id,
-    falling back to a Comments-contains search for manual/legacy posts
-    that predate the UDF. Raises SapLookupError on any failure -- callers
-    must NOT post then (a swallowed exception -> None -> "not posted yet"
-    is how duplicate credit notes happen)."""
+def find_credit_note_by_return_id(uc_return_id: str, base_doc_entry: int | str | None = None) -> dict | None:
+    """Duplicate guard: SAP Credit Note already posted for this return.
+    Primary check is hana_access.find_credit_note_by_base_invoice, keyed
+    on base_doc_entry (the parent AR Invoice's DocEntry) via RIN1's
+    standard BaseEntry/BaseType link -- no custom field needed, and it
+    works where SAP SL's U_UCReturnID filter can't (ORIN has no such UDF
+    on this install at all; see find_invoice_by_uc_order_id's docstring
+    for the equivalent invoice-side history). Falls back to the SL-based
+    checks below only if HANA is unreachable or base_doc_entry wasn't
+    supplied; if every path fails, raises SapLookupError -- callers must
+    NOT post then (a swallowed exception -> None -> "not posted yet" is
+    how duplicate credit notes happen)."""
     key = str(uc_return_id or "").strip()
     if not key:
         return None
+
+    if base_doc_entry:
+        try:
+            return hana_access.find_credit_note_by_base_invoice(base_doc_entry)
+        except Exception as exc:
+            logger.warning("find_credit_note_by_return_id: HANA lookup failed for %s (%s) -- falling back to SL", key, exc)
+
     escaped = key.replace("'", "''")
+    last_exc: Exception | None = None
 
     try:
         status, body = _request(
@@ -200,13 +231,12 @@ def find_credit_note_by_return_id(uc_return_id: str) -> dict | None:
                 safe="/?$&=',",
             ),
         )
-    except Exception as e:
-        raise SapLookupError(f"Duplicate check (U_UCReturnID) failed for {key}: {e}") from e
-    if status != 200 or not isinstance(body, dict):
-        raise SapLookupError(f"Duplicate check (U_UCReturnID) failed for {key}: HTTP {status}")
-    rows = body.get("value", [])
-    if rows:
-        return _row_to_result(rows[0])
+        if status == 200 and isinstance(body, dict):
+            rows = body.get("value", [])
+            if rows:
+                return _row_to_result(rows[0])
+    except Exception as exc:
+        last_exc = exc
 
     try:
         status, body = _request(
@@ -217,12 +247,14 @@ def find_credit_note_by_return_id(uc_return_id: str) -> dict | None:
                 safe="/?$&=',",
             ),
         )
-    except Exception as e:
-        raise SapLookupError(f"Duplicate check (Comments fallback) failed for {key}: {e}") from e
-    if status != 200 or not isinstance(body, dict):
-        raise SapLookupError(f"Duplicate check (Comments fallback) failed for {key}: HTTP {status}")
-    rows = body.get("value", [])
-    return _row_to_result(rows[0]) if rows else None
+        if status == 200 and isinstance(body, dict):
+            rows = body.get("value", [])
+            return _row_to_result(rows[0]) if rows else None
+        last_exc = last_exc or RuntimeError(f"HTTP {status}")
+    except Exception as exc:
+        last_exc = exc
+
+    raise SapLookupError(f"Duplicate check failed for {key} on every path (HANA + SL): {last_exc}")
 
 
 def _pick_active_credit_note_series() -> int | None:
