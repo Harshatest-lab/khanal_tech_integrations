@@ -1,36 +1,58 @@
 # Migration progress tracker
 
-**Last updated:** 2026-07-23. Update this file as phases move — it's the
+**Last updated:** 2026-07-27. Update this file as phases move — it's the
 single place to check "where are we" without re-reading every phase doc.
 
 ## Right now — action items
 
-1. **Phase 1 build in progress** (`Khanal_tech_serverless`, same PR #13
-   branch). 3 of 7 functions done: `unicommerceFetch`,
-   `unicommercePostInvoices`, `unicommercePostCreditNotes`. Packages
-   clean, registered in ci.yml + deploy.yml + pytest.ini. **Not deployed
-   anywhere** (schedule `enabled: false` on all three, same dual-run-safe
-   pattern as every other cutover). New per-service SSM params needed
-   before any real deploy: `/unicommerce/api_credentials`,
-   `/unicommerce/settings` (replaces the Frappe "Unicommerce Settings"
-   doctype — see `settings.py`'s docstring for the expected JSON shape).
-   4 functions remain: PO/GRN creation, inventory sync, reconciliation,
-   dashboard API — see `03-unicommerce-b2c.md`'s function table.
-   Deliberate scope decisions made so far (all documented in-code):
-   kept one inherited Frappe bug (`quantity: 0` treated as `1` in
-   `mappers.eligible_line_items`) for dual-run fidelity, not yet fixed;
-   skipped the "EC-FG FEFO rescue" optimization and the SQL
-   reservation-ledger audit table (both non-functional niceties);
-   credit-note posting has no data to process yet in practice —
-   `unicommerce_cn_staging` only gets populated by `fetch_returns`
-   (part of `unicommerceFetch`'s remaining scope, not yet built), so the
-   worker is correct but untested end-to-end until that lands; found and
-   fixed a real bug while building this — `unicommercePostInvoices`'s
-   `store.claim_ready_order()` calls were missing the required `conn`
-   argument (both call sites), which would have crashed every posting
-   run — caught because credit-note posting reads the same `store.py`
-   patterns and there's still no test coverage for `post_invoices.py`
-   itself (only its dependencies) to have caught it earlier.
+1. **Phase 1 (`services/unicommerce-b2c`) is deployed to the `dev` stack
+   and the full write path is now confirmed real, live, end-to-end**
+   (2026-07-27): fetch → promote → batch-check → series guard →
+   `POST /Invoices` → `POST /CreditNotes`, all verified directly against
+   `TEST_KFL_30062026` (SAP SL + HANA), not just our own DB records.
+   5 of 7 flows built (`Fetch`, `PostInvoices`, `PostCreditNotes`,
+   `DashboardApi`, plus the underlying HANA/SAP client layer); `Recon`
+   and `PoGrn`/`InventorySync` remain unbuilt (see Phase table below).
+   **5 real bugs found + fixed live today, all deployed to `dev`:**
+   - `hana_access.bulk_manage_batch_numbers` queried HANA column
+     `ManageBatchNumbers` — that's the SAP Service Layer property name,
+     not the real column (`ManBtchNum`). Silently broke batch-managed
+     lookups in every environment, not just this one.
+   - `validate_active_series` (the FY-rollover safety guard — exists
+     because of a real prior incident, 148 cancelled March orders nearly
+     double-booked into a stale series) queried a `Series` OData entity
+     that doesn't exist in this SAP SL version at all, and had an
+     inverted FY-suffix calculation on top — it had **never actually
+     validated anything**, including in the Frappe source it was ported
+     from. Rebuilt to check the actual series IDs configured in
+     Unicommerce Settings (`ar_invoice_series_map` etc.) via
+     `SeriesService_GetSeries`, the correct working RPC.
+   - `parse_source_datetime` crashed `fetch_returns` live
+     (`TypeError: can't compare offset-naive and offset-aware datetimes`)
+     on UC return timestamps sent without a UTC offset.
+   - `find_invoice_by_uc_order_id` / `find_credit_note_by_return_id`
+     queried header UDFs (`U_UCOrderID`, `U_UCReturnID`) that don't exist
+     on this SAP install at all (confirmed via SAP SL rejecting them
+     outright, and via `SYS.TABLE_COLUMNS` — not a naming typo, genuinely
+     absent) and **raised instead of gracefully degrading** like the
+     Frappe source does, so the dedup guard did nothing — confirmed this
+     caused a real duplicate invoice in SAP (DocEntry 49173 + 59967, same
+     UC order, both live). Fixed by checking HANA directly instead:
+     `INV1.U_Order` (line-level UDF the payload builder already sets
+     correctly) for invoices, `RIN1.BaseEntry`/`BaseType` (the standard
+     SAP "Copy From" link, no custom field needed) for credit notes. No
+     UDF creation needed — an earlier plan to add `U_UCOrderID` via the
+     SAP B1 client is superseded, skip it.
+   - `post_ready_orders`'s result-counter loop had no branch for the
+     `"failed"` outcome — orders still recorded correctly in Postgres,
+     but silently missing from the Lambda's own returned summary.
+   **Stock note:** `india_test` has real batch stock at the default
+   `EC-FG` warehouse (used by every non-Amazon-FBA channel — Flipkart,
+   Meesho, etc.), which is what made live write-path testing possible
+   without any manual data load. Amazon-FBA-channel orders (routed to
+   their own dedicated `AMZ-*` warehouses) still have zero stock there
+   and remain genuinely untested on the write path — that's a data gap
+   in the test company, not a code issue.
 2. Merge PR #13 (`Khanal_tech_serverless`, docs-only + Phase 1 code so
    far) whenever — no dependency on anything else, and nothing in it
    deploys automatically (no CI/CD auto-deploy exists in either repo).
@@ -90,7 +112,7 @@ in the conversation history for the exact questions.
 | Unicommerce fix pass | TLS, permission check, 3 race conditions + 2 bugs found while verifying, 1 idempotency gap — in the **existing Frappe code**, not yet the Lambda port | ✅ **Done** — merged, deployed, verified live in production (PRs #1301–#1304) |
 | Phase 0 | Delete SafeExpress + DSR (business stopped, confirmed) | **Paused** — investigation started, found real cross-module dependencies (see notes above), deprioritized behind Phase 1 per user's 2026-07-23 call |
 | Phase 0.5 | Finish the half-built Amazon US Lambda cutover (test DB creds, schedules disabled) | Not started |
-| Phase 1 | Unicommerce → Lambda (7 flows — see `03-unicommerce-b2c.md`) | **5 of 7 flows built + live-verified on `dev` (2026-07-24). See memory `unicommerce_lambda_dev_verification.md`.** ✅ `Fetch` orders + returns · ✅ `PostInvoices` (promote→series guard→HANA batch→graceful `batch_hold`) · ✅ `PostCreditNotes` orchestration · ✅ `DashboardApi` (read-only HTTP+Cognito, all endpoints verified vs staged data). **5 real bugs found + fixed live** (missing promote gate; UC 31-day search limit swallowed as 0 results; NULL-vs-`''` NOT NULL columns; `get_cn` json.loads on jsonb; empty GitHub-secret env shadowing) — none caught by unit tests. **Verification wall:** test company has no HANA stock → no invoice can actually post, so the SAP-write depth of PostInvoices/PostCreditNotes + all of `Recon` can't be exercised until stock is loaded into test HANA. **Remaining 2 flows:** `Recon` (not ported; unverifiable here anyway), `PoGrn` + `InventorySync` (not ported — WRITE to the live UC tenant, no sandbox → held per user's 2026-07-24 call). |
+| Phase 1 | Unicommerce → Lambda (7 flows — see `03-unicommerce-b2c.md`) | **5 of 7 flows built + live-verified on `dev`, full write path confirmed real (2026-07-27).** See memory `unicommerce_lambda_dev_verification.md`. ✅ `Fetch` orders + returns · ✅ `PostInvoices` — **real `POST /Invoices` confirmed**, verified directly against SAP (DocEntry 59967/DocNum 702697) · ✅ `PostCreditNotes` — **real `POST /CreditNotes` confirmed**, correctly linked to its parent invoice via `BaseEntry` (DocEntry 10807/DocNum 67373) · ✅ `DashboardApi`. **9 real bugs found + fixed live across two sessions**, none caught by unit tests: 2026-07-24 — missing promote gate; UC 31-day search limit swallowed as 0 results; NULL-vs-`''` NOT NULL columns; `get_cn` json.loads on jsonb; empty GitHub-secret env shadowing. 2026-07-27 — wrong HANA column name in batch-managed lookup; FY series guard queried a nonexistent SAP entity + had an inverted FY-suffix calc (never validated anything, in the Frappe source either); `fetch_returns` crashed on offset-naive UC timestamps; invoice/CN dedup queried nonexistent header UDFs and silently did nothing, causing a real duplicate invoice in SAP (fixed via HANA `INV1.U_Order`/`RIN1.BaseEntry` instead — no UDF creation needed); a result-counter bug dropping `"failed"` outcomes. **Stock note:** `EC-FG` (default warehouse, every non-Amazon-FBA channel) has real batch stock, which is what unblocked full write-path testing; `AMZ-*` warehouses (Amazon-FBA channels) still have zero stock and remain untested on the write path — a data gap, not code. **Remaining 2 flows:** `Recon` (not ported — there's now real posted-invoice data to reconcile against, but the flow itself still needs building), `PoGrn` + `InventorySync` (not ported — WRITE to the live UC tenant, no sandbox → held per user's 2026-07-24 call). |
 | Phase 2 | B2B PO automation (6 marketplaces, IMAP-based) → Lambda | Not started. Open question: confirm Flipkart is actually scheduled (not found in `hooks.py`'s cron block) |
 | Phase 3a | consumables → Lambda + Postgres | Not started |
 | Phase 3b | real_aquatics, wowpets → Lambda + Postgres (both live, daily users — higher stakes) | Not started. Order between the two not yet decided |
