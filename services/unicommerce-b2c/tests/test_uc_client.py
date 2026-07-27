@@ -110,3 +110,81 @@ def test_post_with_reauth_passes_through_successful_true(monkeypatch):
     result = client._post_with_reauth("services/rest/v1/oms/saleOrder/search", body={})
 
     assert result == body
+
+
+# ── PoGrn / InventorySync write methods ─────────────────────────────────
+
+def _capture_post(monkeypatch, response_body):
+    calls: list[dict] = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append({"url": url, "headers": headers, "json": json})
+        return _FakeResponse(response_body)
+
+    monkeypatch.setattr("unicommerce.uc_client.requests.post", fake_post)
+    return calls
+
+
+def test_create_po_approved_aggregates_and_sets_facility_header(monkeypatch):
+    client = _client()
+    calls = _capture_post(monkeypatch, {"successful": True, "purchaseOrderCode": "PO123"})
+
+    result = client.create_po_approved(
+        "EC-B2C", [{"itemSKU": "FGHN0035", "quantity": 54.0}], facility_code="kfl_ecom_warehouse"
+    )
+
+    assert result["purchaseOrderCode"] == "PO123"
+    assert len(calls) == 1
+    assert calls[0]["url"].endswith("purchaseOrder/createApproved")
+    assert calls[0]["headers"]["Facility"] == "kfl_ecom_warehouse"
+    assert calls[0]["json"]["vendorCode"] == "EC-B2C"
+    assert calls[0]["json"]["purchaseOrderItems"] == [
+        {"itemSKU": "FGHN0035", "quantity": 54.0, "unitPrice": 0, "taxTypeCode": None}
+    ]
+
+
+def test_create_inflow_receipt_sends_wsgrn_shape(monkeypatch):
+    client = _client()
+    calls = _capture_post(monkeypatch, {"successful": True, "inflowReceiptCode": "GRN1"})
+
+    result = client.create_inflow_receipt("PO123", "GRN-53974-20260727-R1", "2026-07-27T00:00:00.000Z", facility_code="AMZ-BLR7")
+
+    assert result["inflowReceiptCode"] == "GRN1"
+    assert calls[0]["url"].endswith("inflowReceipt/create")
+    assert calls[0]["json"]["purchaseOrderCode"] == "PO123"
+    assert calls[0]["json"]["wsGRN"]["vendorInvoiceNumber"] == "GRN-53974-20260727-R1"
+    assert calls[0]["headers"]["Facility"] == "AMZ-BLR7"
+
+
+def test_add_grn_item_wraps_item_under_inflow_receipt_code(monkeypatch):
+    client = _client()
+    calls = _capture_post(monkeypatch, {"successful": True})
+    item = {"skuCode": "FGHN0035", "quantity": 54.0}
+
+    client.add_grn_item("GRN1", item, facility_code="kfl_ecom_warehouse")
+
+    assert calls[0]["url"].endswith("inflowReceipt/addItemSKU")
+    assert calls[0]["json"] == {"inflowReceiptCode": "GRN1", "inflowReceiptItem": item}
+
+
+def test_adjust_inventory_bulk_sends_adjustments_list(monkeypatch):
+    client = _client()
+    calls = _capture_post(monkeypatch, {"successful": True, "inventoryAdjustmentResponses": []})
+    adjustments = [{"itemSKU": "FGHN0035", "quantity": 5, "adjustmentType": "REMOVE"}]
+
+    client.adjust_inventory_bulk(adjustments, facility_code="AMZ-BLR7")
+
+    assert calls[0]["url"].endswith("inventory/adjust/bulk")
+    assert calls[0]["json"] == {"inventoryAdjustments": adjustments}
+    assert calls[0]["headers"]["Facility"] == "AMZ-BLR7"
+
+
+def test_po_grn_write_methods_raise_on_successful_false(monkeypatch):
+    client = _client()
+    _capture_post(monkeypatch, {"successful": False, "message": "vendor not found"})
+
+    try:
+        client.create_po_approved("EC-B2C", [{"itemSKU": "X", "quantity": 1}], facility_code="kfl_ecom_warehouse")
+        assert False, "expected UcApiError"
+    except UcApiError as e:
+        assert "vendor not found" in str(e)

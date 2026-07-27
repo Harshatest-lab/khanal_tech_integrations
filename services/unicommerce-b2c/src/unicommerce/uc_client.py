@@ -282,6 +282,57 @@ class UcClient:
                 logger.warning("UC return/get failed code=%s error=%s", code, e)
         return full_returns
 
+    # ── PoGrn / InventorySync writes ────────────────────────────────────────
+    # Ported from khanal_tech_integrations/unicommerce/workers/po_grn.py and
+    # inventory.py. All three PO/GRN endpoints take the facility as an HTTP
+    # header, not a body field -- confirmed in the Frappe source's
+    # _uc_session() (extra_headers={"Facility": facility, ...}), unlike the
+    # order/return search endpoints above which pass facilityCodes in the body.
+
+    def create_po_approved(self, vendor_code: str, items: list[dict], facility_code: str) -> dict:
+        """items: [{"itemSKU": str, "quantity": float}, ...], already
+        aggregated per SKU by the caller (UC rejects duplicate-SKU PO
+        lines). Returns the raw response -- caller reads purchaseOrderCode."""
+        body = {
+            "vendorCode": vendor_code,
+            "purchaseOrderItems": [
+                {"itemSKU": it["itemSKU"], "quantity": it["quantity"], "unitPrice": 0, "taxTypeCode": None}
+                for it in items
+            ],
+        }
+        extra_headers = {"Facility": facility_code, "Content-Type": "application/json"}
+        return self._post_with_reauth("services/rest/v1/purchase/purchaseOrder/createApproved", body, extra_headers=extra_headers)
+
+    def create_inflow_receipt(self, po_code: str, invoice_number: str, invoice_date_uc: str, facility_code: str) -> dict:
+        """invoice_date_uc: already UC-formatted (see _to_uc_date). Returns
+        the raw response -- caller reads inflowReceiptCode."""
+        body = {
+            "wsGRN": {
+                "vendorInvoiceNumber": invoice_number,
+                "vendorInvoiceDate": invoice_date_uc,
+                "currencyCode": "INR",
+            },
+            "purchaseOrderCode": po_code,
+            "vendorInvoiceDateCheckDisable": True,
+        }
+        extra_headers = {"Facility": facility_code, "Content-Type": "application/json"}
+        return self._post_with_reauth("services/rest/v1/purchase/inflowReceipt/create", body, extra_headers=extra_headers)
+
+    def add_grn_item(self, grn_code: str, item: dict, facility_code: str) -> dict:
+        """item: {"skuCode", "quantity", "unitPrice", "manufacturingDate",
+        "expiry", "wsBatchDetail": {"wsBatchGroupFieldValue": {...}}} --
+        see pogrn.py for how this is built from a SAP transfer line."""
+        body = {"inflowReceiptCode": grn_code, "inflowReceiptItem": item}
+        extra_headers = {"Facility": facility_code, "Content-Type": "application/json"}
+        return self._post_with_reauth("services/rest/v1/purchase/inflowReceipt/addItemSKU", body, extra_headers=extra_headers)
+
+    def adjust_inventory_bulk(self, adjustments: list[dict], facility_code: str) -> dict:
+        """adjustments: [{"itemSKU", "quantity", "shelfCode", "inventoryType",
+        "adjustmentType": "REMOVE", "facilityCode", "remarks"}, ...]."""
+        body = {"inventoryAdjustments": adjustments}
+        extra_headers = {"Facility": facility_code}
+        return self._post_with_reauth("services/rest/v1/inventory/adjust/bulk", body, extra_headers=extra_headers)
+
     def get_return_detail(self, code: str, facility: str | None = None) -> dict:
         """RP-prefixed codes -> reversePickupCode; other codes (RTO search
         results) -> shipmentCode."""

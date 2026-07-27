@@ -22,7 +22,9 @@ these were ported from for the exact semantics each map drives):
   "max_retry_attempts": 8,
   "posting_timeout_mins": 5,
   "ec_fg_fefo_fallback": false,
-  "vendor_code": "EC-DIS"
+  "vendor_code": "EC-B2C"    -- UC PO vendor code for PoGrn (createApproved);
+                             -- matches the Frappe source's po_grn.py VENDOR_CODE,
+                             -- not the "EC-DIS" this field previously defaulted to
 }
 """
 
@@ -58,7 +60,7 @@ class UnicommerceSettings:
     max_retry_attempts: int = 8
     posting_timeout_mins: int = 5
     ec_fg_fefo_fallback: bool = False
-    vendor_code: str = "EC-DIS"
+    vendor_code: str = "EC-B2C"
 
 
 _settings_cache: UnicommerceSettings | None = None
@@ -101,7 +103,7 @@ def _from_dict(data: dict) -> UnicommerceSettings:
         max_retry_attempts=int(data.get("max_retry_attempts") or 8),
         posting_timeout_mins=int(data.get("posting_timeout_mins") or 5),
         ec_fg_fefo_fallback=bool(data.get("ec_fg_fefo_fallback") or False),
-        vendor_code=data.get("vendor_code") or "EC-DIS",
+        vendor_code=data.get("vendor_code") or "EC-B2C",
     )
 
 
