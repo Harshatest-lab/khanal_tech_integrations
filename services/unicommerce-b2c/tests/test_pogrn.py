@@ -58,6 +58,10 @@ def test_build_grn_items_one_entry_per_batch():
     assert result[0]["quantity"] == 54.0
     assert result[0]["wsBatchDetail"]["wsBatchGroupFieldValue"]["vendorBatchNumber"] == "H202409D11D26"
     assert result[0]["expiry"] == "2027-04-10T00:00:00.000Z"
+    # Regression: UC's "SAP_BATCHCODE_WITH_EXPDATE" batch group rejects a
+    # third field ("mfd") with "Extra fields values are present" --
+    # confirmed live against a real PO (PO8975). Only these two belong here.
+    assert set(result[0]["wsBatchDetail"]["wsBatchGroupFieldValue"].keys()) == {"vendorBatchNumber", "expiryDate"}
 
 
 def test_build_grn_items_falls_back_to_line_qty_when_no_batches():

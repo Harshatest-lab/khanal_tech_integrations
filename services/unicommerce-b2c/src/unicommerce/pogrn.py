@@ -81,10 +81,17 @@ def _grn_item(sku: str, qty: float, expiry: str | None, mfg: str | None, batch_n
         "manufacturingDate": mfg_uc,
         "expiry": expiry_uc,
         "wsBatchDetail": {
+            # This tenant's batch group ("SAP_BATCHCODE_WITH_EXPDATE" --
+            # confirmed live via getPurchaseOrderDetails on a real PO
+            # item) rejects anything beyond these two fields with "Extra
+            # fields values are present" -- confirmed live, addItemSKU
+            # failed on a real PO (PO8975) with "mfd" included. Unlike the
+            # Frappe source's equivalent (client/sap.py), which also sends
+            # "mfd", so this may be latent there too if that code path is
+            # ever actually exercised against this same batch group.
             "wsBatchGroupFieldValue": {
                 "vendorBatchNumber": batch_number or "NA",
                 "expiryDate": expiry_uc,
-                "mfd": mfg_uc,
             },
         },
     }
