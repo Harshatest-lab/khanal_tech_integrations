@@ -897,3 +897,266 @@ def update_reconciliation_diffs(conn: psycopg.Connection, uniware_id: str, tax_e
             ),
         )
     conn.commit()
+
+
+# ── PoGrn: SAP inbound transfer -> UC Purchase Order + GRN ────────────────
+# States: pending -> processing (transient claim) -> po_created (committed
+# right after PO creation succeeds, before any GRN round starts) -> grn_done.
+# A single "processing" sentinel covers both the PO and GRN steps -- which
+# sub-step still needs doing is read from uc_po_id, not a separate status
+# value per step. This means claim_pogrn's WHERE (pending, po_created) is
+# always a safe re-entry point: a crash mid-processing never leaves a row
+# unable to resume, as long as mark_pogrn_po_created's commit happens
+# before any GRN round is attempted -- there's no UC sandbox to safely
+# absorb a duplicate PO from a naive retry.
+
+def stage_pogrn_transfer(conn: psycopg.Connection, sap_doc_entry: int, from_warehouse: str, to_warehouse: str, line_items: list[dict]) -> bool:
+    """First-seen insert (the polling cursor's "evaluated" marker). Returns
+    True if this is a new row, False if it already existed."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO unicommerce_pogrn_staging (sap_doc_entry, from_warehouse, to_warehouse, line_items)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (sap_doc_entry) DO NOTHING
+            """,
+            (sap_doc_entry, from_warehouse, to_warehouse, json.dumps(line_items, default=str)),
+        )
+        inserted = cur.rowcount == 1
+    conn.commit()
+    return inserted
+
+
+def claim_pogrn(conn: psycopg.Connection, sap_doc_entry: int) -> dict | None:
+    """Atomically claim for processing. Returns the claimed row (with
+    uc_po_id, so the caller knows whether PO creation already happened),
+    or None if another worker already claimed it or it's not in a
+    claimable state."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE unicommerce_pogrn_staging
+            SET status = 'processing', updated_at = now()
+            WHERE sap_doc_entry = %s AND status IN ('pending', 'po_created')
+            RETURNING sap_doc_entry, from_warehouse, to_warehouse, line_items, uc_po_id, uc_grn_ids, attempt_count
+            """,
+            (sap_doc_entry,),
+        )
+        row = cur.fetchone()
+    conn.commit()
+    if not row:
+        return None
+    cols = ["sap_doc_entry", "from_warehouse", "to_warehouse", "line_items", "uc_po_id", "uc_grn_ids", "attempt_count"]
+    return dict(zip(cols, row))
+
+
+def get_claimable_pogrn_doc_entries(conn: psycopg.Connection, limit: int) -> list[int]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT sap_doc_entry FROM unicommerce_pogrn_staging WHERE status IN ('pending', 'po_created') ORDER BY sap_doc_entry ASC LIMIT %s",
+            (limit,),
+        )
+        return [r[0] for r in cur.fetchall()]
+
+
+def mark_pogrn_po_created(conn: psycopg.Connection, sap_doc_entry: int, uc_po_id: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE unicommerce_pogrn_staging SET status = 'po_created', uc_po_id = %s, updated_at = now() WHERE sap_doc_entry = %s",
+            (uc_po_id, sap_doc_entry),
+        )
+    conn.commit()
+
+
+def append_pogrn_grn_id(conn: psycopg.Connection, sap_doc_entry: int, grn_id: str) -> None:
+    """Append one GRN id as its round succeeds -- a crash mid-rounds only
+    re-attempts what's not yet recorded here."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE unicommerce_pogrn_staging SET uc_grn_ids = uc_grn_ids || %s::jsonb, updated_at = now() WHERE sap_doc_entry = %s",
+            (json.dumps([grn_id]), sap_doc_entry),
+        )
+    conn.commit()
+
+
+def mark_pogrn_done(conn: psycopg.Connection, sap_doc_entry: int) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE unicommerce_pogrn_staging SET status = 'grn_done', last_error = '', updated_at = now() WHERE sap_doc_entry = %s",
+            (sap_doc_entry,),
+        )
+    conn.commit()
+
+
+def mark_pogrn_failed(conn: psycopg.Connection, sap_doc_entry: int, error: str, max_attempts: int) -> str:
+    """Returns the resulting status ('failed' or 'dead')."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT attempt_count FROM unicommerce_pogrn_staging WHERE sap_doc_entry = %s", (sap_doc_entry,))
+        row = cur.fetchone()
+        attempt = int((row[0] if row else 0) or 0) + 1
+        new_status = "dead" if attempt >= max_attempts else "failed"
+        cur.execute(
+            "UPDATE unicommerce_pogrn_staging SET status = %s, attempt_count = %s, last_error = %s, updated_at = now() WHERE sap_doc_entry = %s",
+            (new_status, attempt, error[:2000], sap_doc_entry),
+        )
+    conn.commit()
+    return new_status
+
+
+def recover_failed_pogrn(conn: psycopg.Connection, limit: int, max_attempts: int, max_hours: int) -> dict:
+    """Flat 30-min cooldown before retry, escalating to 'dead' past the
+    cap -- mirrors recover_batch_hold_orders' idiom. A retried row resumes
+    at 'po_created' (not 'pending') if a PO already exists, so it never
+    re-attempts PO creation."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT sap_doc_entry, uc_po_id, attempt_count, created_at, updated_at
+            FROM unicommerce_pogrn_staging WHERE status = 'failed'
+            ORDER BY updated_at ASC LIMIT %s
+            """,
+            (limit,),
+        )
+        rows = cur.fetchall()
+        recovered = escalated = 0
+        for sap_doc_entry, uc_po_id, attempt_count, created_at, updated_at in rows:
+            cur.execute("SELECT EXTRACT(EPOCH FROM (now() - %s)) / 3600.0", (created_at,))
+            age_hours = float(cur.fetchone()[0] or 0)
+            if int(attempt_count or 0) >= max_attempts or age_hours >= max_hours:
+                cur.execute("UPDATE unicommerce_pogrn_staging SET status = 'dead', updated_at = now() WHERE sap_doc_entry = %s", (sap_doc_entry,))
+                escalated += 1
+                continue
+            cur.execute("SELECT EXTRACT(EPOCH FROM (now() - %s)) / 60.0", (updated_at,))
+            cooldown_elapsed_min = float(cur.fetchone()[0] or 0)
+            if cooldown_elapsed_min < 30:
+                continue
+            resume_status = "po_created" if uc_po_id else "pending"
+            cur.execute("UPDATE unicommerce_pogrn_staging SET status = %s, updated_at = now() WHERE sap_doc_entry = %s", (resume_status, sap_doc_entry))
+            recovered += 1
+    conn.commit()
+    return {"recovered": recovered, "escalated": escalated}
+
+
+def get_pogrn_transfer(conn: psycopg.Connection, sap_doc_entry: int) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT sap_doc_entry, from_warehouse, to_warehouse, line_items, status, uc_po_id, uc_grn_ids, attempt_count, last_error FROM unicommerce_pogrn_staging WHERE sap_doc_entry = %s",
+            (sap_doc_entry,),
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    cols = ["sap_doc_entry", "from_warehouse", "to_warehouse", "line_items", "status", "uc_po_id", "uc_grn_ids", "attempt_count", "last_error"]
+    return dict(zip(cols, row))
+
+
+# ── InventorySync: SAP outbound transfer -> UC inventory decrement ────────
+# Simpler single-write state machine: pending -> processing -> synced,
+# same failed/dead + recovery idiom as PoGrn.
+
+def stage_inventory_sync_transfer(conn: psycopg.Connection, sap_doc_entry: int, from_warehouse: str, to_warehouse: str, line_items: list[dict]) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO unicommerce_inventory_sync_staging (sap_doc_entry, from_warehouse, to_warehouse, line_items)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (sap_doc_entry) DO NOTHING
+            """,
+            (sap_doc_entry, from_warehouse, to_warehouse, json.dumps(line_items, default=str)),
+        )
+        inserted = cur.rowcount == 1
+    conn.commit()
+    return inserted
+
+
+def claim_inventory_sync(conn: psycopg.Connection, sap_doc_entry: int) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE unicommerce_inventory_sync_staging
+            SET status = 'processing', updated_at = now()
+            WHERE sap_doc_entry = %s AND status = 'pending'
+            RETURNING sap_doc_entry, from_warehouse, to_warehouse, line_items, attempt_count
+            """,
+            (sap_doc_entry,),
+        )
+        row = cur.fetchone()
+    conn.commit()
+    if not row:
+        return None
+    cols = ["sap_doc_entry", "from_warehouse", "to_warehouse", "line_items", "attempt_count"]
+    return dict(zip(cols, row))
+
+
+def get_claimable_inventory_sync_doc_entries(conn: psycopg.Connection, limit: int) -> list[int]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT sap_doc_entry FROM unicommerce_inventory_sync_staging WHERE status = 'pending' ORDER BY sap_doc_entry ASC LIMIT %s",
+            (limit,),
+        )
+        return [r[0] for r in cur.fetchall()]
+
+
+def mark_inventory_synced(conn: psycopg.Connection, sap_doc_entry: int) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE unicommerce_inventory_sync_staging SET status = 'synced', last_error = '', updated_at = now() WHERE sap_doc_entry = %s",
+            (sap_doc_entry,),
+        )
+    conn.commit()
+
+
+def mark_inventory_sync_failed(conn: psycopg.Connection, sap_doc_entry: int, error: str, max_attempts: int) -> str:
+    with conn.cursor() as cur:
+        cur.execute("SELECT attempt_count FROM unicommerce_inventory_sync_staging WHERE sap_doc_entry = %s", (sap_doc_entry,))
+        row = cur.fetchone()
+        attempt = int((row[0] if row else 0) or 0) + 1
+        new_status = "dead" if attempt >= max_attempts else "failed"
+        cur.execute(
+            "UPDATE unicommerce_inventory_sync_staging SET status = %s, attempt_count = %s, last_error = %s, updated_at = now() WHERE sap_doc_entry = %s",
+            (new_status, attempt, error[:2000], sap_doc_entry),
+        )
+    conn.commit()
+    return new_status
+
+
+def recover_failed_inventory_sync(conn: psycopg.Connection, limit: int, max_attempts: int, max_hours: int) -> dict:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT sap_doc_entry, attempt_count, created_at, updated_at
+            FROM unicommerce_inventory_sync_staging WHERE status = 'failed'
+            ORDER BY updated_at ASC LIMIT %s
+            """,
+            (limit,),
+        )
+        rows = cur.fetchall()
+        recovered = escalated = 0
+        for sap_doc_entry, attempt_count, created_at, updated_at in rows:
+            cur.execute("SELECT EXTRACT(EPOCH FROM (now() - %s)) / 3600.0", (created_at,))
+            age_hours = float(cur.fetchone()[0] or 0)
+            if int(attempt_count or 0) >= max_attempts or age_hours >= max_hours:
+                cur.execute("UPDATE unicommerce_inventory_sync_staging SET status = 'dead', updated_at = now() WHERE sap_doc_entry = %s", (sap_doc_entry,))
+                escalated += 1
+                continue
+            cur.execute("SELECT EXTRACT(EPOCH FROM (now() - %s)) / 60.0", (updated_at,))
+            cooldown_elapsed_min = float(cur.fetchone()[0] or 0)
+            if cooldown_elapsed_min < 30:
+                continue
+            cur.execute("UPDATE unicommerce_inventory_sync_staging SET status = 'pending', updated_at = now() WHERE sap_doc_entry = %s", (sap_doc_entry,))
+            recovered += 1
+    conn.commit()
+    return {"recovered": recovered, "escalated": escalated}
+
+
+def get_inventory_sync_transfer(conn: psycopg.Connection, sap_doc_entry: int) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT sap_doc_entry, from_warehouse, to_warehouse, line_items, status, attempt_count, last_error FROM unicommerce_inventory_sync_staging WHERE sap_doc_entry = %s",
+            (sap_doc_entry,),
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    cols = ["sap_doc_entry", "from_warehouse", "to_warehouse", "line_items", "status", "attempt_count", "last_error"]
+    return dict(zip(cols, row))
