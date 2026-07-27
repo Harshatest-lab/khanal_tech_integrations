@@ -174,6 +174,18 @@ functions:
           rate: cron(22,52 * * * ? *)
           enabled: false
 
+  unicommerceRecon:
+    handler: src.handlers.recon_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+    events:
+      # Same 30-min offset pattern as the other flows. Read-only against
+      # SAP (only writes to our own Postgres), so unlike pogrn there's
+      # no real-write risk gating this -- still deployed disabled until
+      # verified live against dev, matching every other cutover here.
+      - schedule:
+          rate: cron(27,57 * * * ? *)
+          enabled: false
+
   unicommerceDashboardApi:
     handler: src.handlers.dashboard_handler
     memorySize: 512

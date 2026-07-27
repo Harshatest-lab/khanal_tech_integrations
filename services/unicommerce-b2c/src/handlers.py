@@ -4,10 +4,10 @@ Every handler alerts via SES on an unhandled crash and re-raises so the
 invocation is marked failed in CloudWatch (EventBridge metrics stay
 honest) -- same pattern as amazon-us-b2c's handlers.py.
 
-fetch (orders+returns), postInvoices, postCreditNotes, pogrn, and the
-read-only dashboard API are implemented -- see
-docs/migration/03-unicommerce-b2c.md for the full plan (recon still to
-come; inventorySync was built then deliberately removed -- see
+fetch (orders+returns), postInvoices, postCreditNotes, pogrn, recon, and
+the read-only dashboard API are implemented -- see
+docs/migration/03-unicommerce-b2c.md for the full plan (inventorySync
+was built then deliberately removed -- see
 docs/superpowers/specs/2026-07-27-pogrn-inventorysync-design.md, it was
 solving a problem that doesn't exist here: UC decrements batch inventory
 itself on order fulfillment, and EC-FG<->EC-B2C / AMZ-* outward SAP
@@ -31,7 +31,7 @@ _SRC = Path(__file__).resolve().parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unicommerce import credit_notes, dashboard_queries, fetch_sync, pogrn, post_invoices, store
+from unicommerce import credit_notes, dashboard_queries, fetch_sync, pogrn, post_invoices, recon, store
 from unicommerce.alerts import send_alert
 
 logging.getLogger().setLevel(logging.INFO)
@@ -150,6 +150,28 @@ def pogrn_handler(event, context):
             return pogrn.process_ready_transfers(conn, limit=int(ev.get("limit") or 20), dry_run=dry_run)
 
     return _run("pogrn", _go)
+
+
+def recon_handler(event, context):
+    """{"limit": 200?, "start_date": "YYYY-MM-DD"?, "end_date": "YYYY-MM-DD"?}
+    — bulk sweep re-verifying posted invoices/CNs against SAP for the
+    current+previous calendar month (default window if dates omitted).
+    {"uniware_id": str} — manual single-order retry, bypassing the window
+    and limit. Read-only against SAP; only writes to our own Postgres."""
+    ev = event or {}
+
+    def _go():
+        with store.connect() as conn:
+            if ev.get("uniware_id"):
+                return recon.recon_one_order(conn, ev["uniware_id"])
+            return recon.refresh_recon(
+                conn,
+                limit=int(ev.get("limit") or recon.DEFAULT_LIMIT),
+                start_date=ev.get("start_date"),
+                end_date=ev.get("end_date"),
+            )
+
+    return _run("recon", _go)
 
 
 # ── Dashboard HTTP API (read-only + thin retry actions) ───────────────────
