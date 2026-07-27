@@ -1,10 +1,61 @@
 # PoGrn + InventorySync design
 
-**Status:** Approved (design), pending implementation plan.
+**Status:** PoGrn built, tested, deployed, and confirmed with a real live
+write (PO8975, DocEntry 53974 -- fully received, 0 pending). **InventorySync
+was built, then removed the same day** -- see Correction below. This spec
+is kept as-is (not rewritten) so the reasoning that led to the removal
+stays visible.
 **Repo:** `Khanal_tech_serverless`, `services/unicommerce-b2c`.
 **Date:** 2026-07-27.
 
-## Why
+## Correction (2026-07-27, after real-write testing): InventorySync removed
+
+The outward mechanism this spec describes below -- watch SAP transfers out
+of `EC-FG`/`AMZ-*`, mirror them as a manual UC `inventory/adjust/bulk`
+REMOVE call -- **was built, deployed to dev, and then found to be solving
+a problem that doesn't exist**, confirmed directly with the user:
+
+- `EC-FG`, `EC-B2C`, and every `AMZ-*` warehouse are **same-company internal
+  warehouses**. A SAP transfer between them is internal bookkeeping, not a
+  "goods left the business" event.
+- **Unicommerce already decrements a batch's inventory itself** when a
+  sale order placed through UC is fulfilled/shipped -- this happens inside
+  UC's own order-processing, with no action needed from this codebase.
+- **`PostInvoices`** (posting the SAP AR Invoice for that same order) is
+  what corresponds to the batch decreasing -- already built, already
+  verified live, unrelated to this spec.
+
+So a manual outward REMOVE call for an `EC-FG→EC-B2C` or `AMZ-*` outward
+transfer would have **double-decremented** real UC inventory for stock UC
+had already correctly reduced on its own the moment the order shipped.
+
+This was only discovered because live-write testing hit a real wall: UC's
+batch-tracked REMOVE requires UC's own internal `batchCode`, which turned
+out to be undiscoverable through any endpoint this codebase (ours or the
+Frappe source) actually calls -- `itemTypeInventory/get` never returns a
+batch code for this tenant, for any item, in stock or not. Chasing that
+wall down (confirmed via `documentation.unicommerce.com`: there's a
+separate, purpose-built `POST Adjust Batchwise Inventory (Multiple)` API
+neither codebase uses) is what surfaced the deeper question of whether
+this flow should exist at all -- and it shouldn't.
+
+**Removed:** `inventory_sync.py`, `tests/test_inventory_sync.py`,
+`unicommerceInventorySync` (serverless.yml + handlers.py),
+`unicommerce_inventory_sync_staging` (dropped from dev Postgres and
+`sql/unicommerce_b2c.sql`). **Kept:** `uc_client.py`'s
+`adjust_inventory_bulk` / `get_item_type_inventory` (harmless, unused --
+no cost to leaving them), and everything PoGrn-related, including
+`stock_transfers.py`'s `outward_lines()` helper (unused now, low cost to
+keep, would need to be exercised again if this is ever revisited).
+
+**Phase 1's 7-flow count**: still 6 of 7 built (`Fetch`, `PostInvoices`,
+`PostCreditNotes`, `DashboardApi`, `PoGrn`, and now confirmed
+`InventorySync` isn't actually a distinct 7th flow -- it was never a real
+requirement, just an assumption carried over from the Frappe source
+without checking whether UC's own order fulfillment already covered it).
+Only `Recon` remains.
+
+## Why (original, as approved -- see Correction above for what changed)
 
 Two of the seven Unicommerce→Lambda flows are still unbuilt: `PoGrn` (mirror a
 SAP inbound stock transfer into Unicommerce as a PO + GRN, so UC's own

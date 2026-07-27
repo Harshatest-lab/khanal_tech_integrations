@@ -4,10 +4,16 @@ Every handler alerts via SES on an unhandled crash and re-raises so the
 invocation is marked failed in CloudWatch (EventBridge metrics stay
 honest) -- same pattern as amazon-us-b2c's handlers.py.
 
-fetch (orders+returns), postInvoices, postCreditNotes, pogrn,
-inventorySync, and the read-only dashboard API are implemented -- see
+fetch (orders+returns), postInvoices, postCreditNotes, pogrn, and the
+read-only dashboard API are implemented -- see
 docs/migration/03-unicommerce-b2c.md for the full plan (recon still to
-come).
+come; inventorySync was built then deliberately removed -- see
+docs/superpowers/specs/2026-07-27-pogrn-inventorysync-design.md, it was
+solving a problem that doesn't exist here: UC decrements batch inventory
+itself on order fulfillment, and EC-FG<->EC-B2C / AMZ-* outward SAP
+transfers are same-company internal bookkeeping, not a real removal
+event -- a manual UC REMOVE call for those would have double-decremented
+real inventory).
 """
 
 from __future__ import annotations
@@ -25,7 +31,7 @@ _SRC = Path(__file__).resolve().parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unicommerce import credit_notes, dashboard_queries, fetch_sync, inventory_sync, pogrn, post_invoices, store
+from unicommerce import credit_notes, dashboard_queries, fetch_sync, pogrn, post_invoices, store
 from unicommerce.alerts import send_alert
 
 logging.getLogger().setLevel(logging.INFO)
@@ -144,22 +150,6 @@ def pogrn_handler(event, context):
             return pogrn.process_ready_transfers(conn, limit=int(ev.get("limit") or 20), dry_run=dry_run)
 
     return _run("pogrn", _go)
-
-
-def inventory_sync_handler(event, context):
-    """{"limit": 20?, "dry_run": bool?} — bulk run (poll SAP transfers ->
-    stage -> claim -> UC inventory adjust). {"sap_doc_entry": int,
-    "dry_run": bool?} — manual single-transfer retry/dry-run."""
-    ev = event or {}
-
-    def _go():
-        with store.connect() as conn:
-            dry_run = bool(ev.get("dry_run") or False)
-            if ev.get("sap_doc_entry"):
-                return inventory_sync.process_one_transfer(conn, int(ev["sap_doc_entry"]), dry_run=dry_run)
-            return inventory_sync.process_ready_transfers(conn, limit=int(ev.get("limit") or 20), dry_run=dry_run)
-
-    return _run("inventory_sync", _go)
 
 
 # ── Dashboard HTTP API (read-only + thin retry actions) ───────────────────
