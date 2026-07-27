@@ -45,9 +45,13 @@ def _as_list(value) -> list:
     return value or []
 
 
-def build_adjustments(line_items: list[dict], remarks: str) -> list[dict]:
+def build_adjustments(line_items: list[dict], remarks: str, facility: str) -> list[dict]:
     """One REMOVE adjustment per SAP batch line -- batch/qty come straight
-    from the transfer's own BatchNumbers, no UC shelf-stock lookup needed."""
+    from the transfer's own BatchNumbers, no UC shelf-stock lookup needed.
+    facility must be repeated inside each adjustment, not just the request's
+    Facility header -- confirmed live, UC rejects a per-item adjustment
+    missing it with "INVALID_FACILITY_CODE" even though the header is set
+    correctly, matching the Frappe source's own per-item facilityCode."""
     adjustments: list[dict] = []
     for line in line_items:
         sku = str(line.get("ItemCode") or "").strip()
@@ -57,22 +61,23 @@ def build_adjustments(line_items: list[dict], remarks: str) -> list[dict]:
         if not batches:
             qty = float(line.get("Quantity") or 0)
             if qty > 0:
-                adjustments.append(_adjustment(sku, qty, remarks))
+                adjustments.append(_adjustment(sku, qty, remarks, facility))
             continue
         for b in batches:
             qty = float(b.get("Quantity") or 0)
             if qty > 0:
-                adjustments.append(_adjustment(sku, qty, remarks))
+                adjustments.append(_adjustment(sku, qty, remarks, facility))
     return adjustments
 
 
-def _adjustment(sku: str, qty: float, remarks: str) -> dict:
+def _adjustment(sku: str, qty: float, remarks: str, facility: str) -> dict:
     return {
         "itemSKU": sku,
         "quantity": qty,
         "shelfCode": _DEFAULT_SHELF_CODE,
         "inventoryType": _DEFAULT_INVENTORY_TYPE,
         "adjustmentType": "REMOVE",
+        "facilityCode": facility,
         "remarks": remarks,
     }
 
@@ -113,7 +118,7 @@ def _process_claimed(claimed: dict, uc: UcClient | None, settings: UnicommerceSe
         raise ValueError(f"No UC facility mapping for SAP warehouse {from_warehouse!r} (check settings.warehouse_map)")
 
     remarks = f"Outward stock transfer - SAP DocEntry {sap_doc_entry}"
-    adjustments = build_adjustments(line_items, remarks)
+    adjustments = build_adjustments(line_items, remarks, facility)
     if not adjustments:
         raise ValueError("No valid SKU/quantity in transfer line items")
 
