@@ -30,9 +30,16 @@ def parse_source_datetime(raw_value) -> datetime | None:
         except Exception:
             return None
     try:
-        return datetime.fromisoformat(str(raw_value).replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(str(raw_value).replace("Z", "+00:00"))
     except Exception:
         return None
+    # UC sometimes sends ISO strings with no offset at all (unlike the epoch
+    # path above, which always produces an aware datetime) -- fromisoformat
+    # then returns naive, and comparing that against the aware datetimes
+    # elsewhere in the cursor logic crashes with "can't compare offset-naive
+    # and offset-aware datetimes" (hit live in fetch_returns). This function
+    # promises an aware UTC datetime; enforce it on every path.
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
 def format_cursor(value: datetime) -> str:
