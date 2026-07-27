@@ -99,8 +99,13 @@ def bulk_manage_batch_numbers(item_codes: list[str] | set[str]) -> dict[str, boo
             for start in range(0, len(cleaned), _CHUNK_SIZE):
                 chunk = cleaned[start : start + _CHUNK_SIZE]
                 placeholders = ",".join(["?"] * len(chunk))
+                # "ManBtchNum" is OITM's real HANA column for this flag --
+                # "ManageBatchNumbers" is only the SAP Service Layer OData
+                # property name for the same field, confirmed against
+                # SYS.TABLE_COLUMNS (both india_test's and OBTQ/OBTN's
+                # columns already matched; this was the one wrong name).
                 cur.execute(
-                    f'SELECT "ItemCode", "ManageBatchNumbers" FROM "OITM" WHERE "ItemCode" IN ({placeholders})',
+                    f'SELECT "ItemCode", "ManBtchNum" FROM "OITM" WHERE "ItemCode" IN ({placeholders})',
                     list(chunk),
                 )
                 for row in cur.fetchall():
