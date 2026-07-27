@@ -318,7 +318,7 @@ def post_ready_orders(
 
     settings = get_settings()
 
-    series_ok, series_msg = sap_client.validate_active_series()
+    series_ok, series_msg = sap_client.validate_active_series(settings)
     if not series_ok:
         logger.error("post_invoices series guard ABORTED: %s", series_msg)
         return {"processed": 0, "posted": 0, "batch_hold": 0, "verify": 0, "failed": 0, "abort_reason": series_msg}

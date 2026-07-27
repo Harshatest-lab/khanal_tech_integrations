@@ -289,13 +289,15 @@ def post_credit_note_with_series_fallback(payload: dict) -> dict:
 # real production incident (comment in the Frappe source: re-posting into
 # a stale FY series nearly double-booked 148 cancelled March orders).
 
-_KNOWN_SERIES_PREFIXES = {"KAB2C", "TNB2C", "MHB2C"}
 
-
-def _current_fy_end_suffix() -> str:
+def _current_fy_period_indicator() -> str:
+    """SAP's PeriodIndicator format, e.g. "FY2627" for the year starting
+    April 2026 -- confirmed against live NNM1 rows (india_test), which
+    consistently pair PeriodIndicator "FYxxyy" with series named
+    "...xx" (the FY-start year's suffix), not "...yy"."""
     today = datetime.today()
     fy_start = today.year if today.month >= 4 else today.year - 1
-    return str(fy_start + 1)[-2:]
+    return f"FY{str(fy_start)[-2:]}{str(fy_start + 1)[-2:]}"
 
 
 def _pick_active_invoice_series() -> int | None:
@@ -331,35 +333,65 @@ def _pick_active_invoice_series() -> int | None:
     return None
 
 
-def validate_active_series() -> tuple[bool, str]:
-    """Abort-the-run guard: confirms the active default AR Invoice series
-    belongs to the current financial year before any posting starts."""
-    curr_suffix = _current_fy_end_suffix()
-    prev_suffix = str(int(curr_suffix) - 1).zfill(2)
-    good = {f"{p}{curr_suffix}" for p in _KNOWN_SERIES_PREFIXES}
-    old = {f"{p}{prev_suffix}" for p in _KNOWN_SERIES_PREFIXES}
+def validate_active_series(settings) -> tuple[bool, str]:
+    """Abort-the-run guard: confirms every SAP series actually referenced
+    by Unicommerce Settings (ar_invoice_series_map, its ar_invoice_series
+    fallback, and credit_note_series) belongs to the current financial
+    year, before any posting starts.
 
-    active_series_id = _pick_active_invoice_series()
-    if not active_series_id:
-        logger.warning("validate_active_series: could not resolve active series ID -- proceeding")
-        return True, "Series ID could not be resolved -- proceeding without validation"
+    Previously checked SAP's company-wide "default" AR Invoice series
+    instead -- that's a different, unrelated series (confirmed live: the
+    default resolved to a generic "AR2026", not any of the per-channel
+    series orders actually post under) and the lookup itself queried a
+    "Series" OData entity that doesn't exist in this SAP B1 Service Layer
+    version (always 400 "Unrecognized resource path", silently swallowed
+    -- this guard has never actually validated anything, including in
+    the Frappe source it was ported from). Checking the settings' own
+    series IDs via SeriesService_GetSeries (POST, not a raw entity query)
+    directly protects against the real failure mode: forgetting to bump
+    ar_invoice_series_map/credit_note_series at FY rollover -- the exact
+    incident (148 cancelled March orders) this guard exists to prevent.
+    """
+    current_period = _current_fy_period_indicator()
 
-    try:
-        status, body = _request("POST", "SeriesService_GetSeries", {"SeriesParams": {"Series": int(active_series_id)}})
-        series_name = str(body.get("Name") or "").strip() if isinstance(body, dict) else ""
-    except Exception as exc:
-        logger.warning("validate_active_series: could not fetch series name: %s -- proceeding", exc)
-        return True, f"Series name lookup failed ({exc}) -- proceeding without validation"
+    series_ids: set[int] = set()
+    for value in (settings.ar_invoice_series_map or {}).values():
+        if value:
+            series_ids.add(int(value))
+    if settings.ar_invoice_series:
+        series_ids.add(int(settings.ar_invoice_series))
+    if settings.credit_note_series:
+        series_ids.add(int(settings.credit_note_series))
 
-    if series_name in good:
-        return True, f"Active series '{series_name}' is valid for the current financial year"
-    if series_name in old:
+    if not series_ids:
+        return True, "No series configured in settings -- nothing to validate"
+
+    stale: list[str] = []
+    unresolved: list[str] = []
+    for series_id in sorted(series_ids):
+        try:
+            status, body = _request("POST", "SeriesService_GetSeries", {"SeriesParams": {"Series": series_id}})
+        except Exception as exc:
+            unresolved.append(f"{series_id} (lookup failed: {exc})")
+            continue
+        if status != 200 or not isinstance(body, dict):
+            unresolved.append(f"{series_id} (HTTP {status})")
+            continue
+        period = str(body.get("PeriodIndicator") or "").strip()
+        name = str(body.get("Name") or "").strip() or "unnamed"
+        if period and period != current_period:
+            stale.append(f"{series_id} ({name}, {period})")
+
+    if stale:
         return False, (
-            f"POSTING BLOCKED -- active SAP AR Invoice series is '{series_name}' (previous financial year). "
-            f"Update the default series to one of {sorted(good)} in SAP B1 and retry."
+            f"POSTING BLOCKED -- these configured series are not in the current financial year "
+            f"({current_period}): {'; '.join(stale)}. Update ar_invoice_series_map / ar_invoice_series / "
+            f"credit_note_series in Unicommerce Settings and retry."
         )
-    logger.warning("validate_active_series: unrecognised series '%s' -- proceeding", series_name)
-    return True, f"Series '{series_name}' is not in the known list -- proceeding"
+    if unresolved:
+        logger.warning("validate_active_series: could not resolve %s -- proceeding", "; ".join(unresolved))
+        return True, f"{len(unresolved)} series could not be resolved ({'; '.join(unresolved)}) -- proceeding without full validation"
+    return True, f"All {len(series_ids)} configured series are valid for {current_period}"
 
 
 def _fy_period_indicator_for_doc_date(doc_date: str | None) -> str | None:
