@@ -878,7 +878,10 @@ def update_cn_reconciliation(conn: psycopg.Connection, uc_order_id: str, unit_ac
     conn.commit()
 
 
-def update_reconciliation_diffs(conn: psycopg.Connection, uniware_id: str, tax_expected: float, actual_tax: float, unit_diff: float, expected_unit: float, actual_unit: float) -> None:
+def update_reconciliation_diffs(
+    conn: psycopg.Connection, uniware_id: str, tax_expected: float, actual_tax: float,
+    unit_diff: float, expected_unit: float, actual_unit: float, mismatch_reason: str = "",
+) -> None:
     is_matched = (abs(tax_expected - actual_tax) <= 1.0) and (unit_diff <= 1.0)
     with conn.cursor() as cur:
         cur.execute(
@@ -886,13 +889,15 @@ def update_reconciliation_diffs(conn: psycopg.Connection, uniware_id: str, tax_e
             UPDATE unicommerce_orders SET
               ar_invoice_tax_actual = %s, ar_invoice_tax_expected = %s, ar_invoice_tax_diff = %s,
               ar_invoice_unit_price_expected = %s, ar_invoice_unit_price_actual = %s, ar_invoice_unit_price_diff = %s,
-              ar_invoice_reconciled = %s, ar_invoice_reconciliation_status = %s
+              ar_invoice_reconciled = %s, ar_invoice_reconciliation_status = %s,
+              ar_invoice_mismatch_reason = %s
             WHERE uniware_id = %s
             """,
             (
                 actual_tax, round(tax_expected, 2), round(abs(tax_expected - actual_tax), 2),
                 round(expected_unit, 2), round(actual_unit, 2), round(unit_diff, 2),
                 int(is_matched), "Reconciled and matched with SAP" if is_matched else "Mismatch (SAP vs expected)",
+                "" if is_matched else mismatch_reason[:2000],
                 uniware_id,
             ),
         )
@@ -1047,4 +1052,79 @@ def get_pogrn_transfer(conn: psycopg.Connection, sap_doc_entry: int) -> dict | N
     if not row:
         return None
     cols = ["sap_doc_entry", "from_warehouse", "to_warehouse", "line_items", "status", "uc_po_id", "uc_grn_ids", "attempt_count", "last_error"]
+    return dict(zip(cols, row))
+
+
+# ── Recon: periodic re-verification + backfill ────────────────────────────
+# Read-only against SAP, writes only to our own Postgres -- no claim/state
+# machine needed at all (see docs/superpowers/specs/2026-07-27-recon-design.md).
+
+def get_recon_invoice_candidates(
+    conn: psycopg.Connection, start_date: str, end_date: str, limit: int,
+    min_tax_diff: float = 1.0, min_unit_price_diff: float = 1.0,
+) -> list[str]:
+    """uniware_ids of posted orders with an invoice, order_date in the
+    window, prioritized unreconciled-first then biggest-mismatch-first --
+    same idea as the Frappe source's refresh_recon ORDER BY."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT uniware_id FROM unicommerce_orders
+            WHERE pipeline_status = 'posted'
+              AND sap_ar_invoice_docentry IS NOT NULL AND sap_ar_invoice_docentry != ''
+              AND order_date BETWEEN %s AND %s
+              AND (
+                ar_invoice_reconciliation_status = ''
+                OR COALESCE(ar_invoice_tax_diff, 0) >= %s
+                OR COALESCE(ar_invoice_unit_price_diff, 0) >= %s
+              )
+            ORDER BY
+              CASE WHEN ar_invoice_reconciliation_status = '' THEN 0 ELSE 1 END ASC,
+              GREATEST(COALESCE(ar_invoice_tax_diff, 0), COALESCE(ar_invoice_unit_price_diff, 0)) DESC,
+              updated_at DESC
+            LIMIT %s
+            """,
+            (start_date, end_date, min_tax_diff, min_unit_price_diff, limit),
+        )
+        return [r[0] for r in cur.fetchall()]
+
+
+def get_recon_cn_candidates(conn: psycopg.Connection, start_date: str, end_date: str, limit: int) -> list[str]:
+    """uniware_ids of orders with a posted CN never yet reconciled. CN
+    can't mismatch by construction (SAP Credit Notes are "Copy From" the
+    base invoice -- see update_cn_reconciliation's docstring), so this is
+    backfill-only, no diff-based re-check."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT uniware_id FROM unicommerce_orders
+            WHERE sap_ar_creditnote_docentry IS NOT NULL AND sap_ar_creditnote_docentry != ''
+              AND order_date BETWEEN %s AND %s
+              AND ar_creditnote_reconciliation_status = ''
+            ORDER BY updated_at DESC
+            LIMIT %s
+            """,
+            (start_date, end_date, limit),
+        )
+        return [r[0] for r in cur.fetchall()]
+
+
+def get_order_for_recon(conn: psycopg.Connection, uniware_id: str) -> dict | None:
+    """Full order snapshot needed to rebuild the invoice payload for
+    reconciliation (order_json/channel_name/order_date -- get_order's
+    existing shape is scoped to credit-note prep and doesn't carry
+    these)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT uniware_id, channel_name, order_date, order_json,
+                   sap_ar_invoice_docentry, sap_ar_creditnote_docentry
+            FROM unicommerce_orders WHERE uniware_id = %s
+            """,
+            (uniware_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        cols = [d.name for d in cur.description]
     return dict(zip(cols, row))
