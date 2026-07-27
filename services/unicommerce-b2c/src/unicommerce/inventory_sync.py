@@ -2,17 +2,18 @@
 decrement.
 
 Ported from khanal_tech_integrations/unicommerce/workers/inventory.py,
-upgraded per docs/superpowers/specs/2026-07-27-pogrn-inventorysync-design.md:
+partly upgraded per docs/superpowers/specs/2026-07-27-pogrn-inventorysync-design.md:
 the Frappe source matches a pre-recorded batch number against a UC
 shelf-stock lookup (itemTypeInventory/get) to find shelfCode/inventoryType,
 silently skipping any line whose batch string doesn't match -- fragile,
-and an extra UC round-trip per SKU. We already have the authoritative
-batch + quantity straight from the SAP transfer itself (via
-stock_transfers.detail's BatchNumbers), so the batch-matching step is
-unnecessary; shelfCode/inventoryType use the same "DEFAULT"/
-"GOOD_INVENTORY" fallback the Frappe source already falls back to when
-no shelf match is found, since those are UC-side generic-inventory
-identifiers, not something SAP's transfer document carries.
+and unnecessary, since we already have the authoritative batch + quantity
+straight from the SAP transfer itself. That part of the lookup is
+dropped. shelfCode/inventoryType themselves still need a live UC lookup,
+though: confirmed live that these are real per-facility UC configuration
+(e.g. "Shelf_001"), not a generic value -- a made-up "DEFAULT" shelf
+code was rejected outright with INVALID_SHELF_CODE. So this keeps one UC
+read per unique SKU (cheaper than the Frappe source's per-batch-line
+lookup), just not for batch matching.
 """
 
 from __future__ import annotations
@@ -45,37 +46,59 @@ def _as_list(value) -> list:
     return value or []
 
 
-def build_adjustments(line_items: list[dict], remarks: str, facility: str) -> list[dict]:
+def resolve_shelf(uc: UcClient, sku: str, facility: str) -> tuple[str, str]:
+    """(shelfCode, inventoryType) for this SKU at this facility, from UC's
+    own existing inventory record -- falls back to a generic value only
+    if the facility genuinely has no inventory rows for this SKU at all
+    (e.g. a brand-new facility that's never received stock via UC), in
+    which case the adjustment will likely fail anyway since there's
+    nothing to decrement, but at least fails with a UC-side error rather
+    than us silently fabricating a shelf that was never real."""
+    rows = uc.get_item_type_inventory(sku, facility)
+    if not rows:
+        return _DEFAULT_SHELF_CODE, _DEFAULT_INVENTORY_TYPE
+    first = rows[0]
+    return str(first.get("shelf") or _DEFAULT_SHELF_CODE), str(first.get("type") or _DEFAULT_INVENTORY_TYPE)
+
+
+def build_adjustments(line_items: list[dict], remarks: str, facility: str, uc: UcClient) -> list[dict]:
     """One REMOVE adjustment per SAP batch line -- batch/qty come straight
-    from the transfer's own BatchNumbers, no UC shelf-stock lookup needed.
-    facility must be repeated inside each adjustment, not just the request's
-    Facility header -- confirmed live, UC rejects a per-item adjustment
-    missing it with "INVALID_FACILITY_CODE" even though the header is set
-    correctly, matching the Frappe source's own per-item facilityCode."""
+    from the transfer's own BatchNumbers (no UC lookup needed for that
+    part), but shelfCode/inventoryType are resolved from UC's own
+    inventory record per unique SKU (real per-facility config, see
+    resolve_shelf). facility must be repeated inside each adjustment, not
+    just the request's Facility header -- confirmed live, UC rejects a
+    per-item adjustment missing it with INVALID_FACILITY_CODE even
+    though the header is set correctly, matching the Frappe source's own
+    per-item facilityCode."""
     adjustments: list[dict] = []
+    shelf_cache: dict[str, tuple[str, str]] = {}
     for line in line_items:
         sku = str(line.get("ItemCode") or "").strip()
         if not sku:
             continue
+        if sku not in shelf_cache:
+            shelf_cache[sku] = resolve_shelf(uc, sku, facility)
+        shelf_code, inventory_type = shelf_cache[sku]
         batches = line.get("BatchNumbers") or []
         if not batches:
             qty = float(line.get("Quantity") or 0)
             if qty > 0:
-                adjustments.append(_adjustment(sku, qty, remarks, facility))
+                adjustments.append(_adjustment(sku, qty, remarks, facility, shelf_code, inventory_type))
             continue
         for b in batches:
             qty = float(b.get("Quantity") or 0)
             if qty > 0:
-                adjustments.append(_adjustment(sku, qty, remarks, facility))
+                adjustments.append(_adjustment(sku, qty, remarks, facility, shelf_code, inventory_type))
     return adjustments
 
 
-def _adjustment(sku: str, qty: float, remarks: str, facility: str) -> dict:
+def _adjustment(sku: str, qty: float, remarks: str, facility: str, shelf_code: str, inventory_type: str) -> dict:
     return {
         "itemSKU": sku,
         "quantity": qty,
-        "shelfCode": _DEFAULT_SHELF_CODE,
-        "inventoryType": _DEFAULT_INVENTORY_TYPE,
+        "shelfCode": shelf_code,
+        "inventoryType": inventory_type,
         "adjustmentType": "REMOVE",
         "facilityCode": facility,
         "remarks": remarks,
@@ -109,7 +132,11 @@ def fetch_new_transfers(conn, limit: int = 50) -> int:
     return staged
 
 
-def _process_claimed(claimed: dict, uc: UcClient | None, settings: UnicommerceSettings, dry_run: bool) -> dict:
+def _process_claimed(claimed: dict, uc: UcClient, settings: UnicommerceSettings, dry_run: bool) -> dict:
+    """uc is required even when dry_run=True -- resolving real shelf
+    codes is a read, not a write, and dry_run only needs to skip the
+    final adjust_inventory_bulk call, not UC reads used to build an
+    accurate preview."""
     sap_doc_entry = claimed["sap_doc_entry"]
     line_items = _as_list(claimed["line_items"])
     from_warehouse = str(line_items[0].get("FromWarehouseCode") or "") if line_items else str(claimed.get("from_warehouse") or "")
@@ -118,7 +145,7 @@ def _process_claimed(claimed: dict, uc: UcClient | None, settings: UnicommerceSe
         raise ValueError(f"No UC facility mapping for SAP warehouse {from_warehouse!r} (check settings.warehouse_map)")
 
     remarks = f"Outward stock transfer - SAP DocEntry {sap_doc_entry}"
-    adjustments = build_adjustments(line_items, remarks, facility)
+    adjustments = build_adjustments(line_items, remarks, facility, uc)
     if not adjustments:
         raise ValueError("No valid SKU/quantity in transfer line items")
 
@@ -146,6 +173,7 @@ def process_ready_transfers(conn, limit: int = 20, dry_run: bool = False) -> dic
 
     doc_entries = store.get_claimable_inventory_sync_doc_entries(conn, limit)
     processed = synced = failed = 0
+    uc = _uc_client()  # needed even for dry_run: shelf-code resolution is a read
 
     if dry_run:
         # Preview only -- must never claim (same reasoning as pogrn.py's
@@ -157,13 +185,12 @@ def process_ready_transfers(conn, limit: int = 20, dry_run: bool = False) -> dic
             if not row:
                 continue
             processed += 1
-            results.append(_process_claimed(row, uc=None, settings=settings, dry_run=True))
+            results.append(_process_claimed(row, uc, settings=settings, dry_run=True))
         return {
             "staged": staged, "recovered": recovery["recovered"], "escalated_dead": recovery["escalated"],
             "processed": processed, "previews": results,
         }
 
-    uc = _uc_client()
     for doc_entry in doc_entries:
         claimed = store.claim_inventory_sync(conn, doc_entry)
         if not claimed:
@@ -200,14 +227,15 @@ def process_one_transfer(conn, sap_doc_entry: int, dry_run: bool = False) -> dic
         store.stage_inventory_sync_transfer(conn, sap_doc_entry, from_wh, to_wh, lines)
         existing = store.get_inventory_sync_transfer(conn, sap_doc_entry)
 
+    uc = _uc_client()  # needed even for dry_run: shelf-code resolution is a read
+
     if dry_run:
-        return _process_claimed(existing, uc=None, settings=settings, dry_run=True)
+        return _process_claimed(existing, uc, settings=settings, dry_run=True)
 
     claimed = store.claim_inventory_sync(conn, sap_doc_entry)
     if not claimed:
         return {"status": "already_claimed_or_done", "sap_doc_entry": sap_doc_entry}
 
-    uc = _uc_client()
     try:
         result = _process_claimed(claimed, uc, settings, dry_run=False)
         if result.get("status") == "synced":
