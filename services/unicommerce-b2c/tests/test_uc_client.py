@@ -179,6 +179,24 @@ def test_adjust_inventory_bulk_sends_adjustments_list(monkeypatch):
     assert calls[0]["headers"]["Facility"] == "AMZ-BLR7"
 
 
+def test_get_item_type_inventory_returns_dtos_with_facility_header(monkeypatch):
+    client = _client()
+    calls = _capture_post(monkeypatch, {"successful": True, "inventoryDTOs": [{"shelf": "Shelf_001", "type": "GOOD_INVENTORY"}]})
+
+    result = client.get_item_type_inventory("FGHN0035", facility_code="kfl_ecom_warehouse")
+
+    assert result == [{"shelf": "Shelf_001", "type": "GOOD_INVENTORY"}]
+    assert calls[0]["url"].endswith("itemTypeInventory/get")
+    assert calls[0]["json"] == {"skuCode": "FGHN0035"}
+    assert calls[0]["headers"]["Facility"] == "kfl_ecom_warehouse"
+
+
+def test_get_item_type_inventory_empty_when_no_rows(monkeypatch):
+    client = _client()
+    _capture_post(monkeypatch, {"successful": True, "inventoryDTOs": []})
+    assert client.get_item_type_inventory("X", facility_code="AMZ-BLR7") == []
+
+
 def test_po_grn_write_methods_raise_on_successful_false(monkeypatch):
     client = _client()
     _capture_post(monkeypatch, {"successful": False, "message": "vendor not found"})

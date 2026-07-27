@@ -333,6 +333,16 @@ class UcClient:
         extra_headers = {"Facility": facility_code}
         return self._post_with_reauth("services/rest/v1/inventory/adjust/bulk", body, extra_headers=extra_headers)
 
+    def get_item_type_inventory(self, sku_code: str, facility_code: str) -> list[dict]:
+        """Per-facility shelf-wise inventory for one SKU -- shelf codes are
+        a real, per-facility UC config (e.g. "Shelf_001"), not a generic
+        value; confirmed live that a made-up shelf code is rejected with
+        INVALID_SHELF_CODE. Returns [] if this facility has no inventory
+        rows for this SKU at all (e.g. a brand-new facility)."""
+        extra_headers = {"Facility": facility_code}
+        resp = self._post_with_reauth("services/rest/v1/product/itemTypeInventory/get", body={"skuCode": sku_code}, extra_headers=extra_headers)
+        return resp.get("inventoryDTOs") or []
+
     def get_return_detail(self, code: str, facility: str | None = None) -> dict:
         """RP-prefixed codes -> reversePickupCode; other codes (RTO search
         results) -> shipmentCode."""
