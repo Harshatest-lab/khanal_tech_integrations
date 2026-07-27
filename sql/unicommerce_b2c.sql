@@ -165,6 +165,16 @@ CREATE INDEX IF NOT EXISTS idx_unicommerce_cn_staging_order
 -- State persisted after each UC write (po_created before GRN creation even
 -- starts) so a crash mid-run never re-issues a UC write that already
 -- succeeded -- there is no UC sandbox to safely absorb a duplicate PO.
+--
+-- There is no outward equivalent of this table. An earlier build had one
+-- (unicommerce_inventory_sync_staging, watching EC-FG->EC-B2C / AMZ-*
+-- outward transfers and calling UC's inventory/adjust/bulk REMOVE) --
+-- removed 2026-07-27: EC-FG/EC-B2C/AMZ-* are same-company internal
+-- warehouses, UC already decrements a batch itself when an order ships,
+-- and PostInvoices (posting the SAP AR Invoice) is what corresponds to
+-- that same event. A manual outward REMOVE would have double-decremented
+-- real UC inventory for stock UC had already correctly reduced on its
+-- own. See docs/superpowers/specs/2026-07-27-pogrn-inventorysync-design.md.
 CREATE TABLE IF NOT EXISTS unicommerce_pogrn_staging (
   sap_doc_entry      bigint      PRIMARY KEY,   -- SAP StockTransfers DocEntry
   from_warehouse      text        NOT NULL DEFAULT '',
@@ -182,28 +192,10 @@ CREATE TABLE IF NOT EXISTS unicommerce_pogrn_staging (
 CREATE INDEX IF NOT EXISTS idx_unicommerce_pogrn_staging_status
   ON unicommerce_pogrn_staging (status);
 
--- SAP outbound Stock Transfer -> UC inventory decrement. Same polling
--- source and DocEntry keying as unicommerce_pogrn_staging, simpler
--- single-write state machine (no PO/GRN staging needed).
-CREATE TABLE IF NOT EXISTS unicommerce_inventory_sync_staging (
-  sap_doc_entry      bigint      PRIMARY KEY,   -- SAP StockTransfers DocEntry
-  from_warehouse      text        NOT NULL DEFAULT '',
-  to_warehouse        text        NOT NULL DEFAULT '',
-  line_items          jsonb       NOT NULL DEFAULT '[]'::jsonb,   -- snapshot: item/batch/qty at claim time
-  status              text        NOT NULL DEFAULT 'pending',   -- pending | syncing | synced | failed | dead
-  attempt_count       integer     NOT NULL DEFAULT 0,
-  last_error          text,
-  created_at          timestamptz NOT NULL DEFAULT now(),
-  updated_at          timestamptz NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_unicommerce_inventory_sync_staging_status
-  ON unicommerce_inventory_sync_staging (status);
-
 -- Sync run history + watermarks (mirrors amazon_us_sync_log / amazon_us_watermarks).
 CREATE TABLE IF NOT EXISTS unicommerce_sync_log (
   id               bigserial   PRIMARY KEY,
-  mode             text        NOT NULL,   -- fetch_orders | fetch_returns | post_invoices | post_credit_notes | po_grn | inventory_sync | recon
+  mode             text        NOT NULL,   -- fetch_orders | fetch_returns | post_invoices | post_credit_notes | po_grn | recon
   started_at       timestamptz NOT NULL DEFAULT now(),
   finished_at      timestamptz,
   status           text        NOT NULL DEFAULT 'running',   -- running | success | error

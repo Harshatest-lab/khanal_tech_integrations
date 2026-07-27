@@ -174,14 +174,6 @@ functions:
           rate: cron(22,52 * * * ? *)
           enabled: false
 
-  unicommerceInventorySync:
-    handler: src.handlers.inventory_sync_handler
-    layers: [{ Ref: SharedLambdaLayer }]
-    events:
-      - schedule:
-          rate: cron(27,57 * * * ? *)
-          enabled: false
-
   unicommerceDashboardApi:
     handler: src.handlers.dashboard_handler
     memorySize: 512
