@@ -1,6 +1,9 @@
 """Tests for validate_active_series: it must check the SAP series IDs
 actually referenced in Unicommerce Settings (what postings really use),
-not SAP's unrelated company-wide default series."""
+not SAP's unrelated company-wide default series. Also covers the
+duplicate-invoice/credit-note guards: primary check is HANA (the header
+UDFs SAP SL was originally queried against don't exist on this SAP
+install), falling back to SL-based checks only if HANA itself fails."""
 
 from __future__ import annotations
 
@@ -10,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from unicommerce import sap_client  # noqa: E402
+from unicommerce import hana_access, sap_client  # noqa: E402
 from unicommerce.settings import UnicommerceSettings  # noqa: E402
 
 
@@ -88,3 +91,74 @@ def test_current_fy_period_indicator_matches_fy_start_suffix():
     # "FY2627" pairs with series named "...26" (the FY-start year), not
     # "...27" -- this is the inverted assumption the old guard had.
     assert sap_client._current_fy_period_indicator() == _current_period()
+
+
+# ── find_invoice_by_uc_order_id ────────────────────────────────────────
+
+def test_find_invoice_uses_hana_result_without_touching_sl(monkeypatch):
+    monkeypatch.setattr(hana_access, "find_invoice_by_order_id", lambda key: {"doc_entry": 1, "doc_num": 2, "doc_tax_amount": 3.0})
+    monkeypatch.setattr(sap_client, "_request", lambda *a, **k: (_ for _ in ()).throw(AssertionError("SL must not be called")))
+    result = sap_client.find_invoice_by_uc_order_id("ORDER1")
+    assert result == {"doc_entry": 1, "doc_num": 2, "doc_tax_amount": 3.0}
+
+
+def test_find_invoice_hana_none_is_trusted_as_not_found(monkeypatch):
+    monkeypatch.setattr(hana_access, "find_invoice_by_order_id", lambda key: None)
+    monkeypatch.setattr(sap_client, "_request", lambda *a, **k: (_ for _ in ()).throw(AssertionError("SL must not be called")))
+    assert sap_client.find_invoice_by_uc_order_id("ORDER1") is None
+
+
+def test_find_invoice_falls_back_to_sl_when_hana_fails(monkeypatch):
+    def broken_hana(key):
+        raise RuntimeError("HANA down")
+
+    monkeypatch.setattr(hana_access, "find_invoice_by_order_id", broken_hana)
+
+    def fake_request(method, path, body=None):
+        assert "U_UCOrderID" in path
+        return 200, {"value": [{"DocEntry": 9, "DocNum": 8, "DocTaxAmount": 1.5}]}
+
+    monkeypatch.setattr(sap_client, "_request", fake_request)
+    result = sap_client.find_invoice_by_uc_order_id("ORDER1")
+    assert result == {"doc_entry": 9, "doc_num": 8, "doc_tax_amount": 1.5}
+
+
+def test_find_invoice_raises_when_every_path_fails(monkeypatch):
+    monkeypatch.setattr(hana_access, "find_invoice_by_order_id", lambda key: (_ for _ in ()).throw(RuntimeError("HANA down")))
+    monkeypatch.setattr(sap_client, "_request", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("SL down")))
+    try:
+        sap_client.find_invoice_by_uc_order_id("ORDER1")
+        assert False, "expected SapLookupError"
+    except sap_client.SapLookupError:
+        pass
+
+
+# ── find_credit_note_by_return_id ──────────────────────────────────────
+
+def test_find_credit_note_uses_hana_via_base_doc_entry(monkeypatch):
+    seen = {}
+
+    def fake_hana(base_doc_entry):
+        seen["base_doc_entry"] = base_doc_entry
+        return {"doc_entry": 5, "doc_num": 6, "doc_tax_amount": 0.5}
+
+    monkeypatch.setattr(hana_access, "find_credit_note_by_base_invoice", fake_hana)
+    monkeypatch.setattr(sap_client, "_request", lambda *a, **k: (_ for _ in ()).throw(AssertionError("SL must not be called")))
+    result = sap_client.find_credit_note_by_return_id("RET1", base_doc_entry=59967)
+    assert result == {"doc_entry": 5, "doc_num": 6, "doc_tax_amount": 0.5}
+    assert seen["base_doc_entry"] == 59967
+
+
+def test_find_credit_note_skips_hana_without_base_doc_entry(monkeypatch):
+    monkeypatch.setattr(
+        hana_access, "find_credit_note_by_base_invoice", lambda *a: (_ for _ in ()).throw(AssertionError("must not be called"))
+    )
+    calls = []
+
+    def fake_request(method, path, body=None):
+        calls.append(path)
+        return 200, {"value": []}
+
+    monkeypatch.setattr(sap_client, "_request", fake_request)
+    assert sap_client.find_credit_note_by_return_id("RET1") is None
+    assert any("U_UCReturnID" in p for p in calls)

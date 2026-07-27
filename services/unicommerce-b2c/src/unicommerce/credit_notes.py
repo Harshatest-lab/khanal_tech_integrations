@@ -148,7 +148,9 @@ def _post_credit_note(conn, uc_return_id: str, settings) -> None:
     # if a previous attempt posted successfully but timed out before we
     # could record the DocEntry.
     try:
-        existing = sap_client.find_credit_note_by_return_id(uc_return_id)
+        existing = sap_client.find_credit_note_by_return_id(
+            uc_return_id, base_doc_entry=parent.get("sap_ar_invoice_docentry") if parent else None
+        )
         if existing:
             store.mark_cn_posted(
                 conn, uc_return_id, str(existing["doc_entry"]), str(existing["doc_num"]),

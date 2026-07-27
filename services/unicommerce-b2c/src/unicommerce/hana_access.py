@@ -21,6 +21,68 @@ logger = logging.getLogger(__name__)
 _CHUNK_SIZE = 500
 
 
+def find_invoice_by_order_id(uc_order_id: str) -> dict | None:
+    """Exact-match AR Invoice dedup lookup via INV1.U_Order -- the
+    line-level UDF ar_invoice_payload always sets, and a real HANA column
+    (confirmed via SYS.TABLE_COLUMNS). More reliable than SAP Service
+    Layer's U_UCOrderID header-UDF filter, which this SAP install's
+    Invoices entity type doesn't recognize at all (confirmed live: HTTP
+    400 "Property 'U_UCOrderID' of 'Document' is invalid" -- not a HANA
+    projection gap, the UDF plain doesn't exist here). Returns the most
+    recent non-cancelled match, or None if genuinely not found."""
+    key = str(uc_order_id or "").strip()
+    if not key:
+        return None
+    with hana_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            '''
+            SELECT h."DocEntry", h."DocNum", h."VatSum"
+            FROM "OINV" h
+            INNER JOIN "INV1" l ON l."DocEntry" = h."DocEntry"
+            WHERE l."U_Order" = ? AND h."CANCELED" = 'N'
+            ORDER BY h."DocEntry" DESC
+            ''',
+            [key],
+        )
+        row = cur.fetchone()
+        cur.close()
+    if not row:
+        return None
+    return {"doc_entry": int(row[0]), "doc_num": int(row[1] or 0), "doc_tax_amount": float(row[2] or 0)}
+
+
+def find_credit_note_by_base_invoice(base_doc_entry: int | str) -> dict | None:
+    """Exact-match Credit Note dedup lookup via RIN1.BaseEntry/BaseType --
+    the standard "Copy From" link every CN we post carries back to its
+    parent AR Invoice (BaseType 13), not a custom field. Same rationale as
+    find_invoice_by_order_id: SAP SL's U_UCReturnID header-UDF filter
+    doesn't work on this install (ORIN has no such column at all), and
+    since our posting flow is strictly one CN per invoice, BaseEntry alone
+    is an exact, reliable key -- no custom field needed for this one."""
+    try:
+        entry = int(base_doc_entry)
+    except (TypeError, ValueError):
+        return None
+    with hana_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            '''
+            SELECT h."DocEntry", h."DocNum", h."VatSum"
+            FROM "ORIN" h
+            INNER JOIN "RIN1" l ON l."DocEntry" = h."DocEntry"
+            WHERE l."BaseEntry" = ? AND l."BaseType" = 13 AND h."CANCELED" = 'N'
+            ORDER BY h."DocEntry" DESC
+            ''',
+            [entry],
+        )
+        row = cur.fetchone()
+        cur.close()
+    if not row:
+        return None
+    return {"doc_entry": int(row[0]), "doc_num": int(row[1] or 0), "doc_tax_amount": float(row[2] or 0)}
+
+
 def bulk_batch_inventory_by_warehouse(whs_code: str, item_codes: list[str] | set[str]) -> list[dict]:
     """FEFO-ordered batch rows for the given items in one warehouse.
 
