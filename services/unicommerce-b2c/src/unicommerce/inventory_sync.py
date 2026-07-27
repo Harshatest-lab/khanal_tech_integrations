@@ -140,15 +140,32 @@ def process_ready_transfers(conn, limit: int = 20, dry_run: bool = False) -> dic
     recovery = store.recover_failed_inventory_sync(conn, limit=limit, max_attempts=MAX_ATTEMPTS, max_hours=MAX_HOURS)
 
     doc_entries = store.get_claimable_inventory_sync_doc_entries(conn, limit)
-    uc = None if dry_run else _uc_client()
     processed = synced = failed = 0
+
+    if dry_run:
+        # Preview only -- must never claim (same reasoning as pogrn.py's
+        # process_ready_transfers: a claim with no matching release in
+        # dry_run mode would permanently block a real future run).
+        results = []
+        for doc_entry in doc_entries:
+            row = store.get_inventory_sync_transfer(conn, doc_entry)
+            if not row:
+                continue
+            processed += 1
+            results.append(_process_claimed(row, uc=None, settings=settings, dry_run=True))
+        return {
+            "staged": staged, "recovered": recovery["recovered"], "escalated_dead": recovery["escalated"],
+            "processed": processed, "previews": results,
+        }
+
+    uc = _uc_client()
     for doc_entry in doc_entries:
         claimed = store.claim_inventory_sync(conn, doc_entry)
         if not claimed:
             continue
         processed += 1
         try:
-            result = _process_claimed(claimed, uc, settings, dry_run=dry_run)
+            result = _process_claimed(claimed, uc, settings, dry_run=False)
             if result.get("status") == "synced":
                 store.mark_inventory_synced(conn, doc_entry)
                 synced += 1
@@ -176,14 +193,18 @@ def process_one_transfer(conn, sap_doc_entry: int, dry_run: bool = False) -> dic
         from_wh = str(lines[0].get("FromWarehouseCode") or "")
         to_wh = str(lines[0].get("WarehouseCode") or "")
         store.stage_inventory_sync_transfer(conn, sap_doc_entry, from_wh, to_wh, lines)
+        existing = store.get_inventory_sync_transfer(conn, sap_doc_entry)
+
+    if dry_run:
+        return _process_claimed(existing, uc=None, settings=settings, dry_run=True)
 
     claimed = store.claim_inventory_sync(conn, sap_doc_entry)
     if not claimed:
         return {"status": "already_claimed_or_done", "sap_doc_entry": sap_doc_entry}
 
-    uc = None if dry_run else _uc_client()
+    uc = _uc_client()
     try:
-        result = _process_claimed(claimed, uc, settings, dry_run=dry_run)
+        result = _process_claimed(claimed, uc, settings, dry_run=False)
         if result.get("status") == "synced":
             store.mark_inventory_synced(conn, sap_doc_entry)
         return result

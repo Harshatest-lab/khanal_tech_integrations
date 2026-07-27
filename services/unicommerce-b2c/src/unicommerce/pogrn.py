@@ -237,15 +237,34 @@ def process_ready_transfers(conn, limit: int = 20, dry_run: bool = False) -> dic
     recovery = store.recover_failed_pogrn(conn, limit=limit, max_attempts=MAX_ATTEMPTS, max_hours=MAX_HOURS)
 
     doc_entries = store.get_claimable_pogrn_doc_entries(conn, limit)
-    uc = None if dry_run else _uc_client()
     processed = done = failed = 0
+
+    if dry_run:
+        # Preview only -- must never claim. claim_pogrn moves a row to
+        # 'processing' with no matching mark_*/release call in dry_run
+        # mode, which would permanently block any real future run from
+        # claiming it (found live: a dry_run call left DocEntry 53974
+        # stuck at 'processing' forever).
+        results = []
+        for doc_entry in doc_entries:
+            row = store.get_pogrn_transfer(conn, doc_entry)
+            if not row:
+                continue
+            processed += 1
+            results.append(_process_claimed(conn, row, uc=None, settings=settings, dry_run=True))
+        return {
+            "staged": staged, "recovered": recovery["recovered"], "escalated_dead": recovery["escalated"],
+            "processed": processed, "previews": results,
+        }
+
+    uc = _uc_client()
     for doc_entry in doc_entries:
         claimed = store.claim_pogrn(conn, doc_entry)
         if not claimed:
             continue
         processed += 1
         try:
-            result = _process_claimed(conn, claimed, uc, settings, dry_run=dry_run)
+            result = _process_claimed(conn, claimed, uc, settings, dry_run=False)
             if result.get("status") == "grn_done":
                 done += 1
         except Exception as e:
@@ -272,14 +291,19 @@ def process_one_transfer(conn, sap_doc_entry: int, dry_run: bool = False) -> dic
         from_wh = str(lines[0].get("FromWarehouseCode") or "")
         to_wh = str(lines[0].get("WarehouseCode") or "")
         store.stage_pogrn_transfer(conn, sap_doc_entry, from_wh, to_wh, lines)
+        existing = store.get_pogrn_transfer(conn, sap_doc_entry)
+
+    if dry_run:
+        # Preview only -- reads the current row directly, never claims.
+        return _process_claimed(conn, existing, uc=None, settings=settings, dry_run=True)
 
     claimed = store.claim_pogrn(conn, sap_doc_entry)
     if not claimed:
         return {"status": "already_claimed_or_done", "sap_doc_entry": sap_doc_entry}
 
-    uc = None if dry_run else _uc_client()
+    uc = _uc_client()
     try:
-        return _process_claimed(conn, claimed, uc, settings, dry_run=dry_run)
+        return _process_claimed(conn, claimed, uc, settings, dry_run=False)
     except Exception as e:
         status = store.mark_pogrn_failed(conn, sap_doc_entry, str(e), MAX_ATTEMPTS)
         return {"status": status, "sap_doc_entry": sap_doc_entry, "error": str(e)}
