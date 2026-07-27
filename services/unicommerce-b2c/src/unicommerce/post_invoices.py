@@ -279,36 +279,13 @@ def _post_order(conn, row: dict, settings, batch_managed_cache: dict, fefo_cache
     if invoice_detail:
         payload_lines = posted_payload.get("DocumentLines", [])
         invoice_lines = invoice_detail.get("DocumentLines", [])
-        expected_unit = _sum_unit_price_total(payload_lines)
-        actual_unit = _sum_unit_price_total(invoice_lines)
-        actual_tax_from_lines = _sum_tax_total(invoice_lines)
+        expected_unit = sap_payload.sum_unit_price_total(payload_lines)
+        actual_unit = sap_payload.sum_unit_price_total(invoice_lines)
+        actual_tax_from_lines = sap_payload.sum_tax_total(invoice_lines)
         actual_tax = actual_tax_from_lines if actual_tax_from_lines else tax_actual
         store.update_reconciliation_diffs(conn, uniware_id, tax_expected, actual_tax, abs(expected_unit - actual_unit), expected_unit, actual_unit)
 
     return "posted", []
-
-
-def _sum_unit_price_total(lines: list[dict]) -> float:
-    total = 0.0
-    for line in lines or []:
-        try:
-            total += float(line.get("Quantity", 0) or 0) * float(line.get("UnitPrice", 0) or 0)
-        except (TypeError, ValueError):
-            continue
-    return round(total, 2)
-
-
-def _sum_tax_total(lines: list[dict]) -> float:
-    total = 0.0
-    for line in lines or []:
-        for key in ("TaxTotal", "TaxAmount", "LineTaxTotal", "LineTaxAmount"):
-            if key in line:
-                try:
-                    total += float(line.get(key) or 0)
-                except Exception:
-                    pass
-                break
-    return round(total, 2)
 
 
 def post_ready_orders(
