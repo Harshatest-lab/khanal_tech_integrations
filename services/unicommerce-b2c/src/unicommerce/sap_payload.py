@@ -756,3 +756,32 @@ def credit_note_payload(cn: dict, parent_order: dict, settings: UnicommerceSetti
         "DocumentLines": lines,
         "Comments": f"Return for UC Order: {cn.get('uc_order_id')}",
     }
+
+
+# ── Shared actual-totals helpers ──────────────────────────────────────────
+# Used by both post_invoices.py (right after a new post) and recon.py (the
+# periodic re-verification sweep) so "what we call actual" can never drift
+# between the two -- same DocumentLines shape either way (from a fresh
+# post's response, or a later GET by DocEntry).
+
+def sum_unit_price_total(lines: list[dict]) -> float:
+    total = 0.0
+    for line in lines or []:
+        try:
+            total += float(line.get("Quantity", 0) or 0) * float(line.get("UnitPrice", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+    return round(total, 2)
+
+
+def sum_tax_total(lines: list[dict]) -> float:
+    total = 0.0
+    for line in lines or []:
+        for key in ("TaxTotal", "TaxAmount", "LineTaxTotal", "LineTaxAmount"):
+            if key in line:
+                try:
+                    total += float(line.get(key) or 0)
+                except Exception:
+                    pass
+                break
+    return round(total, 2)

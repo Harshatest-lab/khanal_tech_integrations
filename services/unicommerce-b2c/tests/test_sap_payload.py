@@ -17,6 +17,8 @@ from unicommerce.sap_payload import (  # noqa: E402
     _resolve_sap_warehouse,
     credit_note_payload,
     fefo_allocate_from_rows,
+    sum_tax_total,
+    sum_unit_price_total,
 )
 from unicommerce.settings import UnicommerceSettings  # noqa: E402
 
@@ -161,3 +163,31 @@ def test_credit_note_payload_missing_batches_raises():
     cn = _cn(items=[{"itemSku": "SKU-A", "quantity": 2, "sapBaseLine": 0, "sapBatchNumbers": []}])
     with pytest.raises(ValueError, match="batch mapping"):
         credit_note_payload(cn, {"channel_name": "FLIPKART"}, _SETTINGS_WITH_CN)
+
+
+# ── sum_unit_price_total / sum_tax_total (shared by post_invoices.py and recon.py) ──
+
+def test_sum_unit_price_total_sums_quantity_times_unit_price():
+    lines = [{"Quantity": 2, "UnitPrice": 100.0}, {"Quantity": 3, "UnitPrice": 50.5}]
+    assert sum_unit_price_total(lines) == 351.5
+
+
+def test_sum_unit_price_total_skips_bad_values():
+    lines = [{"Quantity": "x", "UnitPrice": 100.0}, {"Quantity": 2, "UnitPrice": 10.0}]
+    assert sum_unit_price_total(lines) == 20.0
+
+
+def test_sum_unit_price_total_empty_is_zero():
+    assert sum_unit_price_total([]) == 0.0
+    assert sum_unit_price_total(None) == 0.0
+
+
+def test_sum_tax_total_uses_first_matching_key_per_line():
+    lines = [{"TaxTotal": 10.0}, {"TaxAmount": 5.0}, {"LineTaxTotal": 2.0, "TaxAmount": 99.0}]
+    # LineTaxTotal isn't first in the candidate-key order, but TaxAmount is
+    # present on that same line, so TaxAmount (98.0 here) wins for that line.
+    assert sum_tax_total(lines) == 10.0 + 5.0 + 99.0
+
+
+def test_sum_tax_total_ignores_lines_with_no_tax_key():
+    assert sum_tax_total([{"Quantity": 1}]) == 0.0
