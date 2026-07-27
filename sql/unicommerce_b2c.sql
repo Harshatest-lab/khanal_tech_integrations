@@ -159,25 +159,46 @@ CREATE INDEX IF NOT EXISTS idx_unicommerce_cn_staging_status
 CREATE INDEX IF NOT EXISTS idx_unicommerce_cn_staging_order
   ON unicommerce_cn_staging (uc_order_id);
 
--- SAP Inventory Transfer -> UC Purchase Order + GRN + inventory-sync tracking.
--- (Populated by later phases of this build -- PO/GRN creation, inventory sync.)
-CREATE TABLE IF NOT EXISTS unicommerce_inventory_transfers (
-  sap_transfer_docname       text        PRIMARY KEY,   -- SAP Inventory Transfer doc reference
-  fromwarehouse               text        NOT NULL DEFAULT '',
-  towarehouse                 text        NOT NULL DEFAULT '',
-  uniware_po_id                text        NOT NULL DEFAULT '',
-  uniware_po_status             text        NOT NULL DEFAULT '',   -- free text, mirrors the Frappe field (incl. transient claim sentinels)
-  uniware_grn_no                text        NOT NULL DEFAULT '',
-  unicommerce_sync_status        text        NOT NULL DEFAULT 'Pending',   -- mirrors the Frappe Select options + transient claim sentinels
-  comments                    text        NOT NULL DEFAULT '',   -- kept short (140 chars) -- see PR #1303/#1304 in khanal_tech_integrations for why
-  created_at                  timestamptz NOT NULL DEFAULT now(),
-  updated_at                  timestamptz NOT NULL DEFAULT now()
+-- SAP inbound Stock Transfer -> UC Purchase Order + GRN. One row per SAP
+-- StockTransfers DocEntry (polled via SAP Service Layer, not a Frappe
+-- doctype -- see docs/superpowers/specs/2026-07-27-pogrn-inventorysync-design.md).
+-- State persisted after each UC write (po_created before GRN creation even
+-- starts) so a crash mid-run never re-issues a UC write that already
+-- succeeded -- there is no UC sandbox to safely absorb a duplicate PO.
+CREATE TABLE IF NOT EXISTS unicommerce_pogrn_staging (
+  sap_doc_entry      bigint      PRIMARY KEY,   -- SAP StockTransfers DocEntry
+  from_warehouse      text        NOT NULL DEFAULT '',
+  to_warehouse        text        NOT NULL DEFAULT '',
+  line_items          jsonb       NOT NULL DEFAULT '[]'::jsonb,   -- snapshot: item/batch/qty at claim time
+  status              text        NOT NULL DEFAULT 'pending',   -- pending | po_creating | po_created | grn_creating | grn_done | failed | dead
+  uc_po_id            text        NOT NULL DEFAULT '',
+  uc_grn_ids          jsonb       NOT NULL DEFAULT '[]'::jsonb,   -- appended to as each GRN round succeeds
+  attempt_count       integer     NOT NULL DEFAULT 0,
+  last_error          text,
+  created_at          timestamptz NOT NULL DEFAULT now(),
+  updated_at          timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_unicommerce_inv_transfers_po_status
-  ON unicommerce_inventory_transfers (uniware_po_status);
-CREATE INDEX IF NOT EXISTS idx_unicommerce_inv_transfers_sync_status
-  ON unicommerce_inventory_transfers (unicommerce_sync_status);
+CREATE INDEX IF NOT EXISTS idx_unicommerce_pogrn_staging_status
+  ON unicommerce_pogrn_staging (status);
+
+-- SAP outbound Stock Transfer -> UC inventory decrement. Same polling
+-- source and DocEntry keying as unicommerce_pogrn_staging, simpler
+-- single-write state machine (no PO/GRN staging needed).
+CREATE TABLE IF NOT EXISTS unicommerce_inventory_sync_staging (
+  sap_doc_entry      bigint      PRIMARY KEY,   -- SAP StockTransfers DocEntry
+  from_warehouse      text        NOT NULL DEFAULT '',
+  to_warehouse        text        NOT NULL DEFAULT '',
+  line_items          jsonb       NOT NULL DEFAULT '[]'::jsonb,   -- snapshot: item/batch/qty at claim time
+  status              text        NOT NULL DEFAULT 'pending',   -- pending | syncing | synced | failed | dead
+  attempt_count       integer     NOT NULL DEFAULT 0,
+  last_error          text,
+  created_at          timestamptz NOT NULL DEFAULT now(),
+  updated_at          timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_unicommerce_inventory_sync_staging_status
+  ON unicommerce_inventory_sync_staging (status);
 
 -- Sync run history + watermarks (mirrors amazon_us_sync_log / amazon_us_watermarks).
 CREATE TABLE IF NOT EXISTS unicommerce_sync_log (
