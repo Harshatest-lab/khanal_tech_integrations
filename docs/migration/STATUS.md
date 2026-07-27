@@ -10,10 +10,33 @@ single place to check "where are we" without re-reading every phase doc.
    (2026-07-27): fetch → promote → batch-check → series guard →
    `POST /Invoices` → `POST /CreditNotes`, all verified directly against
    `TEST_KFL_30062026` (SAP SL + HANA), not just our own DB records.
-   5 of 7 flows built (`Fetch`, `PostInvoices`, `PostCreditNotes`,
-   `DashboardApi`, plus the underlying HANA/SAP client layer); `Recon`
-   and `PoGrn`/`InventorySync` remain unbuilt (see Phase table below).
-   **5 real bugs found + fixed live today, all deployed to `dev`:**
+   6 of 7 flows built (`Fetch`, `PostInvoices`, `PostCreditNotes`,
+   `DashboardApi`, `PoGrn`, plus the underlying HANA/SAP client layer);
+   only `Recon` remains unbuilt (see Phase table below).
+   **`PoGrn` built, tested, deployed, and confirmed with a real live
+   write** the same day: real PO `PO8975` created in production UC
+   (vendor `EC-B2C`, `FGHN0059` qty 240 + `FGHN0035` qty 96, matching SAP
+   transfer DocEntry 53974 exactly) + 2 real GRNs, fully received
+   (0 pending on both lines) — verified via UC's own
+   `getPurchaseOrderDetails`, not just our DB.
+   **`InventorySync` was built the same day, then deliberately removed
+   after real-write testing found it solves a problem that doesn't
+   exist**: `EC-FG`/`EC-B2C`/every `AMZ-*` warehouse are same-company
+   internal warehouses; Unicommerce already decrements a batch's
+   inventory itself the moment a sale order ships (no action needed from
+   us); `PostInvoices` (posting the SAP AR Invoice for that same order)
+   is what corresponds to the decrease, already built and verified live.
+   A manual outward `inventory/adjust/bulk` REMOVE — which is what
+   `InventorySync` did — would have **double-decremented** real UC
+   inventory for stock UC had already correctly reduced on its own. Full
+   reasoning + the live evidence trail (chasing UC's undiscoverable
+   batch-code requirement is what surfaced this) is in
+   `docs/superpowers/specs/2026-07-27-pogrn-inventorysync-design.md`'s
+   Correction section. So Phase 1 was never actually 7 distinct flows —
+   `InventorySync` wasn't a real requirement once UC's own
+   fulfillment-driven decrement is accounted for.
+   **5 more real bugs found + fixed live today** (on top of the
+   `InventorySync` finding above), **all deployed to `dev`:**
    - `hana_access.bulk_manage_batch_numbers` queried HANA column
      `ManageBatchNumbers` — that's the SAP Service Layer property name,
      not the real column (`ManBtchNum`). Silently broke batch-managed
@@ -112,7 +135,7 @@ in the conversation history for the exact questions.
 | Unicommerce fix pass | TLS, permission check, 3 race conditions + 2 bugs found while verifying, 1 idempotency gap — in the **existing Frappe code**, not yet the Lambda port | ✅ **Done** — merged, deployed, verified live in production (PRs #1301–#1304) |
 | Phase 0 | Delete SafeExpress + DSR (business stopped, confirmed) | **Paused** — investigation started, found real cross-module dependencies (see notes above), deprioritized behind Phase 1 per user's 2026-07-23 call |
 | Phase 0.5 | Finish the half-built Amazon US Lambda cutover (test DB creds, schedules disabled) | Not started |
-| Phase 1 | Unicommerce → Lambda (7 flows — see `03-unicommerce-b2c.md`) | **5 of 7 flows built + live-verified on `dev`, full write path confirmed real (2026-07-27).** See memory `unicommerce_lambda_dev_verification.md`. ✅ `Fetch` orders + returns · ✅ `PostInvoices` — **real `POST /Invoices` confirmed**, verified directly against SAP (DocEntry 59967/DocNum 702697) · ✅ `PostCreditNotes` — **real `POST /CreditNotes` confirmed**, correctly linked to its parent invoice via `BaseEntry` (DocEntry 10807/DocNum 67373) · ✅ `DashboardApi`. **9 real bugs found + fixed live across two sessions**, none caught by unit tests: 2026-07-24 — missing promote gate; UC 31-day search limit swallowed as 0 results; NULL-vs-`''` NOT NULL columns; `get_cn` json.loads on jsonb; empty GitHub-secret env shadowing. 2026-07-27 — wrong HANA column name in batch-managed lookup; FY series guard queried a nonexistent SAP entity + had an inverted FY-suffix calc (never validated anything, in the Frappe source either); `fetch_returns` crashed on offset-naive UC timestamps; invoice/CN dedup queried nonexistent header UDFs and silently did nothing, causing a real duplicate invoice in SAP (fixed via HANA `INV1.U_Order`/`RIN1.BaseEntry` instead — no UDF creation needed); a result-counter bug dropping `"failed"` outcomes. **Stock note:** `EC-FG` (default warehouse, every non-Amazon-FBA channel) has real batch stock, which is what unblocked full write-path testing; `AMZ-*` warehouses (Amazon-FBA channels) still have zero stock and remain untested on the write path — a data gap, not code. **Remaining 2 flows:** `Recon` (not ported — there's now real posted-invoice data to reconcile against, but the flow itself still needs building), `PoGrn` + `InventorySync` (not ported — WRITE to the live UC tenant, no sandbox → held per user's 2026-07-24 call). |
+| Phase 1 | Unicommerce → Lambda (6 real flows, not 7 — see note below and `03-unicommerce-b2c.md`) | **6 of 6 flows built + live-verified on `dev`, full write path confirmed real (2026-07-27).** See memory `unicommerce_lambda_dev_verification.md`. ✅ `Fetch` orders + returns · ✅ `PostInvoices` — **real `POST /Invoices` confirmed**, verified directly against SAP (DocEntry 59967/DocNum 702697) · ✅ `PostCreditNotes` — **real `POST /CreditNotes` confirmed**, correctly linked to its parent invoice via `BaseEntry` (DocEntry 10807/DocNum 67373) · ✅ `DashboardApi` · ✅ `PoGrn` — **real UC Purchase Order + GRN confirmed**, both AMZ-\* and EC-FG destinations tested, a real write fully received (PO8975, DocEntry 53974, 0 pending). **`InventorySync` built then deliberately removed same day** — not a real requirement: UC already decrements inventory itself on order fulfillment, `PostInvoices` already covers the SAP-side correspondence; a manual outward REMOVE would have double-decremented real inventory. Full reasoning in `docs/superpowers/specs/2026-07-27-pogrn-inventorysync-design.md`'s Correction section. **14 real bugs found + fixed live across two sessions**, none caught by unit tests: 2026-07-24 — missing promote gate; UC 31-day search limit swallowed as 0 results; NULL-vs-`''` NOT NULL columns; `get_cn` json.loads on jsonb; empty GitHub-secret env shadowing. 2026-07-27 — wrong HANA column name in batch-managed lookup; FY series guard queried a nonexistent SAP entity + had an inverted FY-suffix calc (never validated anything, in the Frappe source either); `fetch_returns` crashed on offset-naive UC timestamps; invoice/CN dedup queried nonexistent header UDFs and silently did nothing, causing a real duplicate invoice in SAP (fixed via HANA `INV1.U_Order`/`RIN1.BaseEntry` instead — no UDF creation needed); a result-counter bug dropping `"failed"` outcomes; GRN batch-group field mismatch (`mfd` rejected); the InventorySync design gap itself. **Stock note:** `EC-FG` (default warehouse, every non-Amazon-FBA channel) has real batch stock; `AMZ-*` warehouses now also proven reachable for real writes via `PoGrn` (confirmed live against DocEntry 53819). **Remaining flow:** `Recon` (not ported — there's now real posted-invoice data to reconcile against, but the flow itself still needs building). `PoGrn`'s manual-PO-fill use case and any future UC-write flows (e.g. actual PO/GRN creation triggered by something other than a SAP transfer) remain out of scope per the approved design. |
 | Phase 2 | B2B PO automation (6 marketplaces, IMAP-based) → Lambda | Not started. Open question: confirm Flipkart is actually scheduled (not found in `hooks.py`'s cron block) |
 | Phase 3a | consumables → Lambda + Postgres | Not started |
 | Phase 3b | real_aquatics, wowpets → Lambda + Postgres (both live, daily users — higher stakes) | Not started. Order between the two not yet decided |
