@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS unicommerce_orders (
   ar_invoice_unit_price_diff         numeric(14,2),
   ar_invoice_reconciled             integer     NOT NULL DEFAULT 0,
   ar_invoice_reconciliation_status   text        NOT NULL DEFAULT '',
+  ar_invoice_mismatch_reason        text        NOT NULL DEFAULT '',   -- line-level diagnosis, set by Recon when a mismatch is found
   sap_ar_creditnote_docentry        text,        -- last-posted CN; an order can have several returns/CNs over time
   ar_creditnote_tax_expected        numeric(14,2),
   ar_creditnote_tax_actual          numeric(14,2),
