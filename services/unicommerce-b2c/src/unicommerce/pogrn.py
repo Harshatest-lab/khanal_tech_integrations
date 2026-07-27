@@ -189,30 +189,31 @@ def _process_claimed(conn, claimed: dict, uc: UcClient | None, settings: Unicomm
 
     uc_po_id = claimed.get("uc_po_id") or ""
     po_items = aggregate_po_items(line_items)
-
-    if not uc_po_id:
-        if not po_items:
-            raise ValueError("No valid SKU/quantity in transfer line items")
-        if dry_run:
-            return {
-                "sap_doc_entry": sap_doc_entry, "status": "dry_run", "facility": facility,
-                "would_create_po": {"vendorCode": settings.vendor_code, "purchaseOrderItems": po_items},
-            }
-        po_resp = uc.create_po_approved(settings.vendor_code, po_items, facility_code=facility)
-        uc_po_id = po_resp.get("purchaseOrderCode")
-        if not uc_po_id:
-            raise UcApiError(f"PO creation returned no purchaseOrderCode: {po_resp}")
-        store.mark_pogrn_po_created(conn, sap_doc_entry, uc_po_id)
+    if not uc_po_id and not po_items:
+        raise ValueError("No valid SKU/quantity in transfer line items")
 
     already_grn_ids = _as_list(claimed.get("uc_grn_ids"))
     grn_items = build_grn_items(line_items)
     rounds = round_robin_grn_rounds(grn_items)
 
     if dry_run:
-        return {
-            "sap_doc_entry": sap_doc_entry, "status": "dry_run", "facility": facility,
-            "uc_po_id": uc_po_id, "would_create_grn_rounds": rounds,
-        }
+        # Always preview both the PO and the full GRN round plan together,
+        # regardless of whether uc_po_id is already set -- a reviewer needs
+        # the whole picture before approving a real run (Phase B), not just
+        # whichever half happens to still be pending.
+        preview: dict = {"sap_doc_entry": sap_doc_entry, "status": "dry_run", "facility": facility, "would_create_grn_rounds": rounds}
+        if uc_po_id:
+            preview["uc_po_id"] = uc_po_id
+        else:
+            preview["would_create_po"] = {"vendorCode": settings.vendor_code, "purchaseOrderItems": po_items}
+        return preview
+
+    if not uc_po_id:
+        po_resp = uc.create_po_approved(settings.vendor_code, po_items, facility_code=facility)
+        uc_po_id = po_resp.get("purchaseOrderCode")
+        if not uc_po_id:
+            raise UcApiError(f"PO creation returned no purchaseOrderCode: {po_resp}")
+        store.mark_pogrn_po_created(conn, sap_doc_entry, uc_po_id)
 
     date_compact = datetime.now(timezone.utc).strftime("%Y%m%d")
     invoice_date_uc = _to_uc_datetime(datetime.now(timezone.utc).strftime("%Y-%m-%d"))
