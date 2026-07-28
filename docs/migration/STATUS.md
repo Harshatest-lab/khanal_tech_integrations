@@ -139,19 +139,13 @@ single place to check "where are we" without re-reading every phase doc.
    partial live coverage on the outward write path before go-live,
    since full AMZ-\* coverage still isn't possible without more test
    stock loaded.
-6. **Open design question, not yet resolved**: user wants a
-   revisit of "InventorySync" as an **increment-only** (UC stock ADD)
-   mechanism — the original inward mechanism is already covered by
-   `PoGrn` (SAP transfer → UC PO+GRN, which increases UC stock); the
-   deliberately-removed `InventorySync` was strictly the outward
-   REMOVE side (killed as redundant, see
-   `2026-07-27-pogrn-inventorysync-design.md`). What's unclear: what
-   SAP-side event should trigger a plain ADD that `PoGrn` doesn't
-   already cover (e.g. a SAP stock adjustment/production receipt that
-   isn't a `StockTransfers` document PoGrn watches)? This writes to
-   the live production UC tenant (no sandbox), so needs a real trigger
-   definition before building — don't guess and build against the
-   wrong SAP entity.
+6. **Resolved (2026-07-28)**: user's "InventorySync should only
+   increment, not decrement" is already fully satisfied by `PoGrn`
+   (SAP transfer → UC PO+GRN, increases UC stock) — confirmed with the
+   user this was a restatement of the existing design, not a request
+   for new code. The deleted `InventorySync` (decrement/REMOVE side)
+   stays deleted, per the 2026-07-27 finding that it double-decrements
+   (UC already lowers stock itself on order ship). No action needed.
 7. Separately, whenever there's time: 640 Dependabot vulnerabilities
    (7 critical) flagged on `khanal_tech_integrations`'s `main` —
    unrelated to this migration, not yet looked at.
