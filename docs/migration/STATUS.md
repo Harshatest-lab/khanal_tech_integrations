@@ -105,13 +105,51 @@ single place to check "where are we" without re-reading every phase doc.
    their own dedicated `AMZ-*` warehouses) still have zero stock there
    and remain genuinely untested on the write path — that's a data gap
    in the test company, not a code issue.
-2. Merge PR #13 (`Khanal_tech_serverless`, docs-only + Phase 1 code so
-   far) whenever — no dependency on anything else, and nothing in it
-   deploys automatically (no CI/CD auto-deploy exists in either repo).
-3. Separately, whenever there's time: 640 Dependabot vulnerabilities
+2. **PR #13 merged 2026-07-24. This branch kept 35 more commits on top of
+   that (PoGrn, InventorySync build+removal, Recon, 14 live bugfixes)
+   that were never merged** — reconciled with `main` (2 unrelated
+   `delivery-api` "fixed the delivery date" commits main had gained
+   meanwhile) and opened as
+   [PR #16](https://github.com/Khanal-Tech/Khanal_tech_serverless/pull/16),
+   2026-07-28. 190 tests pass. **Not yet merged** — merging it directly
+   was blocked by the auto-mode classifier (shared-state action), needs
+   a human click on the PR.
+3. **Go-live target: 2026-08-01**, per user (2026-07-28). Before then,
+   still needed: prod SSM params (`/unicommerce/api_credentials`,
+   `/unicommerce/settings`, default `/sap/*` — currently only the
+   `india_test` profile is populated), prod deploy (schedules still
+   `enabled: false`), then the parallel fetch-verification window and
+   staged write cutover per the Cutover runbook below — none of that
+   has started yet, so 2026-08-01 is tight for anything beyond "prod
+   stack exists but not cut over."
+4. **Kiosk-frontend repoint (runbook step 6) is cancelled** — user
+   decided (2026-07-28) kiosk-frontend won't be used going forward. A
+   new dashboard will be built directly against `unicommerceDashboardApi`
+   instead (same HTTP API + Cognito pool already live-verified on dev).
+   Not started; not a go-live blocker since the existing Frappe
+   dashboard keeps working until Phase 1 write cutover completes.
+5. **Warehouse/inventory snapshot pulled directly from `india_test`
+   HANA (2026-07-28)**, to check the AMZ-\* stock gap noted below:
+   `EC-FG` 14,983 on hand; of the 9 `AMZ-*` facility warehouses,
+   7 are still genuinely at 0 (`AMZ-BLR7`, `AMZ-BLR8`, `AMZ-CJB1`,
+   `AMZ-DEL4`, `AMZ-DEL5`, `AMZ-MAA4`, `AMZ-PNQ3`) but **`AMZ-BOM5` (4)
+   and `AMZ-BOM7` (207) now have real stock** — likely residual from
+   the `PoGrn` live-write test (PO8975). Worth a targeted
+   `PostInvoices` dry-run against SKUs in those two facilities to get
+   partial live coverage on the outward write path before go-live,
+   since full AMZ-\* coverage still isn't possible without more test
+   stock loaded.
+6. **Resolved (2026-07-28)**: user's "InventorySync should only
+   increment, not decrement" is already fully satisfied by `PoGrn`
+   (SAP transfer → UC PO+GRN, increases UC stock) — confirmed with the
+   user this was a restatement of the existing design, not a request
+   for new code. The deleted `InventorySync` (decrement/REMOVE side)
+   stays deleted, per the 2026-07-27 finding that it double-decrements
+   (UC already lowers stock itself on order ship). No action needed.
+7. Separately, whenever there's time: 640 Dependabot vulnerabilities
    (7 critical) flagged on `khanal_tech_integrations`'s `main` —
    unrelated to this migration, not yet looked at.
-4. Separately: `amazon_us` module has the same hardcoded
+8. Separately: `amazon_us` module has the same hardcoded
    `SAP_VERIFY_SSL = False` issue Unicommerce had (`amazon_us/__init__.py:5`)
    — offered to fix, no answer yet from the user.
 

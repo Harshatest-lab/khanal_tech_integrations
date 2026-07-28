@@ -24,7 +24,12 @@ this is **six distinct flows**, not one generic "sync" job:
    `MAX_GRN_ROUNDS`)
 6. **Push inventory adjustments to Unicommerce** — when SAP moves stock
    internally (EC-FG→EC-B2C), UC's shelf stock gets decremented to match
-   (`workers/inventory.py`: `sync_inventory` / `_sync_one_transfer`)
+   (`workers/inventory.py`: `sync_inventory` / `_sync_one_transfer`).
+   **Deliberately not ported** (2026-07-27) — UC already decrements its
+   own stock the moment an order ships, so mirroring this flow in Lambda
+   would double-decrement. See
+   `2026-07-27-pogrn-inventorysync-design.md`'s Correction section. Real
+   Lambda function count and current build/deploy status: `STATUS.md`.
 
 Plus two things that ride on top of all six, not separate data flows:
 
@@ -65,9 +70,11 @@ model to reimplement. It follows the exact shape of `amazon-us-b2c`
 almost line for line:
 
 - New stack: `services/unicommerce-b2c/`
-- **Seven functions** (matches `amazon-us-b2c`'s ~6-function shape for a
+- **Six functions** (matches `amazon-us-b2c`'s ~6-function shape for a
   similarly-scoped integration — one function per flow above, not one
-  per doctype):
+  per doctype). `sync_inventory` (the Frappe source's outward inventory
+  decrement) is deliberately not ported — see item 6 in Source above —
+  so this table has one fewer row than the original plan:
 
   | Function | Frappe source | Trigger |
   |---|---|---|
@@ -75,7 +82,6 @@ almost line for line:
   | `unicommercePostInvoices` | `post_invoices` | schedule, 30-min offset |
   | `unicommercePostCreditNotes` | `post_credit_notes` | schedule, 30-min offset |
   | `unicommercePoGrn` | `push_po` + `_push_grn_rounds` (one handler, `input.mode`) | schedule, 30-min offset |
-  | `unicommerceInventorySync` | `sync_inventory` | schedule, 30-min offset |
   | `unicommerceRecon` | `run_reconciliation_refresh` + the two audit functions | schedule, daily |
   | `unicommerceDashboardApi` | `api/ops.py` (Ops Center) | HTTP API, Cognito-gated |
 
@@ -85,9 +91,11 @@ almost line for line:
   Cognito user pool (`unicommerce-b2c-<stage>-dashboard`), serving the
   same shape of endpoints `amazon-us-b2c` does
   (`/v1/unicommerce/stats`, `/orders`, `/returns`, `/sync-log`,
-  `/retry-invoices`, `/recon-download` etc.) — `kiosk-frontend`'s
-  Unicommerce components get repointed at this instead of Frappe's REST
-  API, no rebuild needed, just a base-URL + auth swap.
+  `/retry-invoices`, `/recon-download` etc.) — originally planned as a
+  `kiosk-frontend` repoint (base-URL + auth swap, no rebuild); **as of
+  2026-07-28, `kiosk-frontend` is being retired instead** — a new
+  dashboard gets built directly against this API. See
+  `docs/migration/STATUS.md`.
 - Reuse `khanal_shared`'s SAP Service Layer client and session-caching
   pattern (SSM-cached `b1_session`, same `/sap/inc/*` parameter family
   Amazon US and Walmart already share) — **do not** write a second SAP
@@ -123,9 +131,14 @@ direct equivalent:
    SET status='posting' WHERE id=$1 AND status='ready' RETURNING id` —
    zero rows back means another invocation already owns it.
 2. **PO creation** — same technique on `unicommerce.po_status`, sentinel
-   value before calling UC's `purchaseOrder/create`.
-3. **Inventory sync** — same technique on the inventory-transfer row's
-   sync status before calling UC's `inventory/adjust/bulk`.
+   value before calling UC's `purchaseOrder/create`. Carried forward
+   into `PoGrn`'s actual claim pattern (`pending → po_creating →
+   po_created → grn_creating → grn_done`, released on any exception —
+   see `2026-07-27-pogrn-inventorysync-design.md`).
+
+(A third claim point existed in the Frappe source for inventory sync —
+moot here since that flow was deliberately not ported; see item 6 in
+Source above.)
 
 This matters more in Lambda than it did in Frappe: `unicommercePostInvoices`
 running on a fixed schedule **and** being manually re-invoked (e.g. from
@@ -180,17 +193,30 @@ likely than concurrent Frappe background jobs, not less.
 
 ## Cutover runbook
 
+**Updated 2026-07-28**: `InventorySync` (SAP outward transfer → UC stock
+REMOVE) was built, live-tested, and deliberately deleted — UC already
+decrements its own stock the moment an order ships, so a manual REMOVE
+double-acted on the same event. It is not part of this runbook. The real
+6-flow build is `Fetch`, `PostInvoices`, `PostCreditNotes`, `PoGrn`,
+`Recon`, `DashboardApi` — see `2026-07-27-pogrn-inventorysync-design.md`
+for the full removal rationale and `docs/migration/STATUS.md` for current
+build/deploy status.
+
 1. Build `services/unicommerce-b2c` with all schedules `enabled: false`,
    deploy to a `dev` stage, point at **test/sandbox Unicommerce
    credentials and a non-prod SAP company** if one exists (same mistake
    to avoid as Phase 0.5 — never point a freshly-deployed, untested stack
-   at prod SAP with schedules on).
+   at prod SAP with schedules on). **Done** — deployed to `dev` against
+   the `india_test` SAP company.
 2. Manually invoke each function once (`serverless invoke -f fetchOrders`
    etc.) against sandbox data, verify output shape matches what the
    Frappe worker currently produces (same order fields, same SAP payload
-   shape via `mappers/sap_payload.py`'s logic ported over).
+   shape via `mappers/sap_payload.py`'s logic ported over). **Done** —
+   all 6 flows live-verified against `dev` + `india_test`, including
+   real writes for `PoGrn` (PO8975).
 3. Deploy to prod stage, **schedules still `enabled: false`**, prod SSM
-   params set.
+   params set. **Not started** — prod SSM (`/unicommerce/api_credentials`,
+   `/unicommerce/settings`, default `/sap/*`) is still empty.
 4. Enable **read-only** functions first (`fetchOrders`, `fetchReturns`)
    with schedules on, Frappe's fetch crons **left running in parallel**
    — compare row-for-row in Postgres vs what Frappe's
@@ -199,16 +225,20 @@ likely than concurrent Frappe background jobs, not less.
    each other or with SAP.
 5. Once fetch matches for a few days, cut over the **write** paths
    (`unicommercePostInvoices`, `unicommercePostCreditNotes`,
-   `unicommercePoGrn`, `unicommerceInventorySync`, `unicommerceRecon`) one
-   at a time — disable the corresponding Frappe cron entry immediately
-   before enabling the matching Lambda schedule, same back-to-back
-   discipline as Phase 0.5. Post invoices first (highest business value,
+   `unicommercePoGrn`, `unicommerceRecon`) one at a time — disable the
+   corresponding Frappe cron entry immediately before enabling the
+   matching Lambda schedule, same back-to-back discipline as Phase 0.5.
+   Suggested order: **post invoices** first (highest business value,
    most heavily reworked in the Frappe fix pass so its edge cases are
-   freshest), inventory sync last (it's the one most likely to double-act
-   if the atomic claim above isn't ported correctly, so prove the pattern
-   on lower-stakes flows first).
-6. Repoint `kiosk-frontend`'s Unicommerce dashboard at the new API +
-   Cognito pool.
+   freshest), **post credit notes** next (depends on a posted invoice
+   already existing), **PoGrn** next (independent of the invoice/CN
+   path — SAP-transfer-triggered, its own claim/state machine), **recon**
+   last (reconciles what the other three just posted, so it has nothing
+   to check until they're live).
+6. Build a new dashboard against `unicommerceDashboardApi` (HTTP API +
+   Cognito pool, already live on `dev`) — `kiosk-frontend` will not be
+   repointed; it's being retired, not reused, per the 2026-07-28
+   decision in `docs/migration/STATUS.md`.
 7. After a stable verification window (your call, no deadline), delete
    the Frappe `unicommerce/` module and its doctypes.
 
@@ -234,7 +264,7 @@ likely than concurrent Frappe background jobs, not less.
 
 | Item | Estimate | Notes |
 |---|---|---|
-| Lambda (7 scheduled functions, 30-min cadence, seconds-scale duration) | $0–2/mo | Well inside the 1M req + 400,000 GB-s free tier at this volume |
+| Lambda (6 scheduled functions, 30-min cadence, seconds-scale duration) | $0–2/mo | Well inside the 1M req + 400,000 GB-s free tier at this volume |
 | Dashboard Lambda + HTTP API | <$1/mo | Internal staff usage, low thousands of requests/mo, HTTP API is $1/1M requests |
 | Cognito (new pool) | $0/mo | Essentials tier, free to 10,000 MAU |
 | S3 recon bucket | <$1/mo | Small reconciliation exports |
