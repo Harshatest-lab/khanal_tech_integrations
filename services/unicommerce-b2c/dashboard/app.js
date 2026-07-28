@@ -1,11 +1,11 @@
-/** Unicommerce B2C dashboard — dev stack, ap-south-1.
+/** Unicommerce B2C dashboard — prod stack, ap-south-1.
  * Auth: Cognito User Pool JWT authorizer on the HTTP API directly (no
  * backend login proxy) — this file calls Cognito's IdP endpoint straight,
  * same pattern as the amazon-us-b2c dashboard this was cloned from.
  */
-const API_BASE = "https://uuid78uhog.execute-api.ap-south-1.amazonaws.com";
+const API_BASE = "https://coqi1t0nvb.execute-api.ap-south-1.amazonaws.com";
 const COGNITO_REGION = "ap-south-1";
-const COGNITO_CLIENT_ID = "30aoa8aoru4dp31fhlrv80cpu2";
+const COGNITO_CLIENT_ID = "5bvg6pblh922ldd5n065vvpf84";
 const COGNITO_IDP_URL = `https://cognito-idp.${COGNITO_REGION}.amazonaws.com/`;
 
 const AUTH_STORAGE_KEY = "unicommerce_b2c_dashboard_auth";
