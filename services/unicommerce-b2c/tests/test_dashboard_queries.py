@@ -93,3 +93,14 @@ def test_fetch_order_detail_missing_header_returns_none_header():
     assert out["header"] is None
     assert out["lines"] == []
     assert out["credit_notes"] == []
+
+
+def test_fetch_recon_gaps_includes_mismatch_reason():
+    script = [
+        (
+            ["uniware_id", "channel_name", "ar_invoice_tax_diff", "ar_invoice_mismatch_reason"],
+            [("A", "FLIPKART", 1.5, "line 2: qty mismatch (expected 3, SAP shows 2)")],
+        ),
+    ]
+    out = dq.fetch_recon_gaps(_FakeConn(script), limit=50)
+    assert out["items"][0]["ar_invoice_mismatch_reason"] == "line 2: qty mismatch (expected 3, SAP shows 2)"

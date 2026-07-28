@@ -232,15 +232,15 @@ def fetch_sync_log(conn: psycopg.Connection, *, limit: int, mode: str | None = N
 
 def fetch_recon_gaps(conn: psycopg.Connection, *, limit: int, min_diff: float = 1.0) -> dict[str, Any]:
     """Posted orders whose SAP invoice tax or unit-price total differs from
-    expected (diffs are computed inline at post time -- read-only view of
-    them, safe even though the recon-refresh worker isn't ported yet)."""
+    expected (diffs are computed inline at post time and refreshed
+    periodically by Recon -- read-only view of them)."""
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT uniware_id, channel_name, sap_ar_invoice_docentry,
                    ar_invoice_tax_expected, ar_invoice_tax_actual, ar_invoice_tax_diff,
                    ar_invoice_unit_price_expected, ar_invoice_unit_price_actual, ar_invoice_unit_price_diff,
-                   updated_at
+                   ar_invoice_mismatch_reason, updated_at
             FROM unicommerce_orders
             WHERE pipeline_status = 'posted'
               AND (COALESCE(ar_invoice_tax_diff, 0) >= %s OR COALESCE(ar_invoice_unit_price_diff, 0) >= %s)
