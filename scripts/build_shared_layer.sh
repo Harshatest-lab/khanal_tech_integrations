@@ -7,7 +7,12 @@ rm -rf "${BUILD_DIR}"
 mkdir -p "${BUILD_DIR}/python"
 # psycopg + requests: pinned in layers/requirements.txt so every build (local,
 # CI, deploy) installs identical versions — bump the pin, don't loosen the range.
-python3 -m pip install -r "${ROOT}/layers/requirements.txt" -t "${BUILD_DIR}/python" --quiet
+# --platform/--only-binary force Lambda-compatible manylinux wheels even when
+# this script runs on a non-Linux dev machine (psycopg[binary] has a C
+# extension; a native macOS build silently produces a darwin .so that fails
+# to import at Lambda runtime).
+python3 -m pip install -r "${ROOT}/layers/requirements.txt" -t "${BUILD_DIR}/python" --quiet \
+  --platform manylinux2014_x86_64 --python-version 3.12 --implementation cp --only-binary=:all:
 # HANA driver for Lambda (Linux x86_64). Pin kept in sync with layers/requirements.txt's
 # comment. On macOS, cross-install may fail — run this script in CI/Linux.
 if [[ "${INSTALL_HDBCLI:-1}" != "0" ]]; then

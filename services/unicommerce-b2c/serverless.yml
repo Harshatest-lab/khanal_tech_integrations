@@ -250,6 +250,66 @@ resources:
         SupportedIdentityProviders:
           - COGNITO
 
+    # Static hosting for services/unicommerce-b2c/dashboard/ — private bucket,
+    # read only via CloudFront's Origin Access Control (no public bucket
+    # policy, no website-hosting endpoint). Content is pushed with
+    # `aws s3 sync` after deploy, not managed by this stack.
+    DashboardSiteBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:service}-${self:provider.stage}-dashboard-site
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+
+    DashboardOriginAccessControl:
+      Type: AWS::CloudFront::OriginAccessControl
+      Properties:
+        OriginAccessControlConfig:
+          Name: ${self:service}-${self:provider.stage}-dashboard-oac
+          OriginAccessControlOriginType: s3
+          SigningBehavior: always
+          SigningProtocol: sigv4
+
+    DashboardDistribution:
+      Type: AWS::CloudFront::Distribution
+      Properties:
+        DistributionConfig:
+          Enabled: true
+          DefaultRootObject: index.html
+          PriceClass: PriceClass_100
+          Origins:
+            - Id: dashboardS3Origin
+              DomainName: !GetAtt DashboardSiteBucket.RegionalDomainName
+              OriginAccessControlId: !Ref DashboardOriginAccessControl
+              S3OriginConfig:
+                OriginAccessIdentity: ""
+          DefaultCacheBehavior:
+            TargetOriginId: dashboardS3Origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD]
+            CachedMethods: [GET, HEAD]
+            Compress: true
+            # AWS managed "CachingOptimized" policy.
+            CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+
+    DashboardBucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket: !Ref DashboardSiteBucket
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: cloudfront.amazonaws.com
+              Action: s3:GetObject
+              Resource: !Sub "${DashboardSiteBucket.Arn}/*"
+              Condition:
+                StringEquals:
+                  AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${DashboardDistribution}"
+
   Outputs:
     UnicommerceDashboardUserPoolId:
       Description: Cognito User Pool ID for the Unicommerce dashboard login
@@ -257,3 +317,9 @@ resources:
     UnicommerceDashboardUserPoolClientId:
       Description: Cognito app client ID for the Unicommerce dashboard login
       Value: !Ref UnicommerceDashboardUserPoolClient
+    DashboardSiteBucketName:
+      Description: S3 bucket to sync services/unicommerce-b2c/dashboard/ into
+      Value: !Ref DashboardSiteBucket
+    DashboardCloudFrontUrl:
+      Description: Public URL for the Unicommerce dashboard
+      Value: !Sub "https://${DashboardDistribution.DomainName}"
