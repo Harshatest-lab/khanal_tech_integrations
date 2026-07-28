@@ -180,17 +180,30 @@ likely than concurrent Frappe background jobs, not less.
 
 ## Cutover runbook
 
+**Updated 2026-07-28**: `InventorySync` (SAP outward transfer → UC stock
+REMOVE) was built, live-tested, and deliberately deleted — UC already
+decrements its own stock the moment an order ships, so a manual REMOVE
+double-acted on the same event. It is not part of this runbook. The real
+6-flow build is `Fetch`, `PostInvoices`, `PostCreditNotes`, `PoGrn`,
+`Recon`, `DashboardApi` — see `2026-07-27-pogrn-inventorysync-design.md`
+for the full removal rationale and `docs/migration/STATUS.md` for current
+build/deploy status.
+
 1. Build `services/unicommerce-b2c` with all schedules `enabled: false`,
    deploy to a `dev` stage, point at **test/sandbox Unicommerce
    credentials and a non-prod SAP company** if one exists (same mistake
    to avoid as Phase 0.5 — never point a freshly-deployed, untested stack
-   at prod SAP with schedules on).
+   at prod SAP with schedules on). **Done** — deployed to `dev` against
+   the `india_test` SAP company.
 2. Manually invoke each function once (`serverless invoke -f fetchOrders`
    etc.) against sandbox data, verify output shape matches what the
    Frappe worker currently produces (same order fields, same SAP payload
-   shape via `mappers/sap_payload.py`'s logic ported over).
+   shape via `mappers/sap_payload.py`'s logic ported over). **Done** —
+   all 6 flows live-verified against `dev` + `india_test`, including
+   real writes for `PoGrn` (PO8975).
 3. Deploy to prod stage, **schedules still `enabled: false`**, prod SSM
-   params set.
+   params set. **Not started** — prod SSM (`/unicommerce/api_credentials`,
+   `/unicommerce/settings`, default `/sap/*`) is still empty.
 4. Enable **read-only** functions first (`fetchOrders`, `fetchReturns`)
    with schedules on, Frappe's fetch crons **left running in parallel**
    — compare row-for-row in Postgres vs what Frappe's
@@ -199,16 +212,20 @@ likely than concurrent Frappe background jobs, not less.
    each other or with SAP.
 5. Once fetch matches for a few days, cut over the **write** paths
    (`unicommercePostInvoices`, `unicommercePostCreditNotes`,
-   `unicommercePoGrn`, `unicommerceInventorySync`, `unicommerceRecon`) one
-   at a time — disable the corresponding Frappe cron entry immediately
-   before enabling the matching Lambda schedule, same back-to-back
-   discipline as Phase 0.5. Post invoices first (highest business value,
+   `unicommercePoGrn`, `unicommerceRecon`) one at a time — disable the
+   corresponding Frappe cron entry immediately before enabling the
+   matching Lambda schedule, same back-to-back discipline as Phase 0.5.
+   Suggested order: **post invoices** first (highest business value,
    most heavily reworked in the Frappe fix pass so its edge cases are
-   freshest), inventory sync last (it's the one most likely to double-act
-   if the atomic claim above isn't ported correctly, so prove the pattern
-   on lower-stakes flows first).
-6. Repoint `kiosk-frontend`'s Unicommerce dashboard at the new API +
-   Cognito pool.
+   freshest), **post credit notes** next (depends on a posted invoice
+   already existing), **PoGrn** next (independent of the invoice/CN
+   path — SAP-transfer-triggered, its own claim/state machine), **recon**
+   last (reconciles what the other three just posted, so it has nothing
+   to check until they're live).
+6. Build a new dashboard against `unicommerceDashboardApi` (HTTP API +
+   Cognito pool, already live on `dev`) — `kiosk-frontend` will not be
+   repointed; it's being retired, not reused, per the 2026-07-28
+   decision in `docs/migration/STATUS.md`.
 7. After a stable verification window (your call, no deadline), delete
    the Frappe `unicommerce/` module and its doctypes.
 
