@@ -44,35 +44,32 @@ provider:
             - ses:SendEmail
             - ses:SendRawEmail
           Resource: "*"
-        # SAP Service Layer + HANA — India entity, TEST company DB while
-        # this service is still unverified (profile "india_test" ->
-        # /sap/india_test/* — same India physical host/entity delivery-api
-        # uses in prod at /sap/* default, confirmed 2026-07-23, but a
-        # separate SSM param family + session cache so nothing here can
-        # ever touch delivery-api's live session. NOT amazon-us-b2c/
-        # B2C_Invoice's /sap/inc/* (US entity) either. Cut over to the
-        # real India entity at go-live by removing the SAP_SL_PROFILE /
-        # HANA_PROFILE overrides below (falls back to default /sap/*) —
-        # do NOT repoint this param family's values to prod; add a new
-        # profile the same way instead, so dev stays isolated from prod
-        # forever, not just until someone forgets and flips a value.
-        # Resource paths here MUST match SAP_SL_PROFILE / HANA_PROFILE
-        # below exactly (IAM won't auto-follow an env var) — if the
-        # profile changes, update both places together.
+        # SAP Service Layer + HANA — India entity. Profile (and therefore
+        # SSM prefix) is keyed by stage, see custom.sapProfileByStage /
+        # custom.currentSapPrefix below: "dev" stays on the TEST company
+        # DB (/sap/india_test/*) forever, so it can never touch
+        # delivery-api's live session; "prod" resolves to the same
+        # default /sap/* family delivery-api already uses in production
+        # (confirmed same physical host/entity, 2026-07-23). NOT
+        # amazon-us-b2c/B2C_Invoice's /sap/inc/* (US entity) either.
+        # Resource paths here are built from the same
+        # custom.currentSapPrefix the environment vars below use, so IAM
+        # and env always agree per-stage automatically — no manual
+        # two-places-to-edit step at cutover.
         - Effect: Allow
           Action:
             - ssm:GetParameter
           Resource:
-            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/india_test/hana_config
-            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/india_test/hana_credentials
-            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/india_test/sl_config
-            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/india_test/credentials
+            - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.currentSapPrefix}/hana_config
+            - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.currentSapPrefix}/hana_credentials
+            - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.currentSapPrefix}/sl_config
+            - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.currentSapPrefix}/credentials
         - Effect: Allow
           Action:
             - ssm:GetParameter
             - ssm:PutParameter
           Resource:
-            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/india_test/b1_session
+            - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.currentSapPrefix}/b1_session
         # Unicommerce posting settings (channel/customer/tax/warehouse maps —
         # replaces the Frappe "Unicommerce Settings" doctype).
         - Effect: Allow
@@ -89,15 +86,16 @@ provider:
     UC_ALERT_ADMIN_EMAIL: ${env:UC_ALERT_ADMIN_EMAIL, ''}
     UC_ALERT_FROM_EMAIL: ${env:UC_ALERT_FROM_EMAIL, ''}
     UC_SES_REGION: ${env:UC_SES_REGION, 'ap-south-1'}
-    # Profile "india_test" -> /sap/india_test/* — a separate SSM param
-    # family + session cache from delivery-api's live /sap/* default, so
-    # this unverified service can never touch delivery-api's prod SAP
-    # session. Cut over to the real India entity at go-live by removing
-    # these two profile lines (falls back to unset -> default /sap/*) —
-    # do NOT repoint /sap/india_test/*'s values to the prod company DB,
-    # add a new profile the same way instead.
-    SAP_SL_PROFILE: india_test
-    HANA_PROFILE: india_test
+    # Stage-keyed profile — "dev" stays on india_test (/sap/india_test/*)
+    # forever, so it can never touch delivery-api's live prod SAP
+    # session; "prod" resolves to empty, which khanal_shared's SSM config
+    # modules treat as "no profile" -> default /sap/* (the same family
+    # delivery-api already uses live). See custom.sapProfileByStage below
+    # — do NOT repoint /sap/india_test/*'s values to the prod company DB;
+    # add a new profile entry the same way instead if a third environment
+    # is ever needed.
+    SAP_SL_PROFILE: ${self:custom.currentSapProfile}
+    HANA_PROFILE: ${self:custom.currentSapProfile}
     SAP_SL_USE_SSM: ${env:SAP_SL_USE_SSM, 'true'}
     SAP_SL_VERIFY_SSL: ${env:SAP_SL_VERIFY_SSL, 'true'}
     HANA_USE_SSM: ${env:HANA_USE_SSM, '1'}
@@ -105,6 +103,21 @@ provider:
 custom:
   ucApiParamName: ${env:UC_API_PARAM_NAME, '/unicommerce/api_credentials'}
   ucSettingsParamName: ${env:UC_SETTINGS_PARAM_NAME, '/unicommerce/settings'}
+  # Stage-keyed SAP/HANA profile -- "dev" stays isolated on the TEST
+  # company DB forever; "prod" resolves to "" (khanal_shared's SSM config
+  # treats empty/unset as "default" -> /sap/*, the same family
+  # delivery-api already uses live). Any stage not listed here
+  # (staging, one-off preview stages, etc.) falls back to india_test, the
+  # safer default -- never silently defaults to touching the prod SAP
+  # session.
+  sapProfileByStage:
+    dev: india_test
+    prod: ""
+  currentSapProfile: ${self:custom.sapProfileByStage.${self:provider.stage}, 'india_test'}
+  sapPrefixByStage:
+    dev: /sap/india_test
+    prod: /sap
+  currentSapPrefix: ${self:custom.sapPrefixByStage.${self:provider.stage}, '/sap/india_test'}
 
 layers:
   shared:
