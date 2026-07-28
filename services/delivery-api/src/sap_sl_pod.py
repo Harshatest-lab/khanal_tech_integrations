@@ -10,8 +10,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 from khanal_shared.logging import log_json
-
-from src.delhivery_store import fetch_doc_entry_for_lr, save_pod_sap_sl_audit
 from khanal_shared.sap_sl import (
     build_opener_and_base_from_env,
     build_opener_and_base_via_ssm,
@@ -19,6 +17,9 @@ from khanal_shared.sap_sl import (
     sap_sl_request_json,
     sap_sl_use_ssm,
 )
+
+from src.delhivery_models import frappe_grn_key_from_delhivery_status, resolve_u_pod_date
+from src.delhivery_store import fetch_lr_sap_sync_context, save_pod_sap_sl_audit
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,9 @@ def maybe_sync_invoice_pod_after_db(
 ) -> None:
     """If SAP env is set and ``delhivery_lr.doc_entry`` exists, verify ``U_LRtrackno`` then PATCH POD fields.
 
-    ``U_FrappeGRNKey`` is updated from the **shipment-status** webhook (see ``sap_sl_shipment``), not here.
+    Always sends ``U_LRtrackno`` + ``U_Pod_Link`` when a POD URL exists.
+    ``U_POD_DATE`` uses priority: POD webhook date keys → delivered status RDS sources.
+    ``U_FrappeGRNKey`` is included when LR status is delivered-like / RTO.
 
     Outcome is stored on **this POD row** in ``delhivery_lr_pod.sap_pod_response`` (not ``delhivery_lr.sap_response``,
     which is reserved for Frappe). Swallows errors after logging — POD is already in Postgres; SAP must not poison SQS retries.
@@ -73,6 +76,9 @@ def maybe_sync_invoice_pod_after_db(
                 "phase": "skip",
                 "reason": "no_pod_url",
                 "lrnum": resolved_lrnum,
+                "has_pod_date": False,
+                "pod_date": None,
+                "pod_date_origin": "none",
                 "synced_at": datetime.now(timezone.utc).isoformat(),
             },
         )
@@ -80,7 +86,7 @@ def maybe_sync_invoice_pod_after_db(
 
     try:
         with pool.connection() as conn:
-            doc_entry_raw = fetch_doc_entry_for_lr(conn, resolved_lrnum)
+            ctx = fetch_lr_sap_sync_context(conn, resolved_lrnum)
     except Exception:
         log_json(
             logger,
@@ -97,12 +103,15 @@ def maybe_sync_invoice_pod_after_db(
                 "phase": "doc_entry_query_error",
                 "lrnum": resolved_lrnum,
                 "error": traceback.format_exc()[-1500:],
+                "has_pod_date": False,
+                "pod_date": None,
+                "pod_date_origin": "none",
                 "synced_at": datetime.now(timezone.utc).isoformat(),
             },
         )
         return
 
-    if not doc_entry_raw:
+    if not ctx or not ctx.get("doc_entry"):
         log_json(logger, logging.INFO, "delhivery_sap_pod_skip", reason="no_doc_entry", lrnum=resolved_lrnum)
         _safe_save_pod_sap_audit(
             pool,
@@ -112,12 +121,15 @@ def maybe_sync_invoice_pod_after_db(
                 "phase": "skip",
                 "reason": "no_doc_entry",
                 "lrnum": resolved_lrnum,
+                "has_pod_date": False,
+                "pod_date": None,
+                "pod_date_origin": "none",
                 "synced_at": datetime.now(timezone.utc).isoformat(),
             },
         )
         return
 
-    de_s = str(doc_entry_raw).strip()
+    de_s = str(ctx["doc_entry"]).strip()
     if not re.fullmatch(r"-?\d+", de_s):
         log_json(logger, logging.WARNING, "delhivery_sap_pod_skip", reason="invalid_doc_entry", doc_entry=de_s)
         _safe_save_pod_sap_audit(
@@ -129,11 +141,25 @@ def maybe_sync_invoice_pod_after_db(
                 "reason": "invalid_doc_entry",
                 "doc_entry_raw": de_s[:64],
                 "lrnum": resolved_lrnum,
+                "has_pod_date": False,
+                "pod_date": None,
+                "pod_date_origin": "none",
                 "synced_at": datetime.now(timezone.utc).isoformat(),
             },
         )
         return
     doc_entry = int(de_s)
+
+    lr_status = ctx.get("delhivery_status")
+    u_pod_date, pod_date_origin = resolve_u_pod_date(
+        pod_payload=fields.get("payload") if isinstance(fields.get("payload"), dict) else None,
+        delhivery_status=lr_status,
+        last_status_webhook=ctx.get("last_status_webhook"),
+        delivered_event_payload=ctx.get("delivered_event_payload"),
+        delivered_event_received_at=ctx.get("delivered_event_received_at"),
+        lr_updated_at=ctx.get("updated_at"),
+    )
+    grn = frappe_grn_key_from_delhivery_status(lr_status)
 
     try:
         if sap_sl_use_ssm():
@@ -150,6 +176,9 @@ def maybe_sync_invoice_pod_after_db(
                         "http_status": st_login,
                         "doc_entry": doc_entry,
                         "lrnum": resolved_lrnum,
+                        "has_pod_date": u_pod_date is not None,
+                        "pod_date": u_pod_date,
+                        "pod_date_origin": pod_date_origin,
                         "synced_at": datetime.now(timezone.utc).isoformat(),
                     },
                 )
@@ -176,6 +205,9 @@ def maybe_sync_invoice_pod_after_db(
                     "http_status": st_get,
                     "doc_entry": doc_entry,
                     "lrnum": resolved_lrnum,
+                    "has_pod_date": u_pod_date is not None,
+                    "pod_date": u_pod_date,
+                    "pod_date_origin": pod_date_origin,
                     "synced_at": datetime.now(timezone.utc).isoformat(),
                 },
             )
@@ -200,23 +232,22 @@ def maybe_sync_invoice_pod_after_db(
                     "doc_entry": doc_entry,
                     "expected_lrnum": str(resolved_lrnum).strip(),
                     "sap_u_lrtrackno": sap_lr,
+                    "has_pod_date": u_pod_date is not None,
+                    "pod_date": u_pod_date,
+                    "pod_date_origin": pod_date_origin,
                     "synced_at": datetime.now(timezone.utc).isoformat(),
                 },
             )
             return
 
-        pod_date = fields.get("pod_date")
-        u_pod_date: str | None
-        if pod_date is not None and hasattr(pod_date, "isoformat"):
-            u_pod_date = pod_date.isoformat()
-        else:
-            u_pod_date = None
-
         patch_body: dict[str, Any] = {
             "U_Pod_Link": pod_url.strip(),
             "U_LRtrackno": str(resolved_lrnum).strip(),
-            "U_POD_DATE": u_pod_date,
         }
+        if u_pod_date is not None:
+            patch_body["U_POD_DATE"] = u_pod_date
+        if grn is not None:
+            patch_body["U_FrappeGRNKey"] = grn
 
         patch_url = f"{base}/Invoices({doc_entry})"
         st_patch, patch_body_out = sap_sl_request_json(opener, "PATCH", patch_url, patch_body)
@@ -229,6 +260,9 @@ def maybe_sync_invoice_pod_after_db(
             doc_entry=doc_entry,
             lrnum=resolved_lrnum,
             has_pod_date=u_pod_date is not None,
+            pod_date=u_pod_date,
+            pod_date_origin=pod_date_origin,
+            u_frappe_grn_key=grn,
             http_status=st_patch,
         )
         _safe_save_pod_sap_audit(
@@ -241,6 +275,9 @@ def maybe_sync_invoice_pod_after_db(
                 "doc_entry": doc_entry,
                 "lrnum": resolved_lrnum,
                 "has_pod_date": u_pod_date is not None,
+                "pod_date": u_pod_date,
+                "pod_date_origin": pod_date_origin,
+                "u_frappe_grn_key": grn,
                 "response_preview": (
                     json.dumps(patch_body_out)[:800]
                     if isinstance(patch_body_out, (dict, list))
@@ -266,6 +303,9 @@ def maybe_sync_invoice_pod_after_db(
                 "phase": "error",
                 "doc_entry": doc_entry,
                 "lrnum": resolved_lrnum,
+                "has_pod_date": u_pod_date is not None,
+                "pod_date": u_pod_date,
+                "pod_date_origin": pod_date_origin,
                 "error": traceback.format_exc()[-1500:],
                 "synced_at": datetime.now(timezone.utc).isoformat(),
             },
