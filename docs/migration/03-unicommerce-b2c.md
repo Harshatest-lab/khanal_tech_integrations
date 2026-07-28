@@ -215,8 +215,10 @@ build/deploy status.
    all 6 flows live-verified against `dev` + `india_test`, including
    real writes for `PoGrn` (PO8975).
 3. Deploy to prod stage, **schedules still `enabled: false`**, prod SSM
-   params set. **Not started** — prod SSM (`/unicommerce/api_credentials`,
-   `/unicommerce/settings`, default `/sap/*`) is still empty.
+   params set. **Done 2026-07-28** — prod SSM populated (see
+   `STATUS.md`), stack `unicommerce-b2c-prod` deployed via the `Deploy`
+   GitHub Actions workflow, all 5 EventBridge schedule rules confirmed
+   `DISABLED`.
 4. Enable **read-only** functions first (`fetchOrders`, `fetchReturns`)
    with schedules on, Frappe's fetch crons **left running in parallel**
    — compare row-for-row in Postgres vs what Frappe's

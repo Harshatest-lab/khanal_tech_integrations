@@ -131,14 +131,20 @@ single place to check "where are we" without re-reading every phase doc.
      of a manual two-places-to-edit toggle — closes a real gap where the
      old plan (documented in `03-unicommerce-b2c.md`) only mentioned
      removing 2 env lines and forgot IAM would also need to change.
-     Verified via `serverless print` for both stages. Opened as
-     [PR #17](https://github.com/Khanal-Tech/Khanal_tech_serverless/pull/17),
-     not yet merged.
-   Still needed before go-live: merge PR #17, prod deploy (schedules
-   still `enabled: false`), then the parallel fetch-verification window
-   and staged write cutover per the Cutover runbook below — none of
-   that has started yet, so 2026-08-01 is tight for anything beyond
-   "prod stack exists but not cut over." Also worth confirming
+     Verified via `serverless print` for both stages. Merged as
+     [PR #17](https://github.com/Khanal-Tech/Khanal_tech_serverless/pull/17).
+   - **Prod stack deployed 2026-07-28** via the `Deploy` GitHub Actions
+     workflow (`service=unicommerce-b2c stage=prod`, from `main`) — run
+     [30335615034](https://github.com/Khanal-Tech/Khanal_tech_serverless/actions/runs/30335615034),
+     success in 3m28s. CloudFormation stack `unicommerce-b2c-prod` live
+     in `ap-south-1`, all 6 Lambdas + HTTP API + a new prod Cognito pool
+     created. **Verified all 5 EventBridge schedule rules are
+     `DISABLED`** — nothing fires automatically, exactly per the
+     runbook's "schedules still `enabled: false`" requirement.
+   Still needed before go-live: the parallel fetch-verification window
+   and staged write cutover per the Cutover runbook below — neither has
+   started yet, so 2026-08-01 is tight for anything beyond "prod stack
+   exists but not cut over." Also worth confirming
    `/unicommerce/settings`' series numbers (pulled from the **dev**
    Frappe bench 2026-07-24) match the real production company's actual
    configured series before enabling any write schedule.
