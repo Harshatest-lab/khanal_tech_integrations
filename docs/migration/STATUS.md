@@ -109,19 +109,39 @@ single place to check "where are we" without re-reading every phase doc.
    that (PoGrn, InventorySync build+removal, Recon, 14 live bugfixes)
    that were never merged** — reconciled with `main` (2 unrelated
    `delivery-api` "fixed the delivery date" commits main had gained
-   meanwhile) and opened as
+   meanwhile) and merged as
    [PR #16](https://github.com/Khanal-Tech/Khanal_tech_serverless/pull/16),
-   2026-07-28. 190 tests pass. **Not yet merged** — merging it directly
-   was blocked by the auto-mode classifier (shared-state action), needs
-   a human click on the PR.
-3. **Go-live target: 2026-08-01**, per user (2026-07-28). Before then,
-   still needed: prod SSM params (`/unicommerce/api_credentials`,
-   `/unicommerce/settings`, default `/sap/*` — currently only the
-   `india_test` profile is populated), prod deploy (schedules still
-   `enabled: false`), then the parallel fetch-verification window and
-   staged write cutover per the Cutover runbook below — none of that
-   has started yet, so 2026-08-01 is tight for anything beyond "prod
-   stack exists but not cut over."
+   2026-07-28. 190 tests pass. **Merged.**
+3. **Go-live target: 2026-08-01**, per user (2026-07-28). Prod SSM
+   status as of 2026-07-28:
+   - `/unicommerce/api_credentials`, `/unicommerce/settings` — **already
+     real prod values**, no action needed. Unicommerce has no sandbox at
+     all, so the values populated 2026-07-24 for `dev`-stack testing
+     were always the real production UC tenant.
+   - default `/sap/*` (Service Layer) — already existed, live-used by
+     `delivery-api` today.
+   - default `/sap/hana_config` / `/sap/hana_credentials` — **did not
+     exist** (`delivery-api` never used HANA directly, so nobody had
+     created these). Populated by cloning `india_test`'s HANA config
+     (same physical server, same login, confirmed by user) with only the
+     company schema swapped to the real value (`KFL_LIVE`).
+   - `serverless.yml`'s `SAP_SL_PROFILE`/`HANA_PROFILE` + matching IAM
+     resource ARNs are now a stage-keyed map (`dev` stays pinned to
+     `india_test` forever, `prod` resolves to default `/sap/*`) instead
+     of a manual two-places-to-edit toggle — closes a real gap where the
+     old plan (documented in `03-unicommerce-b2c.md`) only mentioned
+     removing 2 env lines and forgot IAM would also need to change.
+     Verified via `serverless print` for both stages. Opened as
+     [PR #17](https://github.com/Khanal-Tech/Khanal_tech_serverless/pull/17),
+     not yet merged.
+   Still needed before go-live: merge PR #17, prod deploy (schedules
+   still `enabled: false`), then the parallel fetch-verification window
+   and staged write cutover per the Cutover runbook below — none of
+   that has started yet, so 2026-08-01 is tight for anything beyond
+   "prod stack exists but not cut over." Also worth confirming
+   `/unicommerce/settings`' series numbers (pulled from the **dev**
+   Frappe bench 2026-07-24) match the real production company's actual
+   configured series before enabling any write schedule.
 4. **Kiosk-frontend repoint (runbook step 6) is cancelled** — user
    decided (2026-07-28) kiosk-frontend won't be used going forward. A
    new dashboard will be built directly against `unicommerceDashboardApi`
