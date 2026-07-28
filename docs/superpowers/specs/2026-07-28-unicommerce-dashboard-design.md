@@ -126,5 +126,11 @@ the rest of this migration):
   endpoint; not inventing one for parity's sake.
 - Bulk-only retry actions, no per-row retry — matches amazon's actual
   dashboard, not just the API's capability.
-- Static local-serve deployment (no S3/CloudFront) — matches amazon's
-  actual deployment, this is an internal ops tool.
+- ~~Static local-serve deployment (no S3/CloudFront)~~ — superseded
+  2026-07-28: hosted on S3 + CloudFront (OAC, private bucket) at the
+  user's request for a shareable URL. Bucket
+  `unicommerce-b2c-prod-dashboard-site`, distribution defined in
+  `services/unicommerce-b2c/serverless.yml`. `./serve.sh` still works
+  for local dev; deploys to the CDN are a manual
+  `aws s3 sync services/unicommerce-b2c/dashboard/ s3://unicommerce-b2c-prod-dashboard-site/`
+  after any frontend change (no CI step wired up for this yet).
