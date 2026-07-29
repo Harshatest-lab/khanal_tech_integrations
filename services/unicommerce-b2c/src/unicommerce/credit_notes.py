@@ -209,6 +209,15 @@ def post_credit_notes(
     Notes. start_date/end_date restrict to CNs whose parent UC sale
     order's order_date falls in the window (inclusive)."""
     settings = get_settings()
+
+    series_ok, series_msg = sap_client.validate_active_series(settings)
+    if not series_ok:
+        logger.error("post_credit_notes series guard ABORTED: %s", series_msg)
+        return {
+            "processed": 0, "posted": 0, "deferred": 0, "failed": 0, "dead": 0,
+            "skipped_parent_stuck": 0, "skipped_claimed": 0, "abort_reason": series_msg,
+        }
+
     rows = store.get_pending_credit_notes(conn, limit, start_date=start_date, end_date=end_date, channel_name=channel_name)
 
     processed = posted = deferred = failed = dead = 0
@@ -266,6 +275,12 @@ def post_one_credit_note(conn, uc_return_id: str) -> dict:
     + claim + post through the same atomic path the scheduler uses,
     independent of the pending/failed batch's limit and ordering."""
     settings = get_settings()
+
+    series_ok, series_msg = sap_client.validate_active_series(settings)
+    if not series_ok:
+        logger.error("post_one_credit_note(%s) series guard ABORTED: %s", uc_return_id, series_msg)
+        return {"status": "series_guard_failed", "uc_return_id": uc_return_id, "error": series_msg}
+
     cn = store.get_cn(conn, uc_return_id)
     if cn is None:
         return {"status": "not_found", "uc_return_id": uc_return_id}

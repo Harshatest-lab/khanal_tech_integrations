@@ -381,6 +381,12 @@ def post_one_order(conn, uniware_id: str) -> dict:
     fixed exactly this shortcut being skipped in the Frappe source's
     equivalent -- reproduce the fix here, not the original bug)."""
     settings = get_settings()
+
+    series_ok, series_msg = sap_client.validate_active_series(settings)
+    if not series_ok:
+        logger.error("post_one_order(%s) series guard ABORTED: %s", uniware_id, series_msg)
+        return {"status": "series_guard_failed", "uniware_id": uniware_id, "error": series_msg}
+
     store.unclaim_order(conn, uniware_id, "ready")
     if not store.claim_ready_order(conn, uniware_id):
         return {"status": "already_claimed", "uniware_id": uniware_id}
