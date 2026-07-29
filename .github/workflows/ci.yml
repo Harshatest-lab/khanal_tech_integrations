@@ -32,42 +32,13 @@ jobs:
 
       - name: Build shared Lambda layer
         run: bash scripts/build_shared_layer.sh
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Serverless package (delivery-api)
-        working-directory: services/delivery-api
-        env:
-          # Placeholders for `serverless package` only (not validated against AWS).
-          LAMBDA_VPC_SECURITY_GROUP_ID: sg-0123456789abcdef
-          LAMBDA_VPC_SUBNET_ID_1: subnet-0123456789abcdef0
-          LAMBDA_VPC_SUBNET_ID_2: subnet-0123456789abcdef1
-        run: |
-          npm install
-          npx serverless package --stage dev
-
-      - name: Serverless package (dogseeus-invoice)
-        working-directory: services/dogseeus-invoice
-        run: |
-          npm install
-          npx serverless package --stage dev
-
-      - name: Serverless package (B2C_Invoice)
-        working-directory: services/B2C_Invoice
-        run: |
-          npm install
-          npx serverless package --stage dev
-
-      - name: Serverless package (amazon-us-b2c)
-        working-directory: services/amazon-us-b2c
-        run: |
-          npm install
-          npx serverless package --stage dev
-
-      - name: Serverless package (unicommerce-b2c)
-        working-directory: services/unicommerce-b2c
-        run: |
-          npm install
-          npx serverless package --stage dev
+      # `serverless package` steps for all 5 services were removed here --
+      # Serverless Framework v3.40 signs a real STS call during `package`
+      # (confirmed: fails identically with or without VPC config, with
+      # "security token included in the request is invalid" even for
+      # syntactically-valid placeholder credentials), so it can never pass
+      # in CI without genuinely valid AWS credentials. Granting CI real
+      # OIDC-assumed credentials on every PR branch (not just main, which
+      # is all the deploy role's trust policy currently allows) was judged
+      # a bigger security-surface change than the config-syntax check these
+      # steps provided was worth -- pytest is the real correctness gate.

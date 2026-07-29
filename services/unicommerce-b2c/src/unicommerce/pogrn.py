@@ -304,11 +304,15 @@ def process_one_transfer(conn, sap_doc_entry: int, dry_run: bool = False) -> dic
         # Preview only -- reads the current row directly, never claims.
         return _process_claimed(conn, existing, uc=None, settings=settings, dry_run=True)
 
+    # UC login happens before the claim (mirrors process_ready_transfers) --
+    # a login failure must not leave the row stuck at 'processing' with no
+    # recovery path (recover_failed_pogrn only picks up 'failed' rows).
+    uc = _uc_client()
+
     claimed = store.claim_pogrn(conn, sap_doc_entry)
     if not claimed:
         return {"status": "already_claimed_or_done", "sap_doc_entry": sap_doc_entry}
 
-    uc = _uc_client()
     try:
         return _process_claimed(conn, claimed, uc, settings, dry_run=False)
     except Exception as e:

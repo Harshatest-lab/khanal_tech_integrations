@@ -296,5 +296,6 @@ def dashboard_handler(event, context):
 
         return _json_response(404, {"error": "Not found", "path": path})
     except Exception as exc:
-        logger.error("dashboard_api_error path=%s error=%s", path, exc)
-        return _json_response(500, {"error": str(exc)})
+        scrubbed = _scrub(str(exc))
+        logger.error("dashboard_api_error path=%s error=%s", path, scrubbed)
+        return _json_response(500, {"error": scrubbed})
