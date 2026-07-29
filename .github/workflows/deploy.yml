@@ -43,10 +43,18 @@ jobs:
   deploy:
     needs: test
     runs-on: ubuntu-latest
-    # Lets a "prod" GitHub Environment (if configured in repo settings
-    # with required reviewers) gate this job further -- optional, but
-    # the environment name is wired through either way.
-    environment: ${{ inputs.stage }}
+    # Deliberately NOT setting `environment:` here. Confirmed live
+    # (2026-07-29 prod deploy attempt) that a job-level `environment:` key
+    # changes the GitHub OIDC token's `sub` claim from
+    # repo:OWNER/REPO:ref:refs/heads/BRANCH to
+    # repo:OWNER/REPO:environment:NAME -- which the real AWS trust policy
+    # (khanal-prod-github-deploy, condition StringLike sub
+    # "repo:Khanal-Tech/Khanal_tech_serverless:ref:refs/heads/main") does
+    # not match, so AssumeRoleWithWebIdentity fails outright. If a GitHub
+    # Environment approval gate is wanted later, the AWS trust policy's
+    # sub condition must be updated (or given an OR'd second condition)
+    # for the environment-based sub *first* -- do not re-add this key
+    # without doing that.
     steps:
       - uses: actions/checkout@v4
 
