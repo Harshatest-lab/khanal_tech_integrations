@@ -15,6 +15,7 @@ from unicommerce.sap_payload import (  # noqa: E402
     _allocate_return_batches,
     _resolve_freight_gross,
     _resolve_sap_warehouse,
+    ar_invoice_payload,
     credit_note_payload,
     fefo_allocate_from_rows,
     sum_tax_total,
@@ -53,6 +54,52 @@ def test_fefo_allocate_within_tolerance_still_succeeds():
 def test_fefo_allocate_zero_or_negative_need_returns_empty():
     assert fefo_allocate_from_rows([{"batch_number": "B1", "quantity": 10}], 0) == []
     assert fefo_allocate_from_rows([{"batch_number": "B1", "quantity": 10}], -1) == []
+
+
+def test_ar_invoice_payload_fills_batch_numbers_for_fefo_line_without_explicit_batch():
+    """Regression: _post_order (post_invoices.py) must pass fefo_rows_cache
+    through to ar_invoice_payload -- without it this line's BatchNumbers
+    silently comes back [] even though _check_batches already confirmed
+    stock was available, and SAP rejects a batch-managed item post with no
+    batch allocation."""
+    settings = UnicommerceSettings(
+        channel_customer_map={"default": "C-DEFAULT"}, ar_invoice_series=10, tax_code_map={"0_intra": "GST0"}
+    )
+    uc_data = {
+        "code": "SO-1",
+        "items": [
+            {"itemSku": "SKU-A", "quantity": 5, "unitPrice": 100, "taxPercent": 0, "warehouseCode": "EC-FG"}
+        ],
+    }
+    payload, _tax = ar_invoice_payload(
+        uniware_id="SO-1", channel="FLIPKART", order_json="{}", uc_data=uc_data, order_date="2026-07-20",
+        settings=settings,
+        batch_managed_cache={"SKU-A": True},
+        fefo_rows_cache={("SKU-A", "EC-FG"): [{"batch_number": "B1", "quantity": 10}]},
+    )
+    line = payload["DocumentLines"][0]
+    assert line["BatchNumbers"] == [{"BatchNumber": "B1", "Quantity": 5.0, "ItemCode": "SKU-A"}]
+
+
+def test_ar_invoice_payload_batch_numbers_empty_without_fefo_cache():
+    """Same setup as above but with no fefo_rows_cache passed (the bug's
+    exact shape) -- confirms the failure mode this test class guards
+    against, so the fix above can't silently stop mattering."""
+    settings = UnicommerceSettings(
+        channel_customer_map={"default": "C-DEFAULT"}, ar_invoice_series=10, tax_code_map={"0_intra": "GST0"}
+    )
+    uc_data = {
+        "code": "SO-1",
+        "items": [
+            {"itemSku": "SKU-A", "quantity": 5, "unitPrice": 100, "taxPercent": 0, "warehouseCode": "EC-FG"}
+        ],
+    }
+    payload, _tax = ar_invoice_payload(
+        uniware_id="SO-1", channel="FLIPKART", order_json="{}", uc_data=uc_data, order_date="2026-07-20",
+        settings=settings,
+        batch_managed_cache={"SKU-A": True},
+    )
+    assert payload["DocumentLines"][0]["BatchNumbers"] == []
 
 
 def test_resolve_sap_warehouse_fba_channel_always_wins():

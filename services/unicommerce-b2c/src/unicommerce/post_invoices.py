@@ -114,7 +114,11 @@ def _check_batches(
     reservation_ctx: dict,
 ) -> dict:
     """Validate all batch-tracked lines have sufficient quantity.
-    Returns {"ok": bool, "missing": [...], "fefo_rows_cache": {...}, "fefo_overrides": {}}."""
+    Returns {"ok": bool, "missing": [...]}. Reuses the same fefo_cache the
+    caller must also pass into sap_payload.ar_invoice_payload() -- both
+    call fefo_allocate_from_rows() against identical, immutable rows for
+    the same (item_code, qty), so the allocation this validates is exactly
+    what the payload builder reconstructs (no separate handoff needed)."""
     items = sap_payload.parse_line_items(uc_data)
     aggregated: dict[tuple, dict] = {}
     shortages: list[dict] = []
@@ -244,6 +248,7 @@ def _post_order(conn, row: dict, settings, batch_managed_cache: dict, fefo_cache
         payload, tax_expected = sap_payload.ar_invoice_payload(
             uniware_id=uniware_id, channel=channel_name, order_json=order_json_str, uc_data=uc_data,
             order_date=order_date_str, settings=settings, batch_managed_cache=batch_managed_cache,
+            fefo_rows_cache=fefo_cache,
         )
     except Exception as e:
         _release_for_order(reservation_ctx, uniware_id)
