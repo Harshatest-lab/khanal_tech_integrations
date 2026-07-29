@@ -149,7 +149,7 @@ def test_refresh_recon_uses_default_month_window_and_reports_counts(monkeypatch)
 
     monkeypatch.setattr(recon, "_recon_invoice", fake_recon_invoice)
     monkeypatch.setattr(recon, "_recon_cn", fake_recon_cn)
-    monkeypatch.setattr(recon, "get_settings", lambda: object())
+    monkeypatch.setattr(recon, "get_settings", lambda **kw: object())
 
     result = recon.refresh_recon(_FakeConn(), limit=50)
 
@@ -177,7 +177,7 @@ def test_refresh_recon_respects_explicit_date_window(monkeypatch):
 
     monkeypatch.setattr(recon.store, "get_recon_invoice_candidates", fake_invoice_candidates)
     monkeypatch.setattr(recon.store, "get_recon_cn_candidates", fake_cn_candidates)
-    monkeypatch.setattr(recon, "get_settings", lambda: object())
+    monkeypatch.setattr(recon, "get_settings", lambda **kw: object())
 
     result = recon.refresh_recon(_FakeConn(), limit=10, start_date="2026-05-01", end_date="2026-05-31")
 
@@ -188,7 +188,7 @@ def test_refresh_recon_respects_explicit_date_window(monkeypatch):
 
 def test_recon_one_order_not_found(monkeypatch):
     monkeypatch.setattr(recon.store, "get_order_for_recon", lambda conn, uid: None)
-    monkeypatch.setattr(recon, "get_settings", lambda: object())
+    monkeypatch.setattr(recon, "get_settings", lambda **kw: object())
     result = recon.recon_one_order(_FakeConn(), "SO-404")
     assert result == {"status": "not_found", "uniware_id": "SO-404"}
 
@@ -198,7 +198,7 @@ def test_recon_one_order_nothing_to_reconcile(monkeypatch):
         recon.store, "get_order_for_recon",
         lambda conn, uid: {"sap_ar_invoice_docentry": None, "sap_ar_creditnote_docentry": None},
     )
-    monkeypatch.setattr(recon, "get_settings", lambda: object())
+    monkeypatch.setattr(recon, "get_settings", lambda **kw: object())
     result = recon.recon_one_order(_FakeConn(), "SO-1")
     assert result["status"] == "nothing_to_reconcile"
 
@@ -208,7 +208,7 @@ def test_recon_one_order_reconciles_invoice_and_cn(monkeypatch):
         recon.store, "get_order_for_recon",
         lambda conn, uid: {"sap_ar_invoice_docentry": 111, "sap_ar_creditnote_docentry": 222},
     )
-    monkeypatch.setattr(recon, "get_settings", lambda: object())
+    monkeypatch.setattr(recon, "get_settings", lambda **kw: object())
     calls = {"invoice": False, "cn": False}
     monkeypatch.setattr(recon, "_recon_invoice", lambda conn, uid, settings: calls.__setitem__("invoice", True))
     monkeypatch.setattr(recon, "_recon_cn", lambda conn, uid: calls.__setitem__("cn", True))

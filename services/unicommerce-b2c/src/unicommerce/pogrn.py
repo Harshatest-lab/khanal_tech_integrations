@@ -239,7 +239,7 @@ def _process_claimed(conn, claimed: dict, uc: UcClient | None, settings: Unicomm
 
 
 def process_ready_transfers(conn, limit: int = 20, dry_run: bool = False) -> dict:
-    settings = get_settings()
+    settings = get_settings(force_reload=True)
     staged = fetch_new_transfers(conn, limit=limit)
     recovery = store.recover_failed_pogrn(conn, limit=limit, max_attempts=MAX_ATTEMPTS, max_hours=MAX_HOURS)
 
@@ -287,7 +287,7 @@ def process_ready_transfers(conn, limit: int = 20, dry_run: bool = False) -> dic
 
 def process_one_transfer(conn, sap_doc_entry: int, dry_run: bool = False) -> dict:
     """Manual single-transfer retry/dry-run, bypassing the watermark."""
-    settings = get_settings()
+    settings = get_settings(force_reload=True)
     existing = store.get_pogrn_transfer(conn, sap_doc_entry)
     if not existing:
         watched = watched_warehouses()

@@ -208,7 +208,7 @@ def post_credit_notes(
     """Process pending/failed credit note staging rows into SAP Credit
     Notes. start_date/end_date restrict to CNs whose parent UC sale
     order's order_date falls in the window (inclusive)."""
-    settings = get_settings()
+    settings = get_settings(force_reload=True)
 
     series_ok, series_msg = sap_client.validate_active_series(settings)
     if not series_ok:
@@ -274,7 +274,7 @@ def post_one_credit_note(conn, uc_return_id: str) -> dict:
     """Manual retry path, mirroring post_invoices.post_one_order: prepare
     + claim + post through the same atomic path the scheduler uses,
     independent of the pending/failed batch's limit and ordering."""
-    settings = get_settings()
+    settings = get_settings(force_reload=True)
 
     series_ok, series_msg = sap_client.validate_active_series(settings)
     if not series_ok:

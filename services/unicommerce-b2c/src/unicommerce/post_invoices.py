@@ -298,7 +298,7 @@ def post_ready_orders(
 ) -> dict:
     from unicommerce import fetch_sync
 
-    settings = get_settings()
+    settings = get_settings(force_reload=True)
 
     series_ok, series_msg = sap_client.validate_active_series(settings)
     if not series_ok:
@@ -385,7 +385,7 @@ def post_one_order(conn, uniware_id: str) -> dict:
     same atomic path the scheduler uses (khanal_tech_integrations PR #1303
     fixed exactly this shortcut being skipped in the Frappe source's
     equivalent -- reproduce the fix here, not the original bug)."""
-    settings = get_settings()
+    settings = get_settings(force_reload=True)
 
     series_ok, series_msg = sap_client.validate_active_series(settings)
     if not series_ok:

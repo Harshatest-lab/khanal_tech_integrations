@@ -184,7 +184,7 @@ def _recon_cn(conn, uniware_id: str) -> None:
 
 
 def refresh_recon(conn, limit: int = DEFAULT_LIMIT, start_date: str | None = None, end_date: str | None = None) -> dict:
-    settings = get_settings()
+    settings = get_settings(force_reload=True)
     if not start_date or not end_date:
         start_date, end_date = current_and_previous_month_window()
 
@@ -217,7 +217,7 @@ def refresh_recon(conn, limit: int = DEFAULT_LIMIT, start_date: str | None = Non
 
 def recon_one_order(conn, uniware_id: str) -> dict:
     """Manual single-order retry, bypassing the date window and limit."""
-    settings = get_settings()
+    settings = get_settings(force_reload=True)
     row = store.get_order_for_recon(conn, uniware_id)
     if not row:
         return {"status": "not_found", "uniware_id": uniware_id}
