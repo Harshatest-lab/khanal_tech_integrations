@@ -51,8 +51,6 @@ class HANAConnectionPool:
     def __init__(self, params: HanaConnectionParams) -> None:
         self._params = params
         self._queue: Queue[PoolableConnection | Any] = Queue(maxsize=params.max_pool_size)
-        for _ in range(params.max_pool_size):
-            self._queue.put(self._wrap(self._create_connection()))
 
     def _wrap(self, conn: Any) -> PoolableConnection:
         return PoolableConnection(conn, self)

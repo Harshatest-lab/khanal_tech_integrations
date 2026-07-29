@@ -62,15 +62,13 @@ def _request(method: str, path: str, body: dict | None = None) -> tuple[int, Any
     """Service Layer request with one retry on a stale cached session (401)."""
     opener, base = build_opener_and_base_via_ssm()
     url = f"{base}/{path}"
-    try:
-        return sap_sl_request_json(opener, method, url, body=body)
-    except RuntimeError as e:
-        if "HTTP 401" in str(e):
-            logger.info("SAP session stale (401); re-logging in")
-            _invalidate_cached_session()
-            opener, base = build_opener_and_base_via_ssm()
-            return sap_sl_request_json(opener, method, f"{base}/{path}", body=body)
-        raise
+    status, resp_body = sap_sl_request_json(opener, method, url, body=body)
+    if status == 401:
+        logger.info("SAP session stale (401); re-logging in")
+        _invalidate_cached_session()
+        opener, base = build_opener_and_base_via_ssm()
+        return sap_sl_request_json(opener, method, f"{base}/{path}", body=body)
+    return status, resp_body
 
 
 # ── Document posting ─────────────────────────────────────────────────────

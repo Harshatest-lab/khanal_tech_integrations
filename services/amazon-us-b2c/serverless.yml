@@ -46,21 +46,23 @@ provider:
             - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/hana_config
             - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/hana_credentials
         # SAP Service Layer config + login creds — read-only, the code never
-        # writes these (only b1_session, below).
+        # writes these (only b1_session, below). Own profile (inc_amzn, not
+        # Walmart's inc) so this service's session churn can't force-expire
+        # Walmart's live session and vice versa — see SAP_SL_PROFILE below.
         - Effect: Allow
           Action:
             - ssm:GetParameter
           Resource:
-            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/sl_config
-            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/credentials
-        # Shared SSM-cached B1 session; PutParameter for session renewal +
-        # stale-session invalidation.
+            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc_amzn/sl_config
+            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc_amzn/credentials
+        # This service's own SSM-cached B1 session; PutParameter for session
+        # renewal + stale-session invalidation.
         - Effect: Allow
           Action:
             - ssm:GetParameter
             - ssm:PutParameter
           Resource:
-            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/b1_session
+            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc_amzn/b1_session
         # Failure alerts + recon summaries.
         - Effect: Allow
           Action:
@@ -78,11 +80,14 @@ provider:
     STAGE: ${self:provider.stage}
     LOG_LEVEL: ${env:LOG_LEVEL, 'INFO'}
     DATABASE_URL: ${env:DATABASE_URL, ''}
-    # SAP profile: /sap/inc/* (US INC entity) — same params the Walmart
-    # service uses, so all services share one SAP session.
+    # SAP profile: /sap/inc_amzn/* (US INC entity, same physical SAP tenant
+    # Walmart's /sap/inc/* points at). Own SL session cache on purpose — a
+    # 401 here force-expires only this service's session, not Walmart's.
+    # HANA stays on the shared 'inc' profile: read-only credentials, no
+    # mutable session state, so there's nothing to race over.
     SAP_SL_USE_SSM: ${env:SAP_SL_USE_SSM, 'true'}
     SAP_SL_VERIFY_SSL: ${env:SAP_SL_VERIFY_SSL, 'true'}
-    SAP_SL_PROFILE: ${env:SAP_SL_PROFILE, 'inc'}
+    SAP_SL_PROFILE: ${env:SAP_SL_PROFILE, 'inc_amzn'}
     HANA_USE_SSM: ${env:HANA_USE_SSM, '1'}
     HANA_PROFILE: ${env:HANA_PROFILE, 'inc'}
     AMZ_LWA_PARAM_NAME: ${env:AMZ_LWA_PARAM_NAME, '/amazon-us/lwa'}

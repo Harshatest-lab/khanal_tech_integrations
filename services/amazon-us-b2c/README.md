@@ -1,8 +1,11 @@
 # Amazon US B2C — SP-API → SAP B1 (Lambda)
 
 **Python 3.12** Lambdas (no VPC): Amazon SP-API → PostgreSQL staging →
-SAP B1 Service Layer (INC entity, profile `inc` → `/sap/inc/*` SSM params,
-shared B1 session with the other services). ~15-20k orders/month.
+SAP B1 Service Layer (INC entity, profile `inc_amzn` → `/sap/inc_amzn/*`
+SSM params — own B1 session, so a 401 here never force-expires Walmart's
+`/sap/inc/*` session, or vice versa; same physical SAP tenant, isolated
+session cache only). HANA stays on the shared read-only `inc` profile.
+~15-20k orders/month.
 
 Business logic ported from the production-validated Frappe pipeline
 (June 2026 reconciliation closed at 99.55% matched) — every rule below is
@@ -60,8 +63,14 @@ One-time setup (human ops actions, never in git):
 1. `psql "$DATABASE_URL" -f ../../sql/amazon_us_b2c.sql`
 2. SSM SecureString `/amazon-us/lwa`:
    `{"client_id":"...","client_secret":"...","refresh_token":"..."}`
-3. `/sap/inc/*` params already exist (shared with the Walmart service).
-   **TEST phase**: point `/sap/inc/credentials` CompanyDB *and*
+3. Create `/sap/inc_amzn/sl_config` and `/sap/inc_amzn/credentials`
+   (SecureString, same shape as Walmart's `/sap/inc/*` — copy its values,
+   this is the same physical SAP entity, only the session cache is
+   separate). `/sap/inc_amzn/b1_session` does not need pre-creating; the
+   first login writes it. HANA keeps reading the existing shared
+   `/sap/inc/hana_config` + `/sap/inc/hana_credentials` (read-only, no
+   session state, safe to share).
+   **TEST phase**: point `/sap/inc_amzn/credentials` CompanyDB *and*
    `/sap/inc/hana_config` schema at the TEST DB **together** — split
    targets mean HANA reads and SAP writes hit different companies.
 4. Verify SES identities for the alert addresses.

@@ -222,7 +222,7 @@ def dashboard_handler(event, context):
                 return _json_response(
                     200,
                     post_invoices.post_ready_orders(
-                        conn, limit=int(q.get("limit") or 50),
+                        conn, limit=dashboard_queries._clamp_limit(q.get("limit")),
                         start_date=q.get("start_date") or None, end_date=q.get("end_date") or None,
                     ),
                 )
@@ -234,7 +234,7 @@ def dashboard_handler(event, context):
                 return _json_response(
                     200,
                     credit_notes.post_credit_notes(
-                        conn, limit=int(q.get("limit") or 50),
+                        conn, limit=dashboard_queries._clamp_limit(q.get("limit")),
                         start_date=q.get("start_date") or None, end_date=q.get("end_date") or None,
                     ),
                 )

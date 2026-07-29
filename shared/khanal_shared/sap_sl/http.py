@@ -56,8 +56,13 @@ def sap_sl_request_json(
                 return status, None
             return status, json.loads(out.decode("utf-8"))
     except HTTPError as e:
-        err_body = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"SAP SL HTTP {e.code}: {err_body[:800]}") from e
+        err_raw = e.read()
+        if not err_raw:
+            return e.code, None
+        try:
+            return e.code, json.loads(err_raw.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return e.code, {"raw": err_raw.decode("utf-8", errors="replace")[:800]}
 
 
 def inject_sap_sl_cookies(jar: http.cookiejar.CookieJar, host: str, b1session: str, routeid: str) -> None:
