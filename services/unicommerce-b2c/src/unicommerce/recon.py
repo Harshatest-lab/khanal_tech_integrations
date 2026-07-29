@@ -30,7 +30,7 @@ import json
 import logging
 from datetime import date
 
-from unicommerce import hana_access, sap_client, sap_payload, store
+from unicommerce import post_invoices, sap_client, sap_payload, store
 from unicommerce.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -141,13 +141,18 @@ def _recon_invoice(conn, uniware_id: str, settings) -> None:
     order_date_str = order_date.isoformat() if hasattr(order_date, "isoformat") else str(order_date)
     order_json_str = row["order_json"] if isinstance(row["order_json"], str) else json.dumps(row["order_json"], default=str)
 
-    items = sap_payload.parse_line_items(uc_data)
-    item_codes = {str(i.get("itemSku") or "").strip() for i in items if i.get("itemSku")}
-    batch_managed_cache = hana_access.bulk_manage_batch_numbers(item_codes)
+    # Same pre-warm helper post_invoices.py uses for the real post -- keeps
+    # the FEFO allocation this rebuild uses in agreement with what an actual
+    # post would compute (see post_invoices._post_order's identical wiring;
+    # this rebuild only feeds price/tax totals into the diff below, but a
+    # payload that doesn't match what SAP would actually accept is still
+    # worth avoiding on principle).
+    batch_managed_cache, fefo_cache = post_invoices._prewarm_caches([row], settings)
 
     payload, tax_expected = sap_payload.ar_invoice_payload(
         uniware_id=uniware_id, channel=row.get("channel_name") or "", order_json=order_json_str,
         uc_data=uc_data, order_date=order_date_str, settings=settings, batch_managed_cache=batch_managed_cache,
+        fefo_rows_cache=fefo_cache,
     )
     payload_lines = payload.get("DocumentLines", [])
     expected_unit = sap_payload.sum_unit_price_total(payload_lines)

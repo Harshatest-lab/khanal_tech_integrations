@@ -86,6 +86,47 @@ def test_diagnose_no_mismatch_returns_empty():
     assert reason == ""
 
 
+# ── _recon_invoice wiring ──
+
+def test_recon_invoice_forwards_prewarmed_fefo_cache_to_payload_builder(monkeypatch):
+    """Regression: _recon_invoice rebuilds the invoice payload via
+    sap_payload.ar_invoice_payload to compute expected totals -- it must
+    pass the same fefo_rows_cache post_invoices.py's real post does
+    (same bug class fixed in _post_order, see PR #25), or the rebuild
+    silently diverges from what an actual post would send."""
+    row = {
+        "sap_ar_invoice_docentry": "999",
+        "channel_name": "FLIPKART",
+        "order_date": date(2026, 7, 20),
+        "order_json": "{}",
+    }
+    monkeypatch.setattr(recon.store, "get_order_for_recon", lambda conn, uid: row)
+
+    sentinel_fefo_cache = {"marker": "prewarmed"}
+    prewarm_calls = []
+
+    def fake_prewarm(orders, settings):
+        prewarm_calls.append(orders)
+        return {}, sentinel_fefo_cache
+
+    monkeypatch.setattr(recon.post_invoices, "_prewarm_caches", fake_prewarm)
+
+    captured = {}
+
+    def fake_ar_invoice_payload(**kwargs):
+        captured.update(kwargs)
+        return {"DocumentLines": []}, 0.0
+
+    monkeypatch.setattr(recon.sap_payload, "ar_invoice_payload", fake_ar_invoice_payload)
+    monkeypatch.setattr(recon.sap_client, "get_invoice_by_doc_entry", lambda doc_entry: {"DocumentLines": []})
+    monkeypatch.setattr(recon.store, "update_reconciliation_diffs", lambda *a, **k: None)
+
+    recon._recon_invoice(_FakeConn(), "SO-1", settings=object())
+
+    assert prewarm_calls == [[row]]
+    assert captured["fefo_rows_cache"] is sentinel_fefo_cache
+
+
 # ── refresh_recon / recon_one_order orchestration (monkeypatched) ──
 
 class _FakeConn:
