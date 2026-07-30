@@ -1,6 +1,6 @@
 # Migration progress tracker
 
-**Last updated:** 2026-07-27. Update this file as phases move — it's the
+**Last updated:** 2026-07-30. Update this file as phases move — it's the
 single place to check "where are we" without re-reading every phase doc.
 
 ## Right now — action items
@@ -148,6 +148,24 @@ single place to check "where are we" without re-reading every phase doc.
    `/unicommerce/settings`' series numbers (pulled from the **dev**
    Frappe bench 2026-07-24) match the real production company's actual
    configured series before enabling any write schedule.
+   **2026-08-01 confirmed by user (2026-07-30) as the date to enable
+   the prod schedules** — no longer just a target. Live-checked the
+   same day via `aws events list-rules --name-prefix
+   unicommerce-b2c-prod`: all 5 EventBridge rules (`Fetch`,
+   `PostInvoices`, `PostCreditNotes`, `PoGrn`, `Recon`) still
+   `DISABLED` as of 2026-07-30 — nothing has been flipped yet. Use the
+   **Step A/B/C staggered order** from the Cutover runbook below when
+   the date arrives: enable `Fetch` first (read-only, safe any time
+   before hooks are disabled), then `PostInvoices`+`PostCreditNotes`
+   together exactly when Frappe's hooks are disabled (not before —
+   double-post risk; not after — processing gap), then `PoGrn`+`Recon`
+   can lag by ~a day. Exact time-of-day for the Frappe-hooks disable
+   (which gates Step B) is still not fixed — confirm with user before
+   flipping `PostInvoices`/`PostCreditNotes`. Also fixed since the
+   2026-07-29 audit: the retry-invoices/retry-cn dashboard routes'
+   30s-httpApi-vs-900s-cron timeout mismatch (PR #28 stopgap + PR #29
+   real fix, both merged) — not a go-live blocker either way, but
+   closed before cutover regardless.
 4. **Kiosk-frontend repoint (runbook step 6) is cancelled** — user
    decided (2026-07-28) kiosk-frontend won't be used going forward. A
    new dashboard will be built directly against `unicommerceDashboardApi`
