@@ -196,10 +196,10 @@ CREATE INDEX IF NOT EXISTS idx_unicommerce_pogrn_staging_status
 -- Sync run history + watermarks (mirrors amazon_us_sync_log / amazon_us_watermarks).
 CREATE TABLE IF NOT EXISTS unicommerce_sync_log (
   id               bigserial   PRIMARY KEY,
-  mode             text        NOT NULL,   -- fetch_orders | fetch_returns | post_invoices | post_credit_notes | po_grn | recon
+  mode             text        NOT NULL,   -- fetch_orders | fetch_returns | post_invoices | post_credit_notes | retry_invoices | retry_cn | po_grn | recon
   started_at       timestamptz NOT NULL DEFAULT now(),
   finished_at      timestamptz,
-  status           text        NOT NULL DEFAULT 'running',   -- running | success | error
+  status           text        NOT NULL DEFAULT 'running',   -- running | success | error | aborted
   window_from      text,
   window_to        text,
   counts           jsonb       NOT NULL DEFAULT '{}'::jsonb,

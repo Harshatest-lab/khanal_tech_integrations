@@ -204,70 +204,80 @@ def post_credit_notes(
     start_date: str | None = None,
     end_date: str | None = None,
     channel_name: str | None = None,
+    sync_mode: str = "post_credit_notes",
 ) -> dict:
     """Process pending/failed credit note staging rows into SAP Credit
     Notes. start_date/end_date restrict to CNs whose parent UC sale
     order's order_date falls in the window (inclusive)."""
     settings = get_settings(force_reload=True)
+    run_id = store.start_sync_log(conn, sync_mode, start_date, end_date)
 
     series_ok, series_msg = sap_client.validate_active_series(settings)
     if not series_ok:
         logger.error("post_credit_notes series guard ABORTED: %s", series_msg)
-        return {
+        result = {
             "processed": 0, "posted": 0, "deferred": 0, "failed": 0, "dead": 0,
             "skipped_parent_stuck": 0, "skipped_claimed": 0, "abort_reason": series_msg,
         }
+        store.finish_sync_log(conn, run_id, "aborted", result)
+        return result
 
-    rows = store.get_pending_credit_notes(conn, limit, start_date=start_date, end_date=end_date, channel_name=channel_name)
+    try:
+        rows = store.get_pending_credit_notes(conn, limit, start_date=start_date, end_date=end_date, channel_name=channel_name)
 
-    processed = posted = deferred = failed = dead = 0
-    skipped_parent_stuck = skipped_claimed = 0
-    for row in rows:
-        uc_return_id = row["uc_return_id"]
-        processed += 1
+        processed = posted = deferred = failed = dead = 0
+        skipped_parent_stuck = skipped_claimed = 0
+        for row in rows:
+            uc_return_id = row["uc_return_id"]
+            processed += 1
 
-        # SAP DocEntry already written -- this record is posted regardless of status.
-        if row.get("sap_cn_docentry"):
-            store.mark_cn_posted(conn, uc_return_id, row["sap_cn_docentry"], "", row.get("uc_order_id"))
-            posted += 1
-            continue
-
-        try:
-            cn = store.get_cn(conn, uc_return_id)
-            prepare_result = _prepare_credit_note(conn, cn, settings)
-            if prepare_result == "stuck":
-                skipped_parent_stuck += 1
-                continue
-            if prepare_result == "dead":
-                dead += 1
-                continue
-            if not prepare_result:
-                deferred += 1
+            # SAP DocEntry already written -- this record is posted regardless of status.
+            if row.get("sap_cn_docentry"):
+                store.mark_cn_posted(conn, uc_return_id, row["sap_cn_docentry"], "", row.get("uc_order_id"))
+                posted += 1
                 continue
 
-            if not store.claim_credit_note(conn, uc_return_id):
-                skipped_claimed += 1
-                continue
+            try:
+                cn = store.get_cn(conn, uc_return_id)
+                prepare_result = _prepare_credit_note(conn, cn, settings)
+                if prepare_result == "stuck":
+                    skipped_parent_stuck += 1
+                    continue
+                if prepare_result == "dead":
+                    dead += 1
+                    continue
+                if not prepare_result:
+                    deferred += 1
+                    continue
 
-            _post_credit_note(conn, uc_return_id, settings)
-            posted += 1
-        except Exception as e:
-            transitioned = store.mark_cn_failed(conn, uc_return_id, str(e), settings.max_retry_attempts)
-            if transitioned == "dead":
-                dead += 1
-            else:
-                failed += 1
-            logger.error("Credit note processor failed for %s: %s", uc_return_id, e, exc_info=True)
+                if not store.claim_credit_note(conn, uc_return_id):
+                    skipped_claimed += 1
+                    continue
 
-    return {
-        "processed": processed,
-        "posted": posted,
-        "deferred": deferred,
-        "failed": failed,
-        "dead": dead,
-        "skipped_parent_stuck": skipped_parent_stuck,
-        "skipped_claimed": skipped_claimed,
-    }
+                _post_credit_note(conn, uc_return_id, settings)
+                posted += 1
+            except Exception as e:
+                transitioned = store.mark_cn_failed(conn, uc_return_id, str(e), settings.max_retry_attempts)
+                if transitioned == "dead":
+                    dead += 1
+                else:
+                    failed += 1
+                logger.error("Credit note processor failed for %s: %s", uc_return_id, e, exc_info=True)
+
+        result = {
+            "processed": processed,
+            "posted": posted,
+            "deferred": deferred,
+            "failed": failed,
+            "dead": dead,
+            "skipped_parent_stuck": skipped_parent_stuck,
+            "skipped_claimed": skipped_claimed,
+        }
+        store.finish_sync_log(conn, run_id, "success", result)
+        return result
+    except Exception as e:
+        store.finish_sync_log(conn, run_id, "error", error=str(e))
+        raise
 
 
 def post_one_credit_note(conn, uc_return_id: str) -> dict:

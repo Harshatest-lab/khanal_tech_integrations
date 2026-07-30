@@ -22,15 +22,6 @@ def test_clamp_limit_default_and_bounds():
     assert dq._clamp_limit(None, default=20) == 20
 
 
-def test_clamp_limit_retry_batch_override():
-    # retry-invoices/retry-cn pass a lower max_limit -- these run behind
-    # an httpApi route capped at 30s integration timeout, unlike the
-    # scheduled equivalents' 900s budget.
-    assert dq._clamp_limit(None, default=dq.DEFAULT_RETRY_BATCH_LIMIT, max_limit=dq.MAX_RETRY_BATCH_LIMIT) == dq.DEFAULT_RETRY_BATCH_LIMIT
-    assert dq._clamp_limit("5000", default=dq.DEFAULT_RETRY_BATCH_LIMIT, max_limit=dq.MAX_RETRY_BATCH_LIMIT) == dq.MAX_RETRY_BATCH_LIMIT
-    assert dq._clamp_limit("7", default=dq.DEFAULT_RETRY_BATCH_LIMIT, max_limit=dq.MAX_RETRY_BATCH_LIMIT) == 7
-
-
 def test_clamp_offset_never_negative():
     assert dq._clamp_offset(None) == 0
     assert dq._clamp_offset("-5") == 0

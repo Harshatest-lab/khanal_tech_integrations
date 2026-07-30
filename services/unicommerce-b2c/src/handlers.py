@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import sys
 import traceback
@@ -33,6 +34,21 @@ if str(_SRC) not in sys.path:
 
 from unicommerce import credit_notes, dashboard_queries, fetch_sync, pogrn, post_invoices, recon, store
 from unicommerce.alerts import send_alert
+
+# boto3 isn't a declared dev/CI dependency (only present in the real Lambda
+# runtime) -- lazy-import guarded the same way alerts.py's send_alert does,
+# so importing this module doesn't require it locally/in CI.
+_lambda_client = None
+
+
+def _get_lambda_client():
+    global _lambda_client
+    if _lambda_client is None:
+        import boto3
+
+        _lambda_client = boto3.client("lambda")
+    return _lambda_client
+
 
 logging.getLogger().setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
@@ -95,19 +111,25 @@ def post_invoices_handler(event, context):
     "end_date": "YYYY-MM-DD"?} — bulk posting run (promote fetched->ready +
     recovery + verify + ready-order posting, same as the scheduled cron;
     the date range keys off the order_date, matching the Ops Center UX).
-    {"uniware_id": str} — manual single-order retry, bypassing the limit."""
+    {"uniware_id": str} — manual single-order retry, bypassing the limit.
+    {"trigger": "manual_retry"} — set by dashboard_handler's async invoke;
+    logs to unicommerce_sync_log as "retry_invoices" instead of
+    "post_invoices" so the dashboard's sync-log panel can tell a manual
+    dashboard retry apart from the scheduled cron run."""
     ev = event or {}
 
     def _go():
         with store.connect() as conn:
             if ev.get("uniware_id"):
                 return post_invoices.post_one_order(conn, ev["uniware_id"])
+            sync_mode = "retry_invoices" if ev.get("trigger") == "manual_retry" else "post_invoices"
             return post_invoices.post_ready_orders(
                 conn,
                 limit=int(ev.get("limit") or 50),
                 channel_name=ev.get("channel_name"),
                 start_date=ev.get("start_date"),
                 end_date=ev.get("end_date"),
+                sync_mode=sync_mode,
             )
 
     return _run("post_invoices", _go)
@@ -117,19 +139,24 @@ def post_credit_notes_handler(event, context):
     """{"limit": 50?, "start_date": "YYYY-MM-DD"?, "end_date": "YYYY-MM-DD"?,
     "channel_name": str?} — bulk posting run, date range keys off the
     parent order's order_date (same UX as the Ops Center date picker).
-    {"uc_return_id": str} — manual single-return retry, bypassing the limit."""
+    {"uc_return_id": str} — manual single-return retry, bypassing the limit.
+    {"trigger": "manual_retry"} — set by dashboard_handler's async invoke;
+    logs to unicommerce_sync_log as "retry_cn" instead of
+    "post_credit_notes", same distinction as post_invoices_handler."""
     ev = event or {}
 
     def _go():
         with store.connect() as conn:
             if ev.get("uc_return_id"):
                 return credit_notes.post_one_credit_note(conn, ev["uc_return_id"])
+            sync_mode = "retry_cn" if ev.get("trigger") == "manual_retry" else "post_credit_notes"
             return credit_notes.post_credit_notes(
                 conn,
                 limit=int(ev.get("limit") or 50),
                 start_date=ev.get("start_date"),
                 end_date=ev.get("end_date"),
                 channel_name=ev.get("channel_name"),
+                sync_mode=sync_mode,
             )
 
     return _run("post_credit_notes", _go)
@@ -205,6 +232,21 @@ def _query_params(event: dict[str, Any]) -> dict[str, str]:
     return {str(k): str(v) for k, v in params.items() if v is not None} if isinstance(params, dict) else {}
 
 
+def _invoke_retry_batch(function_arn_env: str, q: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        "trigger": "manual_retry",
+        "limit": dashboard_queries._clamp_limit(q.get("limit")),
+        "start_date": q.get("start_date") or None,
+        "end_date": q.get("end_date") or None,
+    }
+    _get_lambda_client().invoke(
+        FunctionName=os.environ[function_arn_env],
+        InvocationType="Event",
+        Payload=json.dumps(payload),
+    )
+    return {"accepted": True, **payload}
+
+
 def dashboard_handler(event, context):
     method = _http_method(event)
     if method == "OPTIONS":
@@ -215,39 +257,24 @@ def dashboard_handler(event, context):
 
     try:
         # ── thin write actions (retry) ──
+        # Batch retries are handed off async to the scheduled Lambda (900s
+        # budget) instead of running inline here -- this route sits behind
+        # httpApi, which hard-caps its integration timeout at 30s regardless
+        # of this function's own configured timeout, so a batch large enough
+        # to run long could truncate mid-run. Single-order retries stay
+        # synchronous: one row, one SAP call, comfortably fits 30s and the
+        # caller gets a real result back immediately.
         if path.endswith("/v1/unicommerce/retry-invoices") and method == "POST":
-            with store.connect() as conn:
-                if (q.get("uniware_id") or "").strip():
+            if (q.get("uniware_id") or "").strip():
+                with store.connect() as conn:
                     return _json_response(200, post_invoices.post_one_order(conn, q["uniware_id"].strip()))
-                return _json_response(
-                    200,
-                    post_invoices.post_ready_orders(
-                        conn,
-                        limit=dashboard_queries._clamp_limit(
-                            q.get("limit"),
-                            default=dashboard_queries.DEFAULT_RETRY_BATCH_LIMIT,
-                            max_limit=dashboard_queries.MAX_RETRY_BATCH_LIMIT,
-                        ),
-                        start_date=q.get("start_date") or None, end_date=q.get("end_date") or None,
-                    ),
-                )
+            return _json_response(202, _invoke_retry_batch("POST_INVOICES_FUNCTION_ARN", q))
 
         if path.endswith("/v1/unicommerce/retry-cn") and method == "POST":
-            with store.connect() as conn:
-                if (q.get("uc_return_id") or "").strip():
+            if (q.get("uc_return_id") or "").strip():
+                with store.connect() as conn:
                     return _json_response(200, credit_notes.post_one_credit_note(conn, q["uc_return_id"].strip()))
-                return _json_response(
-                    200,
-                    credit_notes.post_credit_notes(
-                        conn,
-                        limit=dashboard_queries._clamp_limit(
-                            q.get("limit"),
-                            default=dashboard_queries.DEFAULT_RETRY_BATCH_LIMIT,
-                            max_limit=dashboard_queries.MAX_RETRY_BATCH_LIMIT,
-                        ),
-                        start_date=q.get("start_date") or None, end_date=q.get("end_date") or None,
-                    ),
-                )
+            return _json_response(202, _invoke_retry_batch("POST_CREDIT_NOTES_FUNCTION_ARN", q))
 
         if path.endswith("/v1/unicommerce/order-detail") and not (q.get("uniware_id") or "").strip():
             return _json_response(400, {"error": "uniware_id is required"})

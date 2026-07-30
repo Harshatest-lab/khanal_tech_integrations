@@ -503,9 +503,9 @@ async function runRetryInvoices(btn) {
   const original = btn.textContent;
   btn.textContent = "Retrying…";
   try {
-    const result = await apiPost("/v1/unicommerce/retry-invoices?limit=50");
+    await apiPost("/v1/unicommerce/retry-invoices?limit=50");
     hideError();
-    window.alert(`Retry finished.\n\n${JSON.stringify(result, null, 2)}`);
+    window.alert("Retry started -- check the Sync history panel below (mode: retry_invoices) for progress and results.");
     await Promise.all([loadStats(), loadOrders(false)]);
   } catch (err) {
     showError(`Retry failed: ${err.message}`);
@@ -653,9 +653,9 @@ async function runRetryCn(btn) {
   const original = btn.textContent;
   btn.textContent = "Retrying…";
   try {
-    const result = await apiPost("/v1/unicommerce/retry-cn?limit=50");
+    await apiPost("/v1/unicommerce/retry-cn?limit=50");
     hideError();
-    window.alert(`Retry finished.\n\n${JSON.stringify(result, null, 2)}`);
+    window.alert("Retry started -- check the Sync history panel below (mode: retry_cn) for progress and results.");
     await Promise.all([loadStats(), loadReturns()]);
   } catch (err) {
     showError(`Retry failed: ${err.message}`);

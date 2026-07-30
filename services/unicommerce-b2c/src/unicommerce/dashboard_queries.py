@@ -15,14 +15,6 @@ import psycopg
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
 
-# retry-invoices/retry-cn each make a live SAP HTTP round-trip per row and
-# run behind an httpApi route, which hard-caps its integration timeout at
-# 30s regardless of the Lambda's own configured timeout -- unlike the
-# scheduled equivalents (900s budget, DEFAULT_LIMIT=50 default). Keep
-# manual batches small enough to comfortably finish inside that window.
-DEFAULT_RETRY_BATCH_LIMIT = 5
-MAX_RETRY_BATCH_LIMIT = 10
-
 _ORDER_SORT_COLUMNS = {
     "order_date": "order_date",
     "updated_at": "updated_at",
@@ -31,14 +23,14 @@ _ORDER_SORT_COLUMNS = {
 }
 
 
-def _clamp_limit(raw: str | None, default: int = DEFAULT_LIMIT, max_limit: int = MAX_LIMIT) -> int:
+def _clamp_limit(raw: str | None, default: int = DEFAULT_LIMIT) -> int:
     if not raw:
         return default
     try:
         value = int(raw)
     except (TypeError, ValueError):
         return default
-    return max(1, min(value, max_limit))
+    return max(1, min(value, MAX_LIMIT))
 
 
 def _clamp_offset(raw: str | None) -> int:

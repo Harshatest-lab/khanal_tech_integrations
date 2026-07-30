@@ -294,68 +294,82 @@ def _post_order(conn, row: dict, settings, batch_managed_cache: dict, fefo_cache
 
 
 def post_ready_orders(
-    conn, limit: int = 50, channel_name: str | None = None, start_date: str | None = None, end_date: str | None = None
+    conn,
+    limit: int = 50,
+    channel_name: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    sync_mode: str = "post_invoices",
 ) -> dict:
     from unicommerce import fetch_sync
 
     settings = get_settings(force_reload=True)
+    run_id = store.start_sync_log(conn, sync_mode, start_date, end_date)
 
     series_ok, series_msg = sap_client.validate_active_series(settings)
     if not series_ok:
         logger.error("post_invoices series guard ABORTED: %s", series_msg)
-        return {"processed": 0, "posted": 0, "batch_hold": 0, "verify": 0, "failed": 0, "abort_reason": series_msg}
+        result = {"processed": 0, "posted": 0, "batch_hold": 0, "verify": 0, "failed": 0, "abort_reason": series_msg}
+        store.finish_sync_log(conn, run_id, "aborted", result)
+        return result
     logger.info("post_invoices series guard: %s", series_msg)
 
-    # First step of every posting run (matches Frappe workers/invoice.py):
-    # freshly-fetched orders sit at 'fetched' until this promotes the
-    # invoice-eligible ones to 'ready' -- without it the loop below sees
-    # nothing to post.
-    promoted = fetch_sync.promote_fetched_to_ready(conn, limit=limit, start_date=start_date, end_date=end_date)
+    try:
+        # First step of every posting run (matches Frappe workers/invoice.py):
+        # freshly-fetched orders sit at 'fetched' until this promotes the
+        # invoice-eligible ones to 'ready' -- without it the loop below sees
+        # nothing to post.
+        promoted = fetch_sync.promote_fetched_to_ready(conn, limit=limit, start_date=start_date, end_date=end_date)
 
-    store.recover_stuck_posting(conn, settings.posting_timeout_mins)
-    recovered_failed = store.recover_failed_orders(conn, limit)
-    batch_recovery = store.recover_batch_hold_orders(conn, limit, BATCH_HOLD_MAX_ATTEMPTS, BATCH_HOLD_MAX_HOURS)
-    verify_stats = _verify_posted_orders(conn, limit, settings)
+        store.recover_stuck_posting(conn, settings.posting_timeout_mins)
+        recovered_failed = store.recover_failed_orders(conn, limit)
+        batch_recovery = store.recover_batch_hold_orders(conn, limit, BATCH_HOLD_MAX_ATTEMPTS, BATCH_HOLD_MAX_HOURS)
+        verify_stats = _verify_posted_orders(conn, limit, settings)
 
-    reservation_ctx = new_reservation_context()
-    series_cache: dict = {}
+        reservation_ctx = new_reservation_context()
+        series_cache: dict = {}
 
-    orders = store.get_ready_orders(conn, limit, channel_name=channel_name)
-    batch_managed_cache, fefo_cache = _prewarm_caches(orders, settings)
+        orders = store.get_ready_orders(conn, limit, channel_name=channel_name)
+        batch_managed_cache, fefo_cache = _prewarm_caches(orders, settings)
 
-    processed = posted = batch_hold = verify = failed = skipped_claimed = 0
-    for row in orders:
-        if not store.claim_ready_order(conn, row["uniware_id"]):
-            skipped_claimed += 1
-            continue
-        processed += 1
-        try:
-            outcome, _shortages = _post_order(conn, row, settings, batch_managed_cache, fefo_cache, series_cache, reservation_ctx)
-            if outcome == "posted":
-                posted += 1
-            elif outcome == "batch_hold":
-                batch_hold += 1
-            elif outcome == "verify":
-                verify += 1
-            elif outcome == "failed":
+        processed = posted = batch_hold = verify = failed = skipped_claimed = 0
+        for row in orders:
+            if not store.claim_ready_order(conn, row["uniware_id"]):
+                skipped_claimed += 1
+                continue
+            processed += 1
+            try:
+                outcome, _shortages = _post_order(conn, row, settings, batch_managed_cache, fefo_cache, series_cache, reservation_ctx)
+                if outcome == "posted":
+                    posted += 1
+                elif outcome == "batch_hold":
+                    batch_hold += 1
+                elif outcome == "verify":
+                    verify += 1
+                elif outcome == "failed":
+                    failed += 1
+            except Exception as e:
                 failed += 1
-        except Exception as e:
-            failed += 1
-            _release_for_order(reservation_ctx, row["uniware_id"])
-            store.mark_failed(conn, row["uniware_id"], str(e), settings.max_retry_attempts)
-            logger.error("post_ready_orders: order %s crashed: %s", row["uniware_id"], e, exc_info=True)
+                _release_for_order(reservation_ctx, row["uniware_id"])
+                store.mark_failed(conn, row["uniware_id"], str(e), settings.max_retry_attempts)
+                logger.error("post_ready_orders: order %s crashed: %s", row["uniware_id"], e, exc_info=True)
 
-    return {
-        "promoted_to_ready": promoted["moved_to_ready"],
-        "deferred_fetched": promoted["deferred"],
-        "recovered_failed": recovered_failed,
-        "recovered_batch_hold": batch_recovery.get("recovered", 0),
-        "escalated_batch_hold": batch_recovery.get("escalated", 0),
-        "verify_checked": verify_stats["checked"], "verify_posted": verify_stats["posted"],
-        "verify_requeued": verify_stats["requeued"], "verify_dead": verify_stats["dead"],
-        "processed": processed, "posted": posted, "batch_hold": batch_hold,
-        "verify": verify, "failed": failed, "skipped_claimed": skipped_claimed,
-    }
+        result = {
+            "promoted_to_ready": promoted["moved_to_ready"],
+            "deferred_fetched": promoted["deferred"],
+            "recovered_failed": recovered_failed,
+            "recovered_batch_hold": batch_recovery.get("recovered", 0),
+            "escalated_batch_hold": batch_recovery.get("escalated", 0),
+            "verify_checked": verify_stats["checked"], "verify_posted": verify_stats["posted"],
+            "verify_requeued": verify_stats["requeued"], "verify_dead": verify_stats["dead"],
+            "processed": processed, "posted": posted, "batch_hold": batch_hold,
+            "verify": verify, "failed": failed, "skipped_claimed": skipped_claimed,
+        }
+        store.finish_sync_log(conn, run_id, "success", result)
+        return result
+    except Exception as e:
+        store.finish_sync_log(conn, run_id, "error", error=str(e))
+        raise
 
 
 def _verify_posted_orders(conn, limit: int, settings) -> dict:

@@ -77,6 +77,16 @@ provider:
             - ssm:GetParameter
           Resource:
             - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.ucSettingsParamName}
+        # dashboard_handler's retry-invoices/retry-cn batch path hands off
+        # to these two scheduled Lambdas (900s budget) instead of running
+        # inline behind httpApi's 30s cap -- see handlers.py's
+        # _invoke_retry_batch. Scoped to exactly these two functions.
+        - Effect: Allow
+          Action:
+            - lambda:InvokeFunction
+          Resource:
+            - Fn::GetAtt: [UnicommercePostInvoicesLambdaFunction, Arn]
+            - Fn::GetAtt: [UnicommercePostCreditNotesLambdaFunction, Arn]
   environment:
     STAGE: ${self:provider.stage}
     LOG_LEVEL: ${env:LOG_LEVEL, 'INFO'}
@@ -203,6 +213,13 @@ functions:
     handler: src.handlers.dashboard_handler
     memorySize: 512
     timeout: 30
+    environment:
+      # Targets for _invoke_retry_batch's async hand-off -- see the
+      # lambda:InvokeFunction IAM statement above for why only these two.
+      POST_INVOICES_FUNCTION_ARN:
+        Fn::GetAtt: [UnicommercePostInvoicesLambdaFunction, Arn]
+      POST_CREDIT_NOTES_FUNCTION_ARN:
+        Fn::GetAtt: [UnicommercePostCreditNotesLambdaFunction, Arn]
     layers: [{ Ref: SharedLambdaLayer }]
     events:
       - httpApi: { path: /v1/unicommerce/stats, method: get, authorizer: { name: dashboardCognitoJwt } }
