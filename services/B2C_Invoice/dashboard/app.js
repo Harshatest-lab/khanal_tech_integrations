@@ -231,6 +231,7 @@ const sapAlertPanelBody = document.getElementById("sap-alert-panel-body");
 const sapAlertPanelCount = document.getElementById("sap-alert-panel-count");
 const sapAlertViewAll = document.getElementById("sap-alert-view-all");
 const sapRetryBtn = document.getElementById("sap-retry-btn");
+const sapExportFailedBtn = document.getElementById("sap-export-failed-btn");
 
 function buildOrdersQueryParams(limit, offset) {
   const params = new URLSearchParams();
@@ -528,6 +529,7 @@ function setOrdersChromeVisible(visible) {
   ordersFilterCard?.classList.toggle("hidden", !visible);
   statChips?.classList.toggle("hidden", !visible);
   sapRetryBtn?.classList.toggle("hidden", !visible);
+  sapExportFailedBtn?.classList.toggle("hidden", !visible);
   sapAlertWrap?.classList.toggle("hidden", !visible);
 }
 
@@ -563,6 +565,257 @@ async function runSapRetryBatch(btn) {
   } finally {
     button.disabled = false;
     button.textContent = originalLabel;
+  }
+}
+
+const EXPORT_PAGE_SIZE = 200;
+
+const SAP_FAILED_EXPORT_HEADERS = [
+  "PO Number",
+  "Order #",
+  "State",
+  "Order Date (UTC)",
+  "Order Date (Pacific)",
+  "Line #",
+  "Item",
+  "Status",
+  "Partial",
+  "SKU",
+  "Qty",
+  "Delivered Qty",
+  "Invoiceable Qty",
+  "Cancelled Qty",
+  "Tracking #",
+  "Carrier",
+  "Line Status Date",
+  "Line Updated",
+  "Order Updated",
+  "Shipping Charges",
+  "Line Count",
+  "SAP Sync",
+  "SAP Error Phase",
+  "SAP Error Message",
+  "SAP Attempts",
+  "SAP Sync Updated",
+  "SAP DocEntry",
+  "SAP DocNum",
+];
+
+function csvEscape(value) {
+  const text = value == null || value === "" ? "" : String(value);
+  if (/[",\r\n]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+  return text;
+}
+
+function formatExportDate(value) {
+  if (!value) return "";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return String(value);
+  return d.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
+}
+
+function formatExportOrderDate(ms, timeZone) {
+  if (ms == null || ms === "") return "";
+  const d = new Date(Number(ms));
+  if (Number.isNaN(d.getTime())) return "";
+  const date = d.toLocaleDateString("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    timeZone,
+  });
+  const time = d.toLocaleTimeString("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone,
+  });
+  return `${date} ${time}`;
+}
+
+function buildSapFailedExportRows(orders) {
+  const rows = [];
+  for (const order of orders) {
+    const lines = sortedLines(order.lines);
+    const sync = order.sap_sync || {};
+    const shipping =
+      order.has_shipping_charges === true
+        ? "Yes"
+        : order.has_shipping_charges === false
+          ? "No"
+          : "";
+    const base = {
+      po: order.purchase_order_id || "",
+      orderNo: order.customer_order_id || "",
+      state: order.ship_to_state || "",
+      orderUtc: formatExportOrderDate(order.order_date_ms, "UTC"),
+      orderPacific: formatExportOrderDate(order.order_date_ms, "America/Los_Angeles"),
+      orderUpdated: formatExportDate(order.updated_at),
+      shipping,
+      lineCount: order.line_count ?? lines.length,
+      sapStatus: sync.status || "",
+      sapPhase: sync.error_phase || "",
+      sapError: sync.error_message || "",
+      sapAttempts: sync.attempt_count ?? "",
+      sapUpdated: formatExportDate(sync.updated_at),
+      sapDocEntry: sync.sap_doc_entry ?? "",
+      sapDocNum: sync.sap_doc_num ?? "",
+    };
+
+    if (!lines.length) {
+      rows.push([
+        base.po,
+        base.orderNo,
+        base.state,
+        base.orderUtc,
+        base.orderPacific,
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        base.orderUpdated,
+        base.shipping,
+        base.lineCount,
+        base.sapStatus,
+        base.sapPhase,
+        base.sapError,
+        base.sapAttempts,
+        base.sapUpdated,
+        base.sapDocEntry,
+        base.sapDocNum,
+      ]);
+      continue;
+    }
+
+    lines.forEach((line, index) => {
+      rows.push([
+        base.po,
+        base.orderNo,
+        base.state,
+        base.orderUtc,
+        base.orderPacific,
+        line.line_number ?? index + 1,
+        line.product_name || "",
+        line.status || "",
+        line.is_partial ? "Yes" : "No",
+        line.sku || "",
+        line.quantity_amount ?? "",
+        line.delivered_quantity ?? "",
+        line.invoiceable_quantity ?? "",
+        line.cancelled_quantity ?? "",
+        line.tracking_number || "",
+        line.carrier_name || "",
+        formatExportDate(line.status_date),
+        formatExportDate(line.updated_at),
+        base.orderUpdated,
+        base.shipping,
+        base.lineCount,
+        base.sapStatus,
+        base.sapPhase,
+        base.sapError,
+        base.sapAttempts,
+        base.sapUpdated,
+        base.sapDocEntry,
+        base.sapDocNum,
+      ]);
+    });
+  }
+  return rows;
+}
+
+function downloadCsv(filename, headers, rows) {
+  const lines = [
+    headers.map(csvEscape).join(","),
+    ...rows.map((row) => row.map(csvEscape).join(",")),
+  ];
+  const bom = "\uFEFF";
+  const blob = new Blob([bom + lines.join("\r\n")], {
+    type: "text/csv;charset=utf-8;",
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function fetchAllSapFailedOrders() {
+  const all = [];
+  let offset = 0;
+  let total = null;
+
+  while (total == null || offset < total) {
+    const params = new URLSearchParams();
+    params.set("limit", String(EXPORT_PAGE_SIZE));
+    params.set("offset", String(offset));
+    params.set("sort_by", "updated");
+    params.set("sort_dir", "desc");
+    params.set("sap_sync", "failed");
+
+    const page = await apiGet(`/v1/walmart/orders?${params.toString()}`);
+    const items = page.items || [];
+    total = Number(page.total ?? 0);
+    all.push(...items);
+
+    if (!items.length) break;
+    offset += items.length;
+    if (offset >= total) break;
+  }
+
+  return { orders: all, total: total ?? all.length };
+}
+
+async function exportSapFailures(btn) {
+  const button = btn || sapExportFailedBtn;
+  if (!button) return;
+
+  button.disabled = true;
+  const originalLabel = button.textContent;
+  button.textContent = "Exporting…";
+
+  try {
+    hideError();
+    const { orders, total } = await fetchAllSapFailedOrders();
+    if (!orders.length) {
+      window.alert("No SAP-failed orders to export.");
+      return;
+    }
+
+    const rows = buildSapFailedExportRows(orders);
+    const stamp = new Date().toISOString().slice(0, 10);
+    downloadCsv(
+      `walmart-sap-failed-${stamp}.csv`,
+      SAP_FAILED_EXPORT_HEADERS,
+      rows
+    );
+    button.textContent = `Exported ${total}`;
+    window.setTimeout(() => {
+      if (button.textContent.startsWith("Exported")) {
+        button.textContent = originalLabel;
+      }
+    }, 2000);
+  } catch (err) {
+    showError(`Export failed: ${err.message}`);
+    button.textContent = originalLabel;
+  } finally {
+    button.disabled = false;
+    if (button.textContent === "Exporting…") {
+      button.textContent = originalLabel;
+    }
   }
 }
 
@@ -1978,6 +2231,12 @@ if (sapAlertViewAll) {
 if (sapRetryBtn) {
   sapRetryBtn.addEventListener("click", () => {
     runSapRetryBatch(sapRetryBtn).catch((e) => showError(e.message));
+  });
+}
+
+if (sapExportFailedBtn) {
+  sapExportFailedBtn.addEventListener("click", () => {
+    exportSapFailures(sapExportFailedBtn).catch((e) => showError(e.message));
   });
 }
 
