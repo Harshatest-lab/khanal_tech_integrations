@@ -44,7 +44,7 @@ def resolve_item_code(
     if not hana_item or not hana_item.get("item_code"):
         raise ValueError(
             f"No SAP item mapping for Walmart SKU {sku!r}. "
-            f"Set OITM.U_WM_SKU (or U_Amz_SKU) in SAP to this value, then re-run "
+            f"Set OITM.U_WM_SKU in SAP to this value, then re-run "
             f"scripts/load_sap_fg_items.py or preview again."
         )
 

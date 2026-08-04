@@ -33,15 +33,6 @@ WHERE UPPER(TRIM(a."U_WM_SKU")) = UPPER(TRIM(?))
 """
 
 
-def _lookup_by_amz_sku_sql() -> str:
-    oitm = qualified_table(_schema(), "OITM", "a")
-    return f"""
-SELECT a."ItemCode", a."U_Amz_SKU", a."U_WM_SKU"
-FROM {oitm}
-WHERE UPPER(TRIM(a."U_Amz_SKU")) = UPPER(TRIM(?))
-"""
-
-
 def _batch_sql() -> str:
     schema = _schema()
     obtq = qualified_table(schema, "OBTQ", "T0")
@@ -85,26 +76,25 @@ def fetch_fg_items() -> dict[str, Any]:
 
 
 def lookup_item_by_wm_sku(wm_sku: str) -> dict[str, Any] | None:
-    """Find OITM row by Walmart SKU (``U_WM_SKU``, then ``U_Amz_SKU`` fallback)."""
+    """Find OITM row by Walmart SKU (``U_WM_SKU`` only)."""
     sku = (wm_sku or "").strip()
     if not sku:
         return None
 
     with hana_connection() as conn:
         cur = conn.cursor()
-        for sql in (_lookup_by_wm_sku_sql(), _lookup_by_amz_sku_sql()):
-            cur.execute(sql, (sku,))
-            row = cur.fetchone()
-            if not row:
-                continue
-            columns = [col[0] for col in (cur.description or [])]
-            raw = dict(zip(columns, row))
-            if raw.get("ItemCode"):
-                return {
-                    "item_code": raw.get("ItemCode"),
-                    "amz_sku": raw.get("U_Amz_SKU"),
-                    "wm_sku": raw.get("U_WM_SKU") or sku,
-                }
+        cur.execute(_lookup_by_wm_sku_sql(), (sku,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        columns = [col[0] for col in (cur.description or [])]
+        raw = dict(zip(columns, row))
+        if raw.get("ItemCode"):
+            return {
+                "item_code": raw.get("ItemCode"),
+                "amz_sku": raw.get("U_Amz_SKU"),
+                "wm_sku": raw.get("U_WM_SKU") or sku,
+            }
     return None
 
 

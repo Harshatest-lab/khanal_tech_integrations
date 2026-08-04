@@ -276,6 +276,51 @@ def test_build_sap_invoice_payload_sets_payto_and_shipto_from_state() -> None:
     assert payload["ShipToCode"] == "OK"
 
 
+def test_build_sap_invoice_payload_defaults_missing_item_price_to_zero() -> None:
+    """Walmart WFS orders can ship with empty charges[]; post with UnitPrice 0."""
+    order = {
+        "purchaseOrderId": "119121191213116",
+        "customerOrderId": "200015073510516",
+        "orderDate": 1785303898924,
+        "orderLines": {
+            "orderLine": [
+                {
+                    "lineNumber": "1",
+                    "item": {"sku": "FBA_DC_M_1P"},
+                    "orderLineQuantity": {"amount": "1"},
+                    "charges": {"charge": []},
+                    "orderLineStatuses": {
+                        "orderLineStatus": [
+                            {
+                                "status": "Shipped",
+                                "statusQuantity": {"amount": "1"},
+                            }
+                        ]
+                    },
+                }
+            ]
+        },
+    }
+
+    with patch(
+        "walmart.sap_invoice_payload.resolve_item_code",
+        return_value="FG-TEST-001",
+    ), patch(
+        "walmart.sap_invoice_payload.fetch_batches_for_item",
+        return_value=[],
+    ):
+        payload = build_sap_invoice_payload(
+            MagicMock(),
+            order,
+            require_batches=False,
+        )
+
+    product = next(line for line in payload["DocumentLines"] if line["ItemCode"] == "FG-TEST-001")
+    assert product["Quantity"] == 1
+    assert product["UnitPrice"] == 0.0
+    assert not any(line["ItemCode"] == TAX_ITEM_CODE for line in payload["DocumentLines"])
+
+
 def test_build_sap_invoice_payload_includes_tax_date() -> None:
     order = {
         "purchaseOrderId": "PO1",
