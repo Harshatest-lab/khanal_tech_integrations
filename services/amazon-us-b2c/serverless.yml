@@ -286,6 +286,67 @@ resources:
           IdToken: hours
           RefreshToken: days
 
+    # Static hosting for services/amazon-us-b2c/dashboard/ — private bucket,
+    # read only via CloudFront's Origin Access Control (no public bucket
+    # policy, no website-hosting endpoint). Content is pushed with
+    # `aws s3 sync` after deploy, not managed by this stack. Same pattern
+    # as unicommerce-b2c's DashboardSiteBucket.
+    AmazonDashboardSiteBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:service}-${self:provider.stage}-dashboard-site
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+
+    AmazonDashboardOriginAccessControl:
+      Type: AWS::CloudFront::OriginAccessControl
+      Properties:
+        OriginAccessControlConfig:
+          Name: ${self:service}-${self:provider.stage}-dashboard-oac
+          OriginAccessControlOriginType: s3
+          SigningBehavior: always
+          SigningProtocol: sigv4
+
+    AmazonDashboardDistribution:
+      Type: AWS::CloudFront::Distribution
+      Properties:
+        DistributionConfig:
+          Enabled: true
+          DefaultRootObject: index.html
+          PriceClass: PriceClass_100
+          Origins:
+            - Id: dashboardS3Origin
+              DomainName: !GetAtt AmazonDashboardSiteBucket.RegionalDomainName
+              OriginAccessControlId: !Ref AmazonDashboardOriginAccessControl
+              S3OriginConfig:
+                OriginAccessIdentity: ""
+          DefaultCacheBehavior:
+            TargetOriginId: dashboardS3Origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD]
+            CachedMethods: [GET, HEAD]
+            Compress: true
+            # AWS managed "CachingOptimized" policy.
+            CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+
+    AmazonDashboardBucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket: !Ref AmazonDashboardSiteBucket
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: cloudfront.amazonaws.com
+              Action: s3:GetObject
+              Resource: !Sub "${AmazonDashboardSiteBucket.Arn}/*"
+              Condition:
+                StringEquals:
+                  AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${AmazonDashboardDistribution}"
+
   Outputs:
     ReconBucketName:
       Value: !Ref ReconBucket
@@ -295,3 +356,9 @@ resources:
     AmazonDashboardUserPoolClientId:
       Description: Cognito app client ID for dashboard login
       Value: !Ref AmazonDashboardUserPoolClient
+    AmazonDashboardSiteBucketName:
+      Description: S3 bucket to sync services/amazon-us-b2c/dashboard/ into
+      Value: !Ref AmazonDashboardSiteBucket
+    AmazonDashboardCloudFrontUrl:
+      Description: Public URL for the Amazon US B2C dashboard
+      Value: !Sub "https://${AmazonDashboardDistribution.DomainName}"
