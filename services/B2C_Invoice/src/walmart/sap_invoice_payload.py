@@ -167,9 +167,10 @@ def build_sap_invoice_payload(
             raise ValueError(f"Order {purchase_order_id} has a line without SKU")
 
         charges = parse_line_charges(order_line)
+        # Walmart sometimes returns empty charges[]; treat missing ItemPrice as 0.
         item_price = charges.get("item_price")
         if item_price is None:
-            raise ValueError(f"Order {purchase_order_id} line {order_line.get('lineNumber')} missing item price")
+            item_price = 0.0
 
         qty = line_quantity(order_line)
         invoiceable_qty = line_invoiceable_quantity(order_line)

@@ -14,6 +14,13 @@ def _schema() -> str | None:
     return params.schema if params else None
 
 
+def _clean_sku(value: Any) -> str | None:
+    if value is None:
+        return None
+    cleaned = str(value).replace("\r", "").replace("\n", "").strip()
+    return cleaned or None
+
+
 def _fg_items_sql() -> str:
     oitm = qualified_table(_schema(), "OITM", "a")
     return f"""
@@ -26,19 +33,12 @@ ORDER BY a."ItemCode"
 
 def _lookup_by_wm_sku_sql() -> str:
     oitm = qualified_table(_schema(), "OITM", "a")
+    # REPLACE CR/LF — SAP U_WM_SKU values sometimes contain trailing/leading \\r.
     return f"""
 SELECT a."ItemCode", a."U_Amz_SKU", a."U_WM_SKU"
 FROM {oitm}
-WHERE UPPER(TRIM(a."U_WM_SKU")) = UPPER(TRIM(?))
-"""
-
-
-def _lookup_by_amz_sku_sql() -> str:
-    oitm = qualified_table(_schema(), "OITM", "a")
-    return f"""
-SELECT a."ItemCode", a."U_Amz_SKU", a."U_WM_SKU"
-FROM {oitm}
-WHERE UPPER(TRIM(a."U_Amz_SKU")) = UPPER(TRIM(?))
+WHERE UPPER(TRIM(REPLACE(REPLACE(IFNULL(a."U_WM_SKU", ''), CHAR(13), ''), CHAR(10), '')))
+    = UPPER(TRIM(REPLACE(REPLACE(?, CHAR(13), ''), CHAR(10), '')))
 """
 
 
@@ -71,8 +71,8 @@ def fetch_fg_items() -> dict[str, Any]:
         items.append(
             {
                 "item_code": raw.get("ItemCode"),
-                "amz_sku": raw.get("U_Amz_SKU"),
-                "wm_sku": raw.get("U_WM_SKU"),
+                "amz_sku": _clean_sku(raw.get("U_Amz_SKU")),
+                "wm_sku": _clean_sku(raw.get("U_WM_SKU")),
             }
         )
 
@@ -85,26 +85,39 @@ def fetch_fg_items() -> dict[str, Any]:
 
 
 def lookup_item_by_wm_sku(wm_sku: str) -> dict[str, Any] | None:
-    """Find OITM row by Walmart SKU (``U_WM_SKU``, then ``U_Amz_SKU`` fallback)."""
-    sku = (wm_sku or "").strip()
+    """Find OITM row by Walmart SKU (``U_WM_SKU`` only).
+
+    1) Direct HANA SQL (with CR/LF stripped)
+    2) Fallback: same FG list the dashboard uses, match cleaned ``U_WM_SKU``
+       in Python (handles odd characters SQL TRIM misses).
+    """
+    sku = _clean_sku(wm_sku)
     if not sku:
         return None
+    sku_key = sku.upper()
 
     with hana_connection() as conn:
         cur = conn.cursor()
-        for sql in (_lookup_by_wm_sku_sql(), _lookup_by_amz_sku_sql()):
-            cur.execute(sql, (sku,))
-            row = cur.fetchone()
-            if not row:
-                continue
+        cur.execute(_lookup_by_wm_sku_sql(), (sku,))
+        row = cur.fetchone()
+        if row:
             columns = [col[0] for col in (cur.description or [])]
             raw = dict(zip(columns, row))
             if raw.get("ItemCode"):
                 return {
                     "item_code": raw.get("ItemCode"),
-                    "amz_sku": raw.get("U_Amz_SKU"),
-                    "wm_sku": raw.get("U_WM_SKU") or sku,
+                    "amz_sku": _clean_sku(raw.get("U_Amz_SKU")),
+                    "wm_sku": _clean_sku(raw.get("U_WM_SKU")) or sku,
                 }
+
+    # Dashboard path works; reuse it when parameterized match misses.
+    for item in fetch_fg_items().get("items") or []:
+        if (_clean_sku(item.get("wm_sku")) or "").upper() == sku_key:
+            return {
+                "item_code": item.get("item_code"),
+                "amz_sku": item.get("amz_sku"),
+                "wm_sku": item.get("wm_sku") or sku,
+            }
     return None
 
 
