@@ -26,11 +26,17 @@ def upsert_sap_fg_items(
     if not items:
         return 0
 
+    def _clean(value: Any) -> str | None:
+        if value is None:
+            return None
+        cleaned = str(value).replace("\r", "").replace("\n", "").strip()
+        return cleaned or None
+
     rows = [
         {
             "item_code": item.get("item_code"),
-            "amz_sku": item.get("amz_sku"),
-            "wm_sku": item.get("wm_sku"),
+            "amz_sku": _clean(item.get("amz_sku")),
+            "wm_sku": _clean(item.get("wm_sku")),
         }
         for item in items
         if item.get("item_code")
