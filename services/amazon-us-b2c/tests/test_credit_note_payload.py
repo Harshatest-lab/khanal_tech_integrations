@@ -98,5 +98,5 @@ def test_unmatched_sku_is_skipped_not_posted():
 
 def test_ship_to_code_matches_order_state():
     payload, _ = build_credit_note_payload(_order(), _event(), MAPPING, 4242, INVOICE_LINES, _resolve)
-    assert payload["PayToCode"] == "TX"
-    assert payload["ShipToCode"] == "TX"
+    assert payload["PayToCode"] == "Amazon USA-TX"
+    assert payload["ShipToCode"] == "Amazon USA-TX"

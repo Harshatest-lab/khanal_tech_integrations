@@ -128,7 +128,8 @@ def build_credit_note_payload(
     # Per-state Ship-To/Pay-To address code — same fix and fallback as
     # invoice_payload.build_invoice_payload, kept consistent between
     # invoices and their credit notes.
-    ship_to_code = normalize_us_state_code(order.get("ship_state")) or constants.SAP_PAY_TO_CODE
+    state_code = normalize_us_state_code(order.get("ship_state"))
+    ship_to_code = f"{constants.SAP_SHIP_TO_STATE_PREFIX}{state_code}" if state_code else constants.SAP_PAY_TO_CODE
 
     payload = {
         "CardCode": constants.SAP_CARD_CODE,

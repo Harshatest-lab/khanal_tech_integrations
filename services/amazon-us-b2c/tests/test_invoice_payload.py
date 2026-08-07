@@ -109,8 +109,11 @@ def test_non_batch_item_omits_batchnumbers():
 
 def test_ship_to_code_is_per_order_state():
     payload, _ = build_invoice_payload(_order(), MAPPING, _allocate, _resolve)
-    assert payload["PayToCode"] == "CA"  # normalized from "California"
-    assert payload["ShipToCode"] == "CA"
+    # "Amazon USA-CA" — this customer master's actual address-code
+    # convention, confirmed against SAP BPAddresses (not a bare state
+    # code like Walmart's).
+    assert payload["PayToCode"] == "Amazon USA-CA"
+    assert payload["ShipToCode"] == "Amazon USA-CA"
 
 
 def test_ship_to_code_falls_back_without_state():
