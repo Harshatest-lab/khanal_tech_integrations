@@ -121,12 +121,14 @@ def build_invoice_payload(
             )
         )
 
-    # Per-state Ship-To/Pay-To address code (same pattern as the Walmart
-    # integration's order_shipping_state): falls back to the generic
-    # SAP_PAY_TO_CODE default only when the order has no state, since a
-    # missing per-state address code would otherwise make SAP reject the
+    # Per-state Ship-To/Pay-To address code (same idea as the Walmart
+    # integration's order_shipping_state, different naming convention on
+    # this customer master — see SAP_SHIP_TO_STATE_PREFIX). Falls back to
+    # the generic SAP_PAY_TO_CODE default only when the order has no
+    # state, since an unmapped state would otherwise make SAP reject the
     # whole document.
-    ship_to_code = normalize_us_state_code(order.get("ship_state")) or constants.SAP_PAY_TO_CODE
+    state_code = normalize_us_state_code(order.get("ship_state"))
+    ship_to_code = f"{constants.SAP_SHIP_TO_STATE_PREFIX}{state_code}" if state_code else constants.SAP_PAY_TO_CODE
 
     payload = {
         "CardCode": constants.SAP_CARD_CODE,

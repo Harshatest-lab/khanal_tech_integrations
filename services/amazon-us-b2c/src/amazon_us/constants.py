@@ -20,6 +20,13 @@ SAP_CN_SERIES = int(_env("AMZ_SAP_CN_SERIES", "104"))            # KFIB2C26
 SAP_WAREHOUSE = _env("AMZ_SAP_WAREHOUSE", "AMZ-FBA")
 SAP_TAX_CODE = _env("AMZ_SAP_TAX_CODE", "etax0")  # exact lowercase; OData filters are case-sensitive
 SAP_PAY_TO_CODE = _env("AMZ_SAP_PAY_TO_CODE", "Amazon USA-B2C")
+# Per-state Ship-To/Bill-To address codes on the Amazon USA customer master
+# (C00001) are named "Amazon USA-{USPS state code}" (e.g. "Amazon USA-MO"),
+# confirmed against every state + DC + territory via BusinessPartners
+# BPAddresses on 2026-08-07 — NOT the bare state code Walmart's convention
+# uses. Sending an unprefixed code makes SAP reject the whole document
+# with "Invalid value [OINV.ShipToCode]".
+SAP_SHIP_TO_STATE_PREFIX = _env("AMZ_SAP_SHIP_TO_STATE_PREFIX", "Amazon USA-")
 SAP_CREATED_BY = _env("AMZ_SAP_CREATED_BY", "Posted By Amazon API")  # OINV/ORIN mandatory UDF
 
 SAP_TAX_ITEM_CODE = "EXP000003"                    # "Tax-Sum"
