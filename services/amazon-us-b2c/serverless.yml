@@ -39,22 +39,29 @@ provider:
           Resource:
             - arn:aws:ssm:${self:provider.region}:*:parameter/amazon-us/lwa
         # SAP HANA read-only credentials (FEFO stock, GL, SKU map, recon).
+        # Stage-keyed prefix (custom.currentHanaPrefix): "dev" reads
+        # /sap/inc_amzn_test/* (isolated from prod, see custom block below),
+        # "prod" reads the shared /sap/inc/* Walmart already uses read-only.
         - Effect: Allow
           Action:
             - ssm:GetParameter
           Resource:
-            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/hana_config
-            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/hana_credentials
+            - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.currentHanaPrefix}/hana_config
+            - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.currentHanaPrefix}/hana_credentials
         # SAP Service Layer config + login creds — read-only, the code never
-        # writes these (only b1_session, below). Own profile (inc_amzn, not
-        # Walmart's inc) so this service's session churn can't force-expire
-        # Walmart's live session and vice versa — see SAP_SL_PROFILE below.
+        # writes these (only b1_session, below). Stage-keyed prefix
+        # (custom.currentSlPrefix): "dev" resolves to /sap/inc_amzn_test/*,
+        # which has no SSM params created yet on purpose — until a real
+        # TEST-phase SAP company is wired up (see README "TEST phase"),
+        # dev posting attempts fail loudly (ParameterNotFound -> alert
+        # email) instead of silently posting to the live inc_amzn company
+        # DB. "prod" resolves to /sap/inc_amzn/*, same as before this split.
         - Effect: Allow
           Action:
             - ssm:GetParameter
           Resource:
-            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc_amzn/sl_config
-            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc_amzn/credentials
+            - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.currentSlPrefix}/sl_config
+            - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.currentSlPrefix}/credentials
         # This service's own SSM-cached B1 session; PutParameter for session
         # renewal + stale-session invalidation.
         - Effect: Allow
@@ -62,7 +69,7 @@ provider:
             - ssm:GetParameter
             - ssm:PutParameter
           Resource:
-            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc_amzn/b1_session
+            - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.currentSlPrefix}/b1_session
         # Failure alerts + recon summaries.
         - Effect: Allow
           Action:
@@ -80,16 +87,17 @@ provider:
     STAGE: ${self:provider.stage}
     LOG_LEVEL: ${env:LOG_LEVEL, 'INFO'}
     DATABASE_URL: ${env:DATABASE_URL, ''}
-    # SAP profile: /sap/inc_amzn/* (US INC entity, same physical SAP tenant
-    # Walmart's /sap/inc/* points at). Own SL session cache on purpose — a
-    # 401 here force-expires only this service's session, not Walmart's.
-    # HANA stays on the shared 'inc' profile: read-only credentials, no
-    # mutable session state, so there's nothing to race over.
+    # SAP profile, stage-keyed (see custom.currentSlProfile /
+    # custom.currentHanaProfile below): "dev" stays on inc_amzn_test
+    # forever, so it can never touch the live inc_amzn company DB;
+    # "prod" resolves to inc_amzn/inc, the same values this used
+    # unconditionally before this split. Own SL session cache on purpose —
+    # a 401 here force-expires only this service's session, not Walmart's.
     SAP_SL_USE_SSM: ${env:SAP_SL_USE_SSM, 'true'}
     SAP_SL_VERIFY_SSL: ${env:SAP_SL_VERIFY_SSL, 'true'}
-    SAP_SL_PROFILE: ${env:SAP_SL_PROFILE, 'inc_amzn'}
+    SAP_SL_PROFILE: ${self:custom.currentSlProfile}
     HANA_USE_SSM: ${env:HANA_USE_SSM, '1'}
-    HANA_PROFILE: ${env:HANA_PROFILE, 'inc'}
+    HANA_PROFILE: ${self:custom.currentHanaProfile}
     AMZ_LWA_PARAM_NAME: ${env:AMZ_LWA_PARAM_NAME, '/amazon-us/lwa'}
     # Business config (defaults verified against production KF_INC_22012026).
     AMZ_POSTING_CUTOFF_DATE: ${env:AMZ_POSTING_CUTOFF_DATE, '2026-06-01'}
@@ -100,6 +108,36 @@ provider:
 
 custom:
   reconBucket: ${env:AMZ_RECON_BUCKET, 'amazon-us-b2c-recon-${self:provider.stage}'}
+  # Stage-keyed SAP Service Layer profile -- "dev" stays isolated on
+  # inc_amzn_test forever (no SSM params created there yet on purpose,
+  # so a dev posting attempt fails loudly instead of silently hitting
+  # live SAP); "prod" resolves to inc_amzn, the same value this used
+  # unconditionally before this split. Any stage not listed here falls
+  # back to inc_amzn_test, the safer default -- never silently defaults
+  # to touching the live company DB. Same pattern as unicommerce-b2c's
+  # custom.sapProfileByStage.
+  slProfileByStage:
+    dev: inc_amzn_test
+    prod: inc_amzn
+  currentSlProfile: ${self:custom.slProfileByStage.${self:provider.stage}, 'inc_amzn_test'}
+  slPrefixByStage:
+    dev: /sap/inc_amzn_test
+    prod: /sap/inc_amzn
+  currentSlPrefix: ${self:custom.slPrefixByStage.${self:provider.stage}, '/sap/inc_amzn_test'}
+  # Stage-keyed HANA profile -- "dev" also moves off the shared prod
+  # 'inc' profile onto inc_amzn_test, so HANA reads and SAP SL writes
+  # target the same TEST company once one exists (see README "TEST
+  # phase": split targets mean HANA reads and SAP writes hit different
+  # companies). "prod" resolves to inc, the shared read-only profile
+  # Walmart already uses, unchanged from before this split.
+  hanaProfileByStage:
+    dev: inc_amzn_test
+    prod: inc
+  currentHanaProfile: ${self:custom.hanaProfileByStage.${self:provider.stage}, 'inc_amzn_test'}
+  hanaPrefixByStage:
+    dev: /sap/inc_amzn_test
+    prod: /sap/inc
+  currentHanaPrefix: ${self:custom.hanaPrefixByStage.${self:provider.stage}, '/sap/inc_amzn_test'}
 
 layers:
   shared:
@@ -286,6 +324,67 @@ resources:
           IdToken: hours
           RefreshToken: days
 
+    # Static hosting for services/amazon-us-b2c/dashboard/ — private bucket,
+    # read only via CloudFront's Origin Access Control (no public bucket
+    # policy, no website-hosting endpoint). Content is pushed with
+    # `aws s3 sync` after deploy, not managed by this stack. Same pattern
+    # as unicommerce-b2c's DashboardSiteBucket.
+    AmazonDashboardSiteBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:service}-${self:provider.stage}-dashboard-site
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+
+    AmazonDashboardOriginAccessControl:
+      Type: AWS::CloudFront::OriginAccessControl
+      Properties:
+        OriginAccessControlConfig:
+          Name: ${self:service}-${self:provider.stage}-dashboard-oac
+          OriginAccessControlOriginType: s3
+          SigningBehavior: always
+          SigningProtocol: sigv4
+
+    AmazonDashboardDistribution:
+      Type: AWS::CloudFront::Distribution
+      Properties:
+        DistributionConfig:
+          Enabled: true
+          DefaultRootObject: index.html
+          PriceClass: PriceClass_100
+          Origins:
+            - Id: dashboardS3Origin
+              DomainName: !GetAtt AmazonDashboardSiteBucket.RegionalDomainName
+              OriginAccessControlId: !Ref AmazonDashboardOriginAccessControl
+              S3OriginConfig:
+                OriginAccessIdentity: ""
+          DefaultCacheBehavior:
+            TargetOriginId: dashboardS3Origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD]
+            CachedMethods: [GET, HEAD]
+            Compress: true
+            # AWS managed "CachingOptimized" policy.
+            CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+
+    AmazonDashboardBucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket: !Ref AmazonDashboardSiteBucket
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: cloudfront.amazonaws.com
+              Action: s3:GetObject
+              Resource: !Sub "${AmazonDashboardSiteBucket.Arn}/*"
+              Condition:
+                StringEquals:
+                  AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${AmazonDashboardDistribution}"
+
   Outputs:
     ReconBucketName:
       Value: !Ref ReconBucket
@@ -295,3 +394,9 @@ resources:
     AmazonDashboardUserPoolClientId:
       Description: Cognito app client ID for dashboard login
       Value: !Ref AmazonDashboardUserPoolClient
+    AmazonDashboardSiteBucketName:
+      Description: S3 bucket to sync services/amazon-us-b2c/dashboard/ into
+      Value: !Ref AmazonDashboardSiteBucket
+    AmazonDashboardCloudFrontUrl:
+      Description: Public URL for the Amazon US B2C dashboard
+      Value: !Sub "https://${AmazonDashboardDistribution.DomainName}"
