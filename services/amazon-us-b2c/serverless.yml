@@ -39,15 +39,18 @@ provider:
           Resource:
             - arn:aws:ssm:${self:provider.region}:*:parameter/amazon-us/lwa
         # SAP HANA read-only credentials (FEFO stock, GL, SKU map, recon).
-        # Stage-keyed prefix (custom.currentHanaPrefix): "dev" reads
-        # /sap/inc_amzn_test/* (isolated from prod, see custom block below),
-        # "prod" reads the shared /sap/inc/* Walmart already uses read-only.
+        # NOT stage-keyed like SAP SL below — HANA is read-only with no
+        # mutable session state, so there's nothing a dev run could
+        # corrupt; both dev and prod read the same shared /sap/inc/*
+        # Walmart already uses live. Gating this behind the (currently
+        # empty) inc_amzn_test profile broke SKU-map refresh and FEFO
+        # allocation in dev for zero safety benefit — reverted 2026-08-07.
         - Effect: Allow
           Action:
             - ssm:GetParameter
           Resource:
-            - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.currentHanaPrefix}/hana_config
-            - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.currentHanaPrefix}/hana_credentials
+            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/hana_config
+            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/hana_credentials
         # SAP Service Layer config + login creds — read-only, the code never
         # writes these (only b1_session, below). Stage-keyed prefix
         # (custom.currentSlPrefix): "dev" resolves to /sap/inc_amzn_test/*,
@@ -87,17 +90,18 @@ provider:
     STAGE: ${self:provider.stage}
     LOG_LEVEL: ${env:LOG_LEVEL, 'INFO'}
     DATABASE_URL: ${env:DATABASE_URL, ''}
-    # SAP profile, stage-keyed (see custom.currentSlProfile /
-    # custom.currentHanaProfile below): "dev" stays on inc_amzn_test
-    # forever, so it can never touch the live inc_amzn company DB;
-    # "prod" resolves to inc_amzn/inc, the same values this used
-    # unconditionally before this split. Own SL session cache on purpose —
-    # a 401 here force-expires only this service's session, not Walmart's.
+    # SAP SL profile, stage-keyed (see custom.currentSlProfile below):
+    # "dev" stays on inc_amzn_test forever, so it can never touch the
+    # live inc_amzn company DB; "prod" resolves to inc_amzn, the same
+    # value this used unconditionally before this split. Own SL session
+    # cache on purpose — a 401 here force-expires only this service's
+    # session, not Walmart's. HANA is NOT stage-keyed — read-only, safe
+    # to share live even from dev (see IAM statement above).
     SAP_SL_USE_SSM: ${env:SAP_SL_USE_SSM, 'true'}
     SAP_SL_VERIFY_SSL: ${env:SAP_SL_VERIFY_SSL, 'true'}
     SAP_SL_PROFILE: ${self:custom.currentSlProfile}
     HANA_USE_SSM: ${env:HANA_USE_SSM, '1'}
-    HANA_PROFILE: ${self:custom.currentHanaProfile}
+    HANA_PROFILE: ${env:HANA_PROFILE, 'inc'}
     AMZ_LWA_PARAM_NAME: ${env:AMZ_LWA_PARAM_NAME, '/amazon-us/lwa'}
     # Business config (defaults verified against production KF_INC_22012026).
     AMZ_POSTING_CUTOFF_DATE: ${env:AMZ_POSTING_CUTOFF_DATE, '2026-07-01'}
@@ -124,20 +128,6 @@ custom:
     dev: /sap/inc_amzn_test
     prod: /sap/inc_amzn
   currentSlPrefix: ${self:custom.slPrefixByStage.${self:provider.stage}, '/sap/inc_amzn_test'}
-  # Stage-keyed HANA profile -- "dev" also moves off the shared prod
-  # 'inc' profile onto inc_amzn_test, so HANA reads and SAP SL writes
-  # target the same TEST company once one exists (see README "TEST
-  # phase": split targets mean HANA reads and SAP writes hit different
-  # companies). "prod" resolves to inc, the shared read-only profile
-  # Walmart already uses, unchanged from before this split.
-  hanaProfileByStage:
-    dev: inc_amzn_test
-    prod: inc
-  currentHanaProfile: ${self:custom.hanaProfileByStage.${self:provider.stage}, 'inc_amzn_test'}
-  hanaPrefixByStage:
-    dev: /sap/inc_amzn_test
-    prod: /sap/inc
-  currentHanaPrefix: ${self:custom.hanaPrefixByStage.${self:provider.stage}, '/sap/inc_amzn_test'}
 
 layers:
   shared:
