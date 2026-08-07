@@ -105,3 +105,15 @@ def test_udf_truncation_to_editsize():
 def test_non_batch_item_omits_batchnumbers():
     payload, _ = build_invoice_payload(_order(), MAPPING, lambda *a: [], _resolve)
     assert "BatchNumbers" not in payload["DocumentLines"][0]
+
+
+def test_ship_to_code_is_per_order_state():
+    payload, _ = build_invoice_payload(_order(), MAPPING, _allocate, _resolve)
+    assert payload["PayToCode"] == "CA"  # normalized from "California"
+    assert payload["ShipToCode"] == "CA"
+
+
+def test_ship_to_code_falls_back_without_state():
+    payload, _ = build_invoice_payload(_order(ship_state=""), MAPPING, _allocate, _resolve)
+    assert payload["PayToCode"] == "Amazon USA-B2C"  # constants.SAP_PAY_TO_CODE default
+    assert payload["ShipToCode"] == "Amazon USA-B2C"
