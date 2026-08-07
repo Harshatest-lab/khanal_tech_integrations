@@ -39,18 +39,24 @@ provider:
           Resource:
             - arn:aws:ssm:${self:provider.region}:*:parameter/amazon-us/lwa
         # SAP HANA read-only credentials (FEFO stock, GL, SKU map, recon).
-        # NOT stage-keyed like SAP SL below — HANA is read-only with no
-        # mutable session state, so there's nothing a dev run could
-        # corrupt; both dev and prod read the same shared /sap/inc/*
-        # Walmart already uses live. Gating this behind the (currently
-        # empty) inc_amzn_test profile broke SKU-map refresh and FEFO
-        # allocation in dev for zero safety benefit — reverted 2026-08-07.
+        # Stage-keyed prefix (custom.currentHanaPrefix): "dev" reads
+        # /sap/inc_amzn_test/hana_config, pointed at the KHANAL_INC_LIVE
+        # schema — the same physical HANA server as prod (103.69.202.108),
+        # same login, different schema — so FEFO stock/SKU-map/GL reads
+        # match the same company dev actually posts invoices into via
+        # SAP SL. Previously this was un-keyed and always read prod's
+        # KF_INC_22012026 schema, which meant a fixed SKU-map write into
+        # KHANAL_INC_LIVE's item master was invisible to fetch_amazon_sku_map
+        # (different company database) — confirmed 2026-08-07 by writing
+        # U_Amz_SKU on KHANAL_INC_LIVE and seeing zero effect on the
+        # refreshed map until this split existed. "prod" resolves to the
+        # shared /sap/inc/* Walmart already uses live, unchanged.
         - Effect: Allow
           Action:
             - ssm:GetParameter
           Resource:
-            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/hana_config
-            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/inc/hana_credentials
+            - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.currentHanaPrefix}/hana_config
+            - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.currentHanaPrefix}/hana_credentials
         # SAP Service Layer config + login creds — read-only, the code never
         # writes these (only b1_session, below). Stage-keyed prefix
         # (custom.currentSlPrefix): "dev" resolves to /sap/inc_amzn_test/*,
@@ -95,13 +101,14 @@ provider:
     # live inc_amzn company DB; "prod" resolves to inc_amzn, the same
     # value this used unconditionally before this split. Own SL session
     # cache on purpose — a 401 here force-expires only this service's
-    # session, not Walmart's. HANA is NOT stage-keyed — read-only, safe
-    # to share live even from dev (see IAM statement above).
+    # session, not Walmart's. HANA is now also stage-keyed (see
+    # custom.currentHanaProfile) so dev's reads and writes hit the same
+    # company.
     SAP_SL_USE_SSM: ${env:SAP_SL_USE_SSM, 'true'}
     SAP_SL_VERIFY_SSL: ${env:SAP_SL_VERIFY_SSL, 'true'}
     SAP_SL_PROFILE: ${self:custom.currentSlProfile}
     HANA_USE_SSM: ${env:HANA_USE_SSM, '1'}
-    HANA_PROFILE: ${env:HANA_PROFILE, 'inc'}
+    HANA_PROFILE: ${self:custom.currentHanaProfile}
     AMZ_LWA_PARAM_NAME: ${env:AMZ_LWA_PARAM_NAME, '/amazon-us/lwa'}
     # Business config (defaults verified against production KF_INC_22012026).
     AMZ_POSTING_CUTOFF_DATE: ${env:AMZ_POSTING_CUTOFF_DATE, '2026-07-01'}
@@ -128,6 +135,19 @@ custom:
     dev: /sap/inc_amzn_test
     prod: /sap/inc_amzn
   currentSlPrefix: ${self:custom.slPrefixByStage.${self:provider.stage}, '/sap/inc_amzn_test'}
+  # Stage-keyed HANA profile -- "dev" reads /sap/inc_amzn_test/hana_config
+  # (schema KHANAL_INC_LIVE, same physical HANA server + login as prod,
+  # different schema); "prod" resolves to inc (schema KF_INC_22012026),
+  # the same shared read-only profile Walmart already uses live,
+  # unchanged from before this split.
+  hanaProfileByStage:
+    dev: inc_amzn_test
+    prod: inc
+  currentHanaProfile: ${self:custom.hanaProfileByStage.${self:provider.stage}, 'inc_amzn_test'}
+  hanaPrefixByStage:
+    dev: /sap/inc_amzn_test
+    prod: /sap/inc
+  currentHanaPrefix: ${self:custom.hanaPrefixByStage.${self:provider.stage}, '/sap/inc_amzn_test'}
 
 layers:
   shared:
