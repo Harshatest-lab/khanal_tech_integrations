@@ -63,29 +63,30 @@ One-time setup (human ops actions, never in git):
 1. `psql "$DATABASE_URL" -f ../../sql/amazon_us_b2c.sql`
 2. SSM SecureString `/amazon-us/lwa`:
    `{"client_id":"...","client_secret":"...","refresh_token":"..."}`
-3. `SAP_SL_PROFILE`/`HANA_PROFILE` are stage-keyed (`custom.slProfileByStage`
-   / `custom.hanaProfileByStage` in `serverless.yml`), same pattern as
-   unicommerce-b2c: **`dev` always resolves to `inc_amzn_test`**
-   (`/sap/inc_amzn_test/*`), **`prod` to `inc_amzn`/`inc`**
-   (`/sap/inc_amzn/*` for SL, the shared `/sap/inc/*` for HANA). This
-   means dev and prod never share SSM params — create both sets:
-   - **TEST** (`dev`): `/sap/inc_amzn_test/sl_config` and
-     `/sap/inc_amzn_test/credentials` (SecureString) pointed at the TEST
-     company DB, **and** `/sap/inc_amzn_test/hana_config` +
-     `/sap/inc_amzn_test/hana_credentials` pointed at that same TEST
-     company's HANA schema — split targets mean HANA reads and SAP
-     writes hit different companies. `/sap/inc_amzn_test/b1_session`
-     does not need pre-creating; the first login writes it. Until these
-     exist, every dev SAP call fails with `ParameterNotFound` (alert
-     email fires) instead of silently posting to the live company DB —
-     that's intentional, not a bug.
+3. **`SAP_SL_PROFILE`** (write path — posts AR Invoices/Credit Notes) is
+   stage-keyed (`custom.slProfileByStage` in `serverless.yml`), same
+   pattern as unicommerce-b2c: **`dev` always resolves to `inc_amzn_test`**
+   (`/sap/inc_amzn_test/*`), **`prod` to `inc_amzn`** (`/sap/inc_amzn/*`).
+   - **TEST** (`dev`): create `/sap/inc_amzn_test/sl_config` and
+     `/sap/inc_amzn_test/credentials` (SecureString) pointed at a TEST
+     company DB. `/sap/inc_amzn_test/b1_session` does not need
+     pre-creating; the first login writes it. Until these exist, every
+     dev posting attempt fails with `ParameterNotFound` (alert email
+     fires) instead of silently posting to the live company DB — that's
+     intentional, not a bug.
    - **PROD** (`prod`): `/sap/inc_amzn/sl_config` and
      `/sap/inc_amzn/credentials` (SecureString, same shape as Walmart's
      `/sap/inc/*` — copy its values, this is the same physical SAP
      entity, only the session cache is separate). `/sap/inc_amzn/b1_session`
-     does not need pre-creating. HANA keeps reading the existing shared
-     `/sap/inc/hana_config` + `/sap/inc/hana_credentials` (read-only, no
-     session state, safe to share with Walmart).
+     does not need pre-creating.
+
+   **`HANA_PROFILE`** (read-only — FEFO stock, GL accounts, SKU map,
+   recon) is **NOT** stage-keyed: both `dev` and `prod` read the same
+   shared `/sap/inc/hana_config` + `/sap/inc/hana_credentials` Walmart
+   already uses live. No mutable session state, nothing a dev run could
+   corrupt, so there's no reason to gate it behind a TEST profile — doing
+   so (2026-08-07, briefly) just broke SKU-map refresh and FEFO
+   allocation in dev with no corresponding safety win. Reverted same day.
 4. Verify SES identities for the alert addresses.
 
 ## Runbook
