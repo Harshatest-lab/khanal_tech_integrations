@@ -128,8 +128,13 @@ def build_credit_note_payload(
     # Per-state Ship-To/Pay-To address code — same fix and fallback as
     # invoice_payload.build_invoice_payload, kept consistent between
     # invoices and their credit notes.
-    state_code = normalize_us_state_code(order.get("ship_state"))
-    ship_to_code = f"{constants.SAP_SHIP_TO_STATE_PREFIX}{state_code}" if state_code else constants.SAP_PAY_TO_CODE
+    country = (order.get("ship_country") or "").strip().upper()
+    is_domestic = country in ("", "US", "USA")
+    if is_domestic:
+        state_code = normalize_us_state_code(order.get("ship_state"))
+        ship_to_code = f"{constants.SAP_SHIP_TO_STATE_PREFIX}{state_code}" if state_code else constants.SAP_PAY_TO_CODE
+    else:
+        ship_to_code = constants.SAP_PAY_TO_CODE
 
     payload = {
         "CardCode": constants.SAP_CARD_CODE,
@@ -141,6 +146,8 @@ def build_credit_note_payload(
         "U_CreatedBy": constants.SAP_CREATED_BY,
         "DocumentLines": doc_lines,
     }
+    if not is_domestic:
+        payload["AddressExtension"] = {"ShipToCountry": country, "BillToCountry": country}
     return payload, skipped
 
 

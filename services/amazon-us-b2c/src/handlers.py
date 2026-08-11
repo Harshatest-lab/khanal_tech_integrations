@@ -88,12 +88,94 @@ def fba_ship_sync_handler(event, context):
 
 
 def post_invoices_handler(event, context):
-    """{"limit": 200?, "dry_run": false?, "mode": "post"|"retry"}
+    """{"limit": 200?, "dry_run": false?, "mode": "post"|"retry"|"list_ship_to_codes"}
     {"amazon_order_id": str, "dry_run": false?} — manual pilot helper,
-    posts exactly that one order (bypasses ship-date ordering / limit)."""
+    posts exactly that one order (bypasses ship-date ordering / limit).
+    list_ship_to_codes: read-only SAP query, no DB, no posting — returns
+    the exact AddressName values SAP currently has for this BP's Ship-To
+    addresses (the valid ShipToCode/PayToCode set)."""
 
     def _go():
         ev = event or {}
+        if ev.get("mode") == "list_ship_to_codes":
+            from amazon_us import sap_client
+            return {"card_code": constants.SAP_CARD_CODE, "ship_to_codes": sap_client.list_ship_to_addresses(constants.SAP_CARD_CODE)}
+        if ev.get("mode") == "debug_invoice_doc":
+            from amazon_us import sap_client
+            return sap_client.get_invoice_doc_debug(int(ev["doc_entry"]))
+        if ev.get("mode") == "debug_invoice_lines":
+            from amazon_us import sap_client
+            doc = sap_client.get_invoice_doc(int(ev["doc_entry"]))
+            return {"DocTotal": doc.get("DocTotal"), "DocumentLines": doc.get("DocumentLines")}
+        if ev.get("mode") == "debug_find_all_invoices":
+            from amazon_us import sap_client
+            return {"invoices": sap_client.find_all_invoices_by_order_debug(ev["amazon_order_id"])}
+        if ev.get("mode") == "debug_sku_check":
+            from amazon_us.hana_access import fetch_amazon_sku_map
+            raw = fetch_amazon_sku_map()
+            targets = ev.get("skus") or []
+            return {sku: raw.get(sku, "NOT FOUND") for sku in targets}
+        if ev.get("mode") == "debug_build_payload":
+            from amazon_us.hana_access import allocate_batches_fefo, get_bom_children, resolve_acct_code
+            from amazon_us.invoice_payload import build_invoice_payload
+            with store.connect() as conn:
+                mapping = store.get_sku_mapping(conn)
+                order = store.get_order(conn, ev["amazon_order_id"])
+            payload, skipped = build_invoice_payload(order, mapping, allocate_batches_fefo, resolve_acct_code, get_bom_children)
+            return {"payload": payload, "skipped": skipped}
+        if ev.get("mode") == "debug_bom_check":
+            from khanal_shared.hana.pool import hana_connection
+            out = {}
+            with hana_connection() as conn:
+                cur = conn.cursor()
+                for item_code in ev.get("item_codes") or []:
+                    cur.execute(
+                        'SELECT "ItemCode", "ItemName", "TreeType", "InvntItem" FROM "OITM" WHERE "ItemCode" = ?',
+                        [item_code],
+                    )
+                    itm = cur.fetchone()
+                    cur.execute(
+                        'SELECT "Code", "Quantity", "Warehouse" FROM "ITT1" WHERE "Father" = ?',
+                        [item_code],
+                    )
+                    children = cur.fetchall() or []
+                    out[item_code] = {
+                        "item_master": list(itm) if itm else "NOT FOUND",
+                        "bom_children": [list(r) for r in children],
+                    }
+                cur.close()
+            return out
+        if ev.get("mode") == "debug_stock_check":
+            from khanal_shared.hana.pool import hana_connection
+            out = {}
+            with hana_connection() as conn:
+                cur = conn.cursor()
+                for item_code in ev.get("item_codes") or []:
+                    cur.execute(
+                        'SELECT "ItemCode", "ItemName", "ManBtchNum", "ManSerNum", "InvntItem", "SellItem", "validFor", "frozenFor" FROM "OITM" WHERE "ItemCode" = ?',
+                        [item_code],
+                    )
+                    itm = cur.fetchone()
+                    cur.execute(
+                        'SELECT T0."WhsCode", T1."DistNumber", T0."Quantity" '
+                        'FROM "OBTQ" T0 JOIN "OBTN" T1 '
+                        'ON T0."ItemCode" = T1."ItemCode" AND T0."SysNumber" = T1."SysNumber" '
+                        'WHERE T0."ItemCode" = ? AND T0."Quantity" > 0',
+                        [item_code],
+                    )
+                    batches = cur.fetchall() or []
+                    cur.execute(
+                        'SELECT "WhsCode", "OnHand" FROM "OITW" WHERE "ItemCode" = ?',
+                        [item_code],
+                    )
+                    onhand = cur.fetchall() or []
+                    out[item_code] = {
+                        "item_master": list(itm) if itm else "NOT FOUND IN OITM",
+                        "batches_any_whs": [list(r) for r in batches],
+                        "on_hand_by_whs": [list(r) for r in onhand],
+                    }
+                cur.close()
+            return out
         with store.connect() as conn:
             if ev.get("amazon_order_id"):
                 return post_invoices.post_one_order(
@@ -246,6 +328,7 @@ def dashboard_handler(event, context):
                         amazon_order_id=(q.get("amazon_order_id") or "").strip() or None,
                         order_date_from=q.get("order_date_from") or None,
                         order_date_to=q.get("order_date_to") or None,
+                        ship_country=q.get("ship_country") or None,
                         sort_by=q.get("sort_by") or None,
                         sort_dir=q.get("sort_dir") or None,
                     ),

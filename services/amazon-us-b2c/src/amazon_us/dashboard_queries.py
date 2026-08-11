@@ -65,6 +65,12 @@ def fetch_stats(conn: psycopg.Connection) -> dict[str, Any]:
         cn_by_status = {r["status"]: r["count"] for r in _rows_to_dicts(cur)}
 
         cur.execute(
+            "SELECT ship_country, COUNT(*)::int AS count FROM amazon_us_orders "
+            "WHERE ship_country <> 'US' GROUP BY ship_country ORDER BY count DESC"
+        )
+        by_non_us_country = {r["ship_country"] or "(blank)": r["count"] for r in _rows_to_dicts(cur)}
+
+        cur.execute(
             """
             SELECT DISTINCT ON (mode) mode, status, started_at, finished_at,
                    window_from, window_to, counts, error_message
@@ -79,6 +85,8 @@ def fetch_stats(conn: psycopg.Connection) -> dict[str, Any]:
         "by_stage": by_stage,
         "by_fulfillment_channel": by_fulfillment_channel,
         "cn_by_status": cn_by_status,
+        "by_non_us_country": by_non_us_country,
+        "non_us_total": sum(by_non_us_country.values()),
         "last_run_by_mode": last_run_by_mode,
     }
 
@@ -92,6 +100,7 @@ def fetch_orders(
     amazon_order_id: str | None = None,
     order_date_from: str | None = None,
     order_date_to: str | None = None,
+    ship_country: str | None = None,
     sort_by: str | None = None,
     sort_dir: str | None = None,
 ) -> dict[str, Any]:
@@ -100,6 +109,9 @@ def fetch_orders(
     if stage:
         where.append("stage = %s")
         params.append(stage)
+    if ship_country:
+        where.append("ship_country = %s")
+        params.append(ship_country)
     if amazon_order_id:
         where.append("amazon_order_id = %s")
         params.append(amazon_order_id)
@@ -107,7 +119,10 @@ def fetch_orders(
         where.append("purchase_date >= %s")
         params.append(order_date_from)
     if order_date_to:
-        where.append("purchase_date <= %s")
+        # order_date_to is a bare date ("2026-07-31") from the UI's date
+        # picker; a plain <= comparison truncates it to midnight and
+        # silently drops every order purchased later that same day.
+        where.append("purchase_date < %s::date + interval '1 day'")
         params.append(order_date_to)
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
 

@@ -98,6 +98,44 @@ def allocate_batches_fefo(item_code: str, required_qty: float, warehouse: str) -
     return [a.as_sap() for a in allocations]
 
 
+def get_bom_children(item_code: str) -> list[tuple[str, float]]:
+    """(child_item_code, qty_per_parent_unit) for a Sales BOM (TreeType='S')
+    parent — [] if item_code isn't a BOM (ITT1 has no rows for it).
+
+    Ported from unicommerce-b2c's bundle-line pattern: a Sales BOM parent
+    must be posted as a zero-price/zero-batch "iSalesTree" line followed by
+    one real "iIngredient" line per component (own price, own FEFO batch
+    allocation) — SAP explodes BOM parents into their components at
+    document-add time and rejects the whole document if a batch-managed
+    component has no batch selected. Sending merged batches on the
+    parent's single line (what this pipeline first tried) doesn't work:
+    confirmed against SAP Community reports of the same DI API/Service
+    Layer limitation.
+    """
+    try:
+        with hana_connection() as conn:
+            cur = conn.cursor()
+            # Only TreeType='S' (Sales BOM) explodes at the sales-document
+            # level. A great many otherwise-ordinary items also carry a
+            # Production BOM (TreeType='P') documenting how THEY get
+            # manufactured from raw materials — that's manufacturing/costing
+            # data, not something to substitute into an AR Invoice. Without
+            # this filter, any plain finished-good item that happens to have
+            # a production recipe gets wrongly exploded into its raw
+            # materials, which typically aren't even flagged as sellable.
+            cur.execute('SELECT "TreeType" FROM "OITM" WHERE "ItemCode" = ?', [item_code])
+            row = cur.fetchone()
+            if not row or row[0] != "S":
+                cur.close()
+                return []
+            cur.execute('SELECT "Code", "Quantity" FROM "ITT1" WHERE "Father" = ?', [item_code])
+            rows = cur.fetchall() or []
+            cur.close()
+    except Exception as e:
+        raise HanaUnavailableError(f"BOM children query failed for {item_code}: {e}") from e
+    return [(str(code).strip(), float(qty or 0)) for code, qty in rows]
+
+
 _acct_cache: dict[str, str] = {}
 
 

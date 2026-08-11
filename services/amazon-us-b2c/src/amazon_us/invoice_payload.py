@@ -30,6 +30,8 @@ from amazon_us.state_codes import normalize_us_state_code
 BatchAllocator = Callable[[str, float, str], list[dict]]
 # GL format code -> internal AcctCode
 AcctResolver = Callable[[str], str]
+# item_code -> [(child_item_code, qty_per_parent_unit), ...], [] if not a BOM
+BomLookup = Callable[[str], list[tuple[str, float]]]
 
 
 def build_line_udfs(order: dict[str, Any]) -> dict[str, str]:
@@ -54,6 +56,7 @@ def build_invoice_payload(
     item_mapping: dict[str, str],
     allocate_batches: BatchAllocator,
     resolve_acct: AcctResolver,
+    get_bom_children: BomLookup,
 ) -> tuple[dict | None, list[dict]]:
     """Returns (payload, skipped). payload is None when the order cannot
     be posted; skipped explains why per line (or carries a single
@@ -86,6 +89,63 @@ def build_invoice_payload(
         item_code = item_mapping.get(sku)
         if not item_code:
             skipped.append({"seller_sku": sku, "reason": "No SAP mapping"})
+            continue
+
+        children = get_bom_children(item_code)
+        if children:
+            # Sales BOM (combo/bundle) item: SAP explodes the parent into
+            # its components at document-add time and rejects the whole
+            # document if a batch-managed component has no batch selected
+            # ("Cannot add row without complete selection of batch/serial
+            # numbers") — merging children's batches onto the parent's own
+            # line does NOT satisfy this; SAP needs a real line per
+            # component. Ported from unicommerce-b2c's bundle handling:
+            # zero-price/zero-batch "iSalesTree" parent line, then one
+            # "iIngredient" line per component carrying the real price
+            # share, quantity, and its own FEFO batch allocation.
+            doc_lines.append(
+                {
+                    "ItemCode": item_code,
+                    "Quantity": qty,
+                    "UnitPrice": 0.0,
+                    "WarehouseCode": constants.SAP_WAREHOUSE,
+                    "TaxCode": constants.SAP_TAX_CODE,
+                    "TaxType": "tt_Yes",
+                    "TaxLiable": "tYES",
+                    "TaxTotal": 0.0,
+                    "TreeType": "iSalesTree",
+                    **line_udfs,
+                }
+            )
+            item_price = float(row.get("unit_price") or 0) * qty
+            n = len(children)
+            allocated_price = 0.0
+            for i, (child_code, qty_per_unit) in enumerate(children):
+                child_qty = qty_per_unit * qty
+                if child_qty <= 0:
+                    continue
+                # Amazon gives one price for the whole bundle, not a
+                # per-component breakdown — split evenly across components,
+                # last one absorbing the rounding remainder so the sum
+                # matches item_price exactly (MTR reconciliation needs the
+                # invoice total to match, not the per-component split).
+                share = round(item_price / n, 2) if i < n - 1 else round(item_price - allocated_price, 2)
+                allocated_price += share
+                child_batches = allocate_batches(child_code, child_qty, constants.SAP_WAREHOUSE)
+                child_line = {
+                    "ItemCode": child_code,
+                    "Quantity": child_qty,
+                    "UnitPrice": round(share / child_qty, 4),
+                    "WarehouseCode": constants.SAP_WAREHOUSE,
+                    "TaxCode": constants.SAP_TAX_CODE,
+                    "TaxType": "tt_Yes",
+                    "TaxLiable": "tYES",
+                    "TreeType": "iIngredient",
+                    **line_udfs,
+                }
+                if child_batches:
+                    child_line["BatchNumbers"] = child_batches
+                doc_lines.append(child_line)
             continue
 
         batches = allocate_batches(item_code, qty, constants.SAP_WAREHOUSE)
@@ -124,11 +184,20 @@ def build_invoice_payload(
     # Per-state Ship-To/Pay-To address code (same idea as the Walmart
     # integration's order_shipping_state, different naming convention on
     # this customer master — see SAP_SHIP_TO_STATE_PREFIX). Falls back to
-    # the generic SAP_PAY_TO_CODE default only when the order has no
-    # state, since an unmapped state would otherwise make SAP reject the
-    # whole document.
-    state_code = normalize_us_state_code(order.get("ship_state"))
-    ship_to_code = f"{constants.SAP_SHIP_TO_STATE_PREFIX}{state_code}" if state_code else constants.SAP_PAY_TO_CODE
+    # the generic SAP_PAY_TO_CODE default when the order has no state OR
+    # ships outside the US — a 2-letter ISO country (e.g. "CA" Canada,
+    # "CO" Colombia) collides with real USPS state codes (California,
+    # Colorado), so it must never be smuggled into the state-code prefix.
+    # The real destination country instead rides AddressExtension below,
+    # which SAP applies as a per-document override independent of
+    # whatever the referenced address code's own country is.
+    country = (order.get("ship_country") or "").strip().upper()
+    is_domestic = country in ("", "US", "USA")
+    if is_domestic:
+        state_code = normalize_us_state_code(order.get("ship_state"))
+        ship_to_code = f"{constants.SAP_SHIP_TO_STATE_PREFIX}{state_code}" if state_code else constants.SAP_PAY_TO_CODE
+    else:
+        ship_to_code = constants.SAP_PAY_TO_CODE
 
     payload = {
         "CardCode": constants.SAP_CARD_CODE,
@@ -141,6 +210,8 @@ def build_invoice_payload(
         "U_CreatedBy": constants.SAP_CREATED_BY,
         "DocumentLines": doc_lines,
     }
+    if not is_domestic:
+        payload["AddressExtension"] = {"ShipToCountry": country, "BillToCountry": country}
     return payload, []
 
 
