@@ -171,6 +171,18 @@ def build_credit_note_payload(
             continue
 
         invoice_line = _pop_matching_invoice_line(lines_by_item_code, item_code)
+        actual_item_code = item_code
+        if invoice_line is None:
+            # The SKU->item mapping can drift after an invoice posts (SAP
+            # master data corrected later) — confirmed for real 2026-08-11:
+            # an order invoiced against FGDC00009 whose current mapping had
+            # since moved to FGDC00005. The CN must reverse whatever's
+            # ACTUALLY on the invoice, not today's mapping, so fall back to
+            # matching by UnitPrice (unique per line on a typical order)
+            # and use that line's real ItemCode instead of item_code.
+            fallback = _pop_line_by_price_fallback(lines_by_item_code, unit_price)
+            if fallback:
+                actual_item_code, invoice_line = fallback
         if invoice_line is None:
             skipped.append({"seller_sku": adj.seller_sku, "reason": "No matching invoice line found"})
             continue
@@ -181,7 +193,7 @@ def build_credit_note_payload(
                 "BaseType": 13,  # AR Invoice
                 "BaseEntry": int(base_doc_entry),
                 "BaseLine": invoice_line.get("LineNum"),
-                "ItemCode": item_code,
+                "ItemCode": actual_item_code,
                 "Quantity": qty,
                 "UnitPrice": unit_price,
                 "WarehouseCode": constants.SAP_WAREHOUSE,
@@ -246,6 +258,20 @@ def build_credit_note_payload(
 def _pop_matching_invoice_line(lines_by_item_code: dict[str, list[dict]], item_code: str) -> dict | None:
     lines = lines_by_item_code.get(item_code)
     return lines.pop(0) if lines else None
+
+
+def _pop_line_by_price_fallback(
+    lines_by_item_code: dict[str, list[dict]], target_price: float
+) -> tuple[str, dict] | None:
+    """Fallback when no line matches the current SKU mapping's item code —
+    match by UnitPrice instead (unique per line on a typical order) and
+    return the line's REAL ItemCode, so the CN reverses what's actually on
+    the invoice rather than today's (possibly since-changed) mapping."""
+    for code, lines in lines_by_item_code.items():
+        for i, line in enumerate(lines):
+            if abs(float(line.get("UnitPrice") or 0) - target_price) < 0.01:
+                return code, lines.pop(i)
+    return None
 
 
 def _service_line(line_num: int, item_code: str, amount: float, acct_code: str, udfs: dict) -> dict:

@@ -99,6 +99,23 @@ def test_unmatched_sku_is_skipped_not_posted():
     assert payload is None
 
 
+def test_sku_mapping_drift_falls_back_to_price_match():
+    # The current mapping says SKU-A -> FGDC-NEW, but the invoice was
+    # posted back when SKU-A mapped to FGDC-OLD (SAP master data changed
+    # in between -- confirmed for real 2026-08-11). The CN must reverse
+    # what's ACTUALLY on the invoice (FGDC-OLD, found by matching price),
+    # not what the SKU maps to today.
+    drifted_mapping = {"SKU-A": "FGDC-NEW"}
+    invoice_lines = [{"LineNum": 0, "ItemCode": "FGDC-OLD", "UnitPrice": 13.495}]
+    payload, skipped = build_credit_note_payload(
+        _order(), _event(), drifted_mapping, 4242, invoice_lines, _resolve, _no_bom
+    )
+    assert skipped == []
+    item = payload["DocumentLines"][0]
+    assert item["ItemCode"] == "FGDC-OLD"  # the real invoiced code, not today's mapping
+    assert item["BaseLine"] == 0
+
+
 def test_zero_qty_refund_is_skipped_with_a_reason_not_silently_dropped():
     # A $0.00 (or otherwise sub-unit) principal adjustment rounds to zero
     # quantity at the order's unit price — nothing to reverse on the item
