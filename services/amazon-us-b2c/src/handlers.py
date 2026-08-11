@@ -234,6 +234,137 @@ def post_credit_notes_handler(event, context):
                 return {"payload": payload, "skipped": skipped}
             result = sap_client.post_credit_note(payload)
             return {"posted": True, "doc_entry": result["doc_entry"], "doc_num": result["doc_num"], "payload": payload}
+        if ev.get("mode") == "debug_docdate_vs_purchasedate_scope":
+            from khanal_shared.hana.pool import hana_connection
+            period_from, period_to = ev["period_from"], ev["period_to"]
+            with hana_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    'SELECT "NumAtCard", "DocTotal" FROM "OINV" '
+                    'WHERE "CANCELED" = \'N\' AND "DocDate" BETWEEN ? AND ? '
+                    'AND "NumAtCard" LIKE \'___-_______-_______\'',
+                    [period_from, period_to],
+                )
+                sap_rows = {str(n).strip(): float(t or 0) for n, t in (cur.fetchall() or [])}
+                cur.close()
+            with store.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT amazon_order_id, purchase_date, actual_ship_date FROM amazon_us_orders "
+                        "WHERE amazon_order_id = ANY(%s)",
+                        [list(sap_rows.keys())],
+                    )
+                    order_rows = {r[0]: (str(r[1]) if r[1] else None, str(r[2]) if r[2] else None) for r in cur.fetchall()}
+            not_in_july_purchase = []
+            not_found_at_all = []
+            for oid, total in sap_rows.items():
+                info = order_rows.get(oid)
+                if info is None:
+                    not_found_at_all.append({"amazon_order_id": oid, "DocTotal": total})
+                    continue
+                purchase_date, ship_date = info
+                purchase_in_july = purchase_date and period_from <= purchase_date[:10] <= period_to
+                if not purchase_in_july:
+                    not_in_july_purchase.append(
+                        {"amazon_order_id": oid, "DocTotal": total, "purchase_date": purchase_date, "actual_ship_date": ship_date}
+                    )
+            return {
+                "sap_total": round(sum(sap_rows.values()), 2),
+                "sap_order_count": len(sap_rows),
+                "orders_not_found_in_our_db_count": len(not_found_at_all),
+                "orders_not_found_in_our_db_total": round(sum(r["DocTotal"] for r in not_found_at_all), 2),
+                "orders_with_purchase_date_outside_july_count": len(not_in_july_purchase),
+                "orders_with_purchase_date_outside_july_total": round(sum(r["DocTotal"] for r in not_in_july_purchase), 2),
+                "sample_outside_july_purchase": not_in_july_purchase[:15],
+                "sample_not_found": not_found_at_all[:15],
+            }
+        if ev.get("mode") == "debug_numatcard_dupes":
+            from khanal_shared.hana.pool import hana_connection
+            period_from, period_to = ev["period_from"], ev["period_to"]
+            with hana_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    'SELECT "NumAtCard", "DocTotal", "DocEntry" FROM "OINV" '
+                    'WHERE "CANCELED" = \'N\' AND "DocDate" BETWEEN ? AND ? '
+                    'AND "NumAtCard" LIKE \'___-_______-_______\'',
+                    [period_from, period_to],
+                )
+                rows = cur.fetchall() or []
+                cur.close()
+            by_stripped: dict[str, list] = {}
+            for num_at_card, total, doc_entry in rows:
+                key = str(num_at_card).strip()
+                by_stripped.setdefault(key, []).append(
+                    {"raw_num_at_card": repr(str(num_at_card)), "DocTotal": float(total or 0), "DocEntry": int(doc_entry)}
+                )
+            dupes = {k: v for k, v in by_stripped.items() if len(v) > 1}
+            total_all = sum(float(t) for _, t, _ in rows)
+            total_by_stripped_key_last_wins = sum(v[-1]["DocTotal"] for v in by_stripped.values())
+            return {
+                "raw_row_count": len(rows),
+                "distinct_raw_numatcard_count": len({str(n).strip() and n for n, _, _ in rows}),
+                "distinct_stripped_key_count": len(by_stripped),
+                "total_all_rows": round(total_all, 2),
+                "total_if_last_wins_per_stripped_key": round(total_by_stripped_key_last_wins, 2),
+                "dupe_stripped_keys_count": len(dupes),
+                "dupes_sample": dict(list(dupes.items())[:10]),
+            }
+        if ev.get("mode") == "debug_sap_revenue_scope":
+            from khanal_shared.hana.pool import hana_connection
+            period_from, period_to = ev["period_from"], ev["period_to"]
+            with hana_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    'SELECT SUM("DocTotal"), COUNT(*) FROM "OINV" '
+                    'WHERE "CardCode" = ? AND "CANCELED" = \'N\' AND "DocDate" BETWEEN ? AND ?',
+                    [constants.SAP_CARD_CODE, period_from, period_to],
+                )
+                all_row = cur.fetchone()
+                cur.execute(
+                    'SELECT SUM("DocTotal"), COUNT(*) FROM "OINV" '
+                    'WHERE "CardCode" = ? AND "CANCELED" = \'N\' AND "DocDate" BETWEEN ? AND ? '
+                    'AND "NumAtCard" LIKE \'___-_______-_______\'',
+                    [constants.SAP_CARD_CODE, period_from, period_to],
+                )
+                pattern_row = cur.fetchone()
+                cur.execute(
+                    'SELECT "NumAtCard", "DocTotal", "DocEntry", "DocDate" FROM "OINV" '
+                    'WHERE "CardCode" = ? AND "CANCELED" = \'N\' AND "DocDate" BETWEEN ? AND ? '
+                    'AND NOT ("NumAtCard" LIKE \'___-_______-_______\')',
+                    [constants.SAP_CARD_CODE, period_from, period_to],
+                )
+                non_matching = cur.fetchall() or []
+                cur.close()
+            return {
+                "all_cardcode_total": float(all_row[0] or 0), "all_cardcode_count": int(all_row[1] or 0),
+                "order_id_pattern_total": float(pattern_row[0] or 0), "order_id_pattern_count": int(pattern_row[1] or 0),
+                "non_matching_docs": [
+                    {"NumAtCard": r[0], "DocTotal": float(r[1] or 0), "DocEntry": int(r[2]), "DocDate": str(r[3])}
+                    for r in non_matching
+                ],
+            }
+        if ev.get("mode") == "debug_refund_event":
+            from amazon_us import finances_api
+            oid = ev["amazon_order_id"]
+            events = finances_api.list_refund_events(ev["posted_after"], ev.get("posted_before"))
+            matches = [e for e in events if e.amazon_order_id == oid]
+            return {
+                "matches": [
+                    {
+                        "refund_id": e.refund_id,
+                        "posted_date": e.posted_date,
+                        "adjustments": [
+                            {
+                                "seller_sku": a.seller_sku, "principal_amount": a.principal_amount,
+                                "tax_amount": a.tax_amount, "shipping_amount": a.shipping_amount,
+                                "shipping_tax_amount": a.shipping_tax_amount,
+                            }
+                            for a in e.item_adjustments
+                        ],
+                    }
+                    for e in matches
+                ]
+            }
         if ev.get("mode") == "debug_get_cn_doc":
             from amazon_us import sap_client
             path = f"CreditNotes({int(ev['doc_entry'])})?$select=DocEntry,DocNum,DocTotal,NumAtCard,DocumentLines"
@@ -488,11 +619,23 @@ def _export_recon(period_from: str, period_to: str, s3_bucket: str) -> dict:
     notes. Two CSVs written to S3 — a bulk single-query export, not a
     per-order loop (this is meant for 10k+ row windows).
 
-    Note: the SAP refund total on each credit-note row is the order's
-    TOTAL refunds in the window (from HANA ORIN, summed) — if an order had
-    more than one refund event, every one of its rows shows the same
-    order-level total, not a per-event split (HANA/SAP doesn't carry a
-    per-event key to split on)."""
+    Invoices window: SAP recognizes revenue by DocDate (= actual_ship_date,
+    the posting pipeline's own rule — matches how Amazon's MTR indexes
+    revenue too), not purchase_date. An order purchased in June but
+    shipped in July contributes real July SAP revenue. Windowing only by
+    purchase_date silently drops those from the comparison — confirmed
+    2026-08-11 against a real Finance-reported diff (737 such orders,
+    exactly accounting for the gap to the cent). So this includes any
+    order where EITHER purchase_date OR actual_ship_date falls in the
+    window, and tags which one(s) matched via `in_window_by` — filter/sum
+    by `actual_ship_date` alone to match SAP's real period total exactly.
+
+    Credit notes: sap_order_refund_total_in_window is an ORDER-level total
+    (HANA/SAP has no per-refund-event key to split it by) — populated only
+    on the first row per order, blank on the rest, specifically so a naive
+    spreadsheet SUM() can't double-count an order with multiple refund
+    events (this bit Finance for real on 2026-08-11, off by exactly the
+    duplicated orders' total)."""
     import csv
     import io
 
@@ -513,20 +656,21 @@ def _export_recon(period_from: str, period_to: str, s3_bucket: str) -> dict:
                        COALESCE(SUM(l.shipping_price_amount), 0), COALESCE(SUM(l.shipping_tax_amount), 0)
                 FROM amazon_us_orders o
                 LEFT JOIN amazon_us_order_lines l ON l.amazon_order_id = o.amazon_order_id
-                WHERE o.purchase_date >= %s AND o.purchase_date < %s::date + interval '1 day'
+                WHERE (o.purchase_date >= %s AND o.purchase_date < %s::date + interval '1 day')
+                   OR (o.actual_ship_date >= %s::date AND o.actual_ship_date <= %s::date)
                 GROUP BY o.amazon_order_id, o.order_status, o.stage, o.purchase_date, o.actual_ship_date,
                          o.ship_city, o.ship_state, o.ship_country, o.order_total_amount,
                          o.sap_doc_entry, o.sap_doc_num, o.posted_at, o.last_error
-                ORDER BY o.purchase_date
+                ORDER BY o.actual_ship_date NULLS LAST, o.purchase_date
                 """,
-                [period_from, period_to],
+                [period_from, period_to, period_from, period_to],
             )
             order_rows = cur.fetchall()
 
     inv_buf = io.StringIO()
     w = csv.writer(inv_buf)
     w.writerow([
-        "amazon_order_id", "order_status", "stage", "purchase_date", "actual_ship_date",
+        "amazon_order_id", "order_status", "stage", "purchase_date", "actual_ship_date", "in_window_by",
         "ship_city", "ship_state", "ship_country",
         "api_item_price", "api_item_tax", "api_shipping", "api_shipping_tax",
         "api_computed_total", "api_order_total_field",
@@ -537,11 +681,18 @@ def _export_recon(period_from: str, period_to: str, s3_bucket: str) -> dict:
     for (oid, status, stage, purchase_date, ship_date, city, state, country, order_total,
          doc_entry, doc_num, posted_at, last_error,
          item_price, item_tax, shipping, shipping_tax) in order_rows:
+        purchase_in_window = purchase_date and period_from <= str(purchase_date)[:10] < (
+            (datetime.strptime(period_to, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        )
+        ship_in_window = ship_date and period_from <= str(ship_date)[:10] <= period_to
+        in_window_by = "+".join(
+            label for label, matched in (("purchase_date", purchase_in_window), ("ship_date", ship_in_window)) if matched
+        )
         api_computed_total = float(item_price) + float(item_tax) + float(shipping) + float(shipping_tax)
         sap_total = sap_side.get(oid, {}).get("sales")
         gross_diff = round(api_computed_total - sap_total, 2) if sap_total is not None else ""
         w.writerow([
-            oid, status, stage, purchase_date, ship_date, city, state, country,
+            oid, status, stage, purchase_date, ship_date, in_window_by, city, state, country,
             item_price, item_tax, shipping, shipping_tax,
             round(api_computed_total, 2), order_total,
             doc_entry or "", doc_num or "", posted_at or "",
@@ -567,6 +718,7 @@ def _export_recon(period_from: str, period_to: str, s3_bucket: str) -> dict:
         "cn_status", "sap_doc_entry", "sap_doc_num", "base_doc_entry",
         "sap_order_refund_total_in_window", "skip_reason", "error_message",
     ])
+    seen_orders_for_sap_refund_total: set[str] = set()
     for e in events:
         principal = sum(a.principal_amount for a in e.item_adjustments)
         item_tax = sum(a.tax_amount for a in e.item_adjustments)
@@ -575,12 +727,19 @@ def _export_recon(period_from: str, period_to: str, s3_bucket: str) -> dict:
         total = principal + item_tax + ship + ship_tax
         cn = cn_rows.get(e.refund_id)
         status, doc_entry, doc_num, base_entry, skip_reason, err = cn if cn else ("", "", "", "", "", "")
-        sap_refund_total = sap_side.get(e.amazon_order_id, {}).get("refunds")
+        # Only the first row per order carries the order-level SAP total —
+        # blank on the rest, so SUM()-ing this column in a spreadsheet
+        # can't double-count an order with multiple refund events.
+        sap_refund_total = ""
+        if e.amazon_order_id not in seen_orders_for_sap_refund_total:
+            seen_orders_for_sap_refund_total.add(e.amazon_order_id)
+            val = sap_side.get(e.amazon_order_id, {}).get("refunds")
+            sap_refund_total = val if val is not None else ""
         w2.writerow([
             e.refund_id, e.amazon_order_id, e.posted_date,
             round(principal, 2), round(item_tax, 2), round(ship, 2), round(ship_tax, 2), round(total, 2),
             status, doc_entry or "", doc_num or "", base_entry or "",
-            sap_refund_total if sap_refund_total is not None else "", skip_reason or "", err or "",
+            sap_refund_total, skip_reason or "", err or "",
         ])
 
     s3 = boto3.client("s3")
