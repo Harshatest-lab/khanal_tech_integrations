@@ -92,6 +92,26 @@ provider:
             - s3:PutObject
           Resource:
             - arn:aws:s3:::${self:custom.reconBucket}/*
+        # Dashboard-triggered sync/post/recon buttons: amazonDashboardApi
+        # fire-and-forget invokes these (API Gateway HTTP APIs hard-cap
+        # integration timeout at 30s, so anything that can run long — order
+        # sync, FBA sync, a full post/recon pass — must be handed off to its
+        # own 900s-timeout function, never run in-process in the API
+        # handler). Applied manually via `aws iam put-role-policy` first
+        # (see amazon_us_b2c_dashboard_triggers memory) since a full
+        # `serverless deploy` risks the env-var-wipe incident documented in
+        # [[amazon-us-b2c-dev-stage-live-sap]] — this declaration is here so
+        # a future clean deploy reproduces the same grant, not because it
+        # was applied through one.
+        - Effect: Allow
+          Action:
+            - lambda:InvokeFunction
+          Resource:
+            - arn:aws:lambda:${self:provider.region}:*:function:${self:service}-${self:provider.stage}-amazonFetch
+            - arn:aws:lambda:${self:provider.region}:*:function:${self:service}-${self:provider.stage}-amazonFbaShipSync
+            - arn:aws:lambda:${self:provider.region}:*:function:${self:service}-${self:provider.stage}-amazonPostInvoices
+            - arn:aws:lambda:${self:provider.region}:*:function:${self:service}-${self:provider.stage}-amazonPostCreditNotes
+            - arn:aws:lambda:${self:provider.region}:*:function:${self:service}-${self:provider.stage}-amazonRecon
   environment:
     STAGE: ${self:provider.stage}
     LOG_LEVEL: ${env:LOG_LEVEL, 'INFO'}
@@ -278,6 +298,33 @@ functions:
       - httpApi:
           path: /v1/amazon/recon-download
           method: get
+          authorizer:
+            name: dashboardCognitoJwt
+      # Fire-and-forget triggers for the dashboard's sync/post/recon
+      # buttons — see the lambda:InvokeFunction statement above.
+      - httpApi:
+          path: /v1/amazon/sync-orders
+          method: post
+          authorizer:
+            name: dashboardCognitoJwt
+      - httpApi:
+          path: /v1/amazon/sync-fba
+          method: post
+          authorizer:
+            name: dashboardCognitoJwt
+      - httpApi:
+          path: /v1/amazon/post-ready
+          method: post
+          authorizer:
+            name: dashboardCognitoJwt
+      - httpApi:
+          path: /v1/amazon/run-recon
+          method: post
+          authorizer:
+            name: dashboardCognitoJwt
+      - httpApi:
+          path: /v1/amazon/export-recon
+          method: post
           authorizer:
             name: dashboardCognitoJwt
 

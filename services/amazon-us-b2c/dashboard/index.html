@@ -233,6 +233,26 @@
       </section>
 
       <section id="finance-panel" class="panel hidden">
+        <div class="filter-card" style="margin-bottom: 1rem">
+          <div class="filter-card-grid">
+            <label class="filter-field">
+              <span class="filter-label">Period from</span>
+              <input type="date" id="recon-period-from" />
+            </label>
+            <label class="filter-field">
+              <span class="filter-label">Period to</span>
+              <input type="date" id="recon-period-to" />
+            </label>
+            <label class="filter-field">
+              <span class="filter-label">MTR CSV S3 key (mtr/ prefix, already uploaded)</span>
+              <input type="text" id="recon-s3-key" placeholder="mtr/2026-07.csv" autocomplete="off" />
+            </label>
+          </div>
+          <div class="filter-card-actions">
+            <button type="button" class="btn-outline" id="run-mtr-recon-btn">Run MTR reconciliation</button>
+            <button type="button" class="btn-primary" id="run-export-recon-btn">Export order-level CSVs</button>
+          </div>
+        </div>
         <div class="table-scroll">
           <table class="report-table" id="finance-table">
             <thead>

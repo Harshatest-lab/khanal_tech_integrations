@@ -312,6 +312,41 @@ function renderPanelActions(panelId) {
     btn.textContent = "Re-run CN posting (45d window)";
     btn.addEventListener("click", () => runRetryCn(btn));
     el.appendChild(btn);
+  } else if (panelId === "health-panel") {
+    const triggers = [
+      ["Sync orders now", "/v1/amazon/sync-orders?mode=incremental", "Sync incremental orders now?"],
+      ["Sync FBA ship dates", "/v1/amazon/sync-fba", "Sync FBA ship dates now (last 21 days)?"],
+      ["Post ready orders", "/v1/amazon/post-ready?limit=200", "Post up to 200 ready orders to SAP now?"],
+      ["Run invariants check", "/v1/amazon/run-recon?mode=invariants", "Run the daily invariants check now?"],
+    ];
+    triggers.forEach(([label, path, confirmMsg]) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn-outline btn-sm";
+      btn.textContent = label;
+      btn.addEventListener("click", () => runTrigger(btn, path, confirmMsg));
+      el.appendChild(btn);
+    });
+  }
+}
+
+// ── Fire-and-forget triggers (sync/post/recon run async — results show up
+// in Sync History, this just confirms the trigger was accepted) ──────────
+
+async function runTrigger(btn, path, confirmMsg) {
+  if (confirmMsg && !window.confirm(confirmMsg)) return;
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = "Triggering…";
+  try {
+    await apiPost(path);
+    hideError();
+    window.alert("Triggered. Check Sync History in a minute or two for progress.");
+  } catch (err) {
+    showError(`Trigger failed: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
   }
 }
 
@@ -504,6 +539,43 @@ async function downloadReconCsv(btn) {
     btn.textContent = original;
   }
 }
+
+const reconPeriodFrom = document.getElementById("recon-period-from");
+const reconPeriodTo = document.getElementById("recon-period-to");
+const reconS3Key = document.getElementById("recon-s3-key");
+const runMtrReconBtn = document.getElementById("run-mtr-recon-btn");
+const runExportReconBtn = document.getElementById("run-export-recon-btn");
+
+runMtrReconBtn.addEventListener("click", async () => {
+  const from = reconPeriodFrom.value;
+  const to = reconPeriodTo.value;
+  const key = reconS3Key.value.trim();
+  if (!from || !to || !key) {
+    showError("MTR recon needs period from, period to, and the S3 key of an already-uploaded MTR CSV.");
+    return;
+  }
+  const params = new URLSearchParams({ mode: "mtr", s3_key: key, period_from: from, period_to: to });
+  await runTrigger(
+    runMtrReconBtn,
+    `/v1/amazon/run-recon?${params}`,
+    `Run MTR reconciliation for ${from} → ${to} against ${key}?`
+  );
+});
+
+runExportReconBtn.addEventListener("click", async () => {
+  const from = reconPeriodFrom.value;
+  const to = reconPeriodTo.value;
+  if (!from || !to) {
+    showError("Order-level export needs both period from and period to.");
+    return;
+  }
+  const params = new URLSearchParams({ period_from: from, period_to: to });
+  await runTrigger(
+    runExportReconBtn,
+    `/v1/amazon/export-recon?${params}`,
+    `Export order-level invoice + credit-note CSVs for ${from} → ${to}?`
+  );
+});
 
 // ── Orders panel ─────────────────────────────────────────────────────────
 

@@ -269,6 +269,24 @@ def _query_params(event: dict[str, Any]) -> dict[str, str]:
     return {str(k): str(v) for k, v in params.items() if v is not None} if isinstance(params, dict) else {}
 
 
+def _invoke_async(function_name_suffix: str, payload: dict) -> None:
+    """Fire-and-forget invoke of another function in this service. API
+    Gateway HTTP APIs hard-cap integration timeout at 30s, so anything that
+    can run long (order sync, FBA sync, a full post/recon pass) must be
+    handed off to its own 900s-timeout function rather than run in-process
+    here. Progress/results show up in Sync History, not in the response."""
+    import os
+
+    import boto3
+
+    function_name = f"amazon-us-b2c-{os.environ['STAGE']}-{function_name_suffix}"
+    boto3.client("lambda").invoke(
+        FunctionName=function_name,
+        InvocationType="Event",
+        Payload=json.dumps(payload).encode("utf-8"),
+    )
+
+
 def dashboard_handler(event, context):
     method = _http_method(event)
     if method == "OPTIONS":
@@ -278,6 +296,46 @@ def dashboard_handler(event, context):
     q = _query_params(event)
 
     try:
+        if path.endswith("/v1/amazon/sync-orders") and method == "POST":
+            mode = q.get("mode") or "incremental"
+            payload = {"mode": mode}
+            if q.get("from_date"):
+                payload["from_date"] = q["from_date"]
+            if q.get("to_date"):
+                payload["to_date"] = q["to_date"]
+            _invoke_async("amazonFetch", payload)
+            return _json_response(202, {"triggered": "amazonFetch", "mode": mode})
+
+        if path.endswith("/v1/amazon/sync-fba") and method == "POST":
+            payload = {}
+            if q.get("from_date"):
+                payload["from_date"] = q["from_date"]
+            if q.get("to_date"):
+                payload["to_date"] = q["to_date"]
+            _invoke_async("amazonFbaShipSync", payload)
+            return _json_response(202, {"triggered": "amazonFbaShipSync"})
+
+        if path.endswith("/v1/amazon/post-ready") and method == "POST":
+            _invoke_async("amazonPostInvoices", {"limit": int(q.get("limit") or post_invoices.DEFAULT_LIMIT)})
+            return _json_response(202, {"triggered": "amazonPostInvoices"})
+
+        if path.endswith("/v1/amazon/run-recon") and method == "POST":
+            mode = q.get("mode") or "invariants"
+            payload = {"mode": mode}
+            for key in ("s3_bucket", "s3_key", "period_from", "period_to"):
+                if q.get(key):
+                    payload[key] = q[key]
+            _invoke_async("amazonRecon", payload)
+            return _json_response(202, {"triggered": "amazonRecon", "mode": mode})
+
+        if path.endswith("/v1/amazon/export-recon") and method == "POST":
+            period_from = (q.get("period_from") or "").strip()
+            period_to = (q.get("period_to") or "").strip()
+            if not period_from or not period_to:
+                return _json_response(400, {"error": "period_from and period_to are required"})
+            _invoke_async("amazonPostInvoices", {"mode": "export_recon", "period_from": period_from, "period_to": period_to})
+            return _json_response(202, {"triggered": "amazonPostInvoices", "mode": "export_recon"})
+
         if path.endswith("/v1/amazon/retry-invoices") and method == "POST":
             with store.connect() as conn:
                 limit = int(q.get("limit") or 50)
