@@ -123,6 +123,8 @@ def post_invoices_handler(event, context):
                 order = store.get_order(conn, ev["amazon_order_id"])
             payload, skipped = build_invoice_payload(order, mapping, allocate_batches_fefo, resolve_acct_code, get_bom_children)
             return {"payload": payload, "skipped": skipped}
+        if ev.get("mode") == "export_recon":
+            return _export_recon(ev["period_from"], ev["period_to"], ev.get("s3_bucket") or constants.RECON_BUCKET)
         if ev.get("mode") == "debug_bom_check":
             from khanal_shared.hana.pool import hana_connection
             out = {}
@@ -361,3 +363,115 @@ def dashboard_handler(event, context):
         scrubbed = _scrub(str(exc))
         logger.error("dashboard_api_error path=%s error=%s", path, scrubbed)
         return _json_response(500, {"error": scrubbed})
+
+
+def _export_recon(period_from: str, period_to: str, s3_bucket: str) -> dict:
+    """Order-level reconciliation export: our staged (API-side) data next
+    to the live SAP-side aggregate from HANA, for invoices and credit
+    notes. Two CSVs written to S3 — a bulk single-query export, not a
+    per-order loop (this is meant for 10k+ row windows).
+
+    Note: the SAP refund total on each credit-note row is the order's
+    TOTAL refunds in the window (from HANA ORIN, summed) — if an order had
+    more than one refund event, every one of its rows shows the same
+    order-level total, not a per-event split (HANA/SAP doesn't carry a
+    per-event key to split on)."""
+    import csv
+    import io
+
+    import boto3
+
+    from amazon_us import finances_api
+
+    sap_side = recon.fetch_sap_side(period_from, period_to)
+
+    with store.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT o.amazon_order_id, o.order_status, o.stage, o.purchase_date, o.actual_ship_date,
+                       o.ship_city, o.ship_state, o.ship_country, o.order_total_amount,
+                       o.sap_doc_entry, o.sap_doc_num, o.posted_at, o.last_error,
+                       COALESCE(SUM(l.item_price_amount), 0), COALESCE(SUM(l.item_tax_amount), 0),
+                       COALESCE(SUM(l.shipping_price_amount), 0), COALESCE(SUM(l.shipping_tax_amount), 0)
+                FROM amazon_us_orders o
+                LEFT JOIN amazon_us_order_lines l ON l.amazon_order_id = o.amazon_order_id
+                WHERE o.purchase_date >= %s AND o.purchase_date < %s::date + interval '1 day'
+                GROUP BY o.amazon_order_id, o.order_status, o.stage, o.purchase_date, o.actual_ship_date,
+                         o.ship_city, o.ship_state, o.ship_country, o.order_total_amount,
+                         o.sap_doc_entry, o.sap_doc_num, o.posted_at, o.last_error
+                ORDER BY o.purchase_date
+                """,
+                [period_from, period_to],
+            )
+            order_rows = cur.fetchall()
+
+    inv_buf = io.StringIO()
+    w = csv.writer(inv_buf)
+    w.writerow([
+        "amazon_order_id", "order_status", "stage", "purchase_date", "actual_ship_date",
+        "ship_city", "ship_state", "ship_country",
+        "api_item_price", "api_item_tax", "api_shipping", "api_shipping_tax",
+        "api_computed_total", "api_order_total_field",
+        "sap_doc_entry", "sap_doc_num", "posted_at",
+        "sap_actual_doctotal", "gross_diff",
+        "last_error",
+    ])
+    for (oid, status, stage, purchase_date, ship_date, city, state, country, order_total,
+         doc_entry, doc_num, posted_at, last_error,
+         item_price, item_tax, shipping, shipping_tax) in order_rows:
+        api_computed_total = float(item_price) + float(item_tax) + float(shipping) + float(shipping_tax)
+        sap_total = sap_side.get(oid, {}).get("sales")
+        gross_diff = round(api_computed_total - sap_total, 2) if sap_total is not None else ""
+        w.writerow([
+            oid, status, stage, purchase_date, ship_date, city, state, country,
+            item_price, item_tax, shipping, shipping_tax,
+            round(api_computed_total, 2), order_total,
+            doc_entry or "", doc_num or "", posted_at or "",
+            sap_total if sap_total is not None else "", gross_diff,
+            last_error or "",
+        ])
+
+    events = finances_api.list_refund_events(f"{period_from}T00:00:00Z", f"{period_to}T23:59:59Z")
+    with store.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT refund_id, status, sap_doc_entry, sap_doc_num, base_doc_entry, skip_reason, error_message "
+                "FROM amazon_us_cn_log WHERE refund_id = ANY(%s)",
+                [[e.refund_id for e in events]],
+            )
+            cn_rows = {r[0]: r[1:] for r in cur.fetchall()}
+
+    cn_buf = io.StringIO()
+    w2 = csv.writer(cn_buf)
+    w2.writerow([
+        "refund_id", "amazon_order_id", "posted_date",
+        "api_principal", "api_item_tax", "api_shipping", "api_shipping_tax", "api_total",
+        "cn_status", "sap_doc_entry", "sap_doc_num", "base_doc_entry",
+        "sap_order_refund_total_in_window", "skip_reason", "error_message",
+    ])
+    for e in events:
+        principal = sum(a.principal_amount for a in e.item_adjustments)
+        item_tax = sum(a.tax_amount for a in e.item_adjustments)
+        ship = sum(a.shipping_amount for a in e.item_adjustments)
+        ship_tax = sum(a.shipping_tax_amount for a in e.item_adjustments)
+        total = principal + item_tax + ship + ship_tax
+        cn = cn_rows.get(e.refund_id)
+        status, doc_entry, doc_num, base_entry, skip_reason, err = cn if cn else ("", "", "", "", "", "")
+        sap_refund_total = sap_side.get(e.amazon_order_id, {}).get("refunds")
+        w2.writerow([
+            e.refund_id, e.amazon_order_id, e.posted_date,
+            round(principal, 2), round(item_tax, 2), round(ship, 2), round(ship_tax, 2), round(total, 2),
+            status, doc_entry or "", doc_num or "", base_entry or "",
+            sap_refund_total if sap_refund_total is not None else "", skip_reason or "", err or "",
+        ])
+
+    s3 = boto3.client("s3")
+    inv_key = f"recon-export/invoices_{period_from}_{period_to}.csv"
+    cn_key = f"recon-export/credit_notes_{period_from}_{period_to}.csv"
+    s3.put_object(Bucket=s3_bucket, Key=inv_key, Body=inv_buf.getvalue().encode("utf-8"))
+    s3.put_object(Bucket=s3_bucket, Key=cn_key, Body=cn_buf.getvalue().encode("utf-8"))
+    return {
+        "invoices_key": inv_key, "credit_notes_key": cn_key,
+        "invoice_rows": len(order_rows), "cn_rows": len(events),
+    }
