@@ -24,7 +24,7 @@ import logging
 
 from amazon_us import constants, finances_api, sap_client, store
 from amazon_us.credit_note_payload import build_credit_note_payload
-from amazon_us.hana_access import resolve_acct_code
+from amazon_us.hana_access import get_bom_children, resolve_acct_code
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +110,8 @@ def _process_event(conn, event: finances_api.RefundEvent, mapping: dict[str, str
         return "skipped"
 
     payload, line_skips = build_credit_note_payload(
-        order, event, mapping, order["sap_doc_entry"], invoice.get("DocumentLines") or [], resolve_acct_code
+        order, event, mapping, order["sap_doc_entry"], invoice.get("DocumentLines") or [], resolve_acct_code,
+        get_bom_children,
     )
     if payload is None:
         _skip(conn, event, f"no postable lines: {line_skips}", dry_run)

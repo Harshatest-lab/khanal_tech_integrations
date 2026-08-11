@@ -196,10 +196,63 @@ def post_invoices_handler(event, context):
 
 def post_credit_notes_handler(event, context):
     """Default window: last 45 days (Finances PostedDate lags MTR).
-    Manual: {"posted_after": ISO, "posted_before": ISO, "dry_run": bool}."""
+    Manual: {"posted_after": ISO, "posted_before": ISO, "dry_run": bool}.
+    debug_test_bom_cn: {"mode": "debug_test_bom_cn", "amazon_order_id": ...,
+    "seller_sku": ..., "dry_run": bool} — one-off live validation of the
+    BOM credit-note fix against a real, already-posted BOM order. Builds a
+    synthetic RefundEvent and, unless dry_run, actually posts the CN to
+    SAP. Ops tooling only, not on any schedule."""
 
     def _go():
         ev = event or {}
+        if ev.get("mode") == "debug_test_bom_cn":
+            from amazon_us import sap_client
+            from amazon_us.credit_note_payload import build_credit_note_payload
+            from amazon_us.finances_api import RefundEvent, RefundItemAdjustment
+            from amazon_us.hana_access import get_bom_children, resolve_acct_code
+
+            oid = ev["amazon_order_id"]
+            with store.connect() as conn:
+                mapping = store.get_sku_mapping(conn)
+                order = store.get_order(conn, oid)
+            invoice = sap_client.get_invoice_doc(order["sap_doc_entry"])
+            seller_sku = ev["seller_sku"]
+            unit_price = next(
+                float(l["unit_price"]) for l in order["lines"] if l["seller_sku"] == seller_sku
+            )
+            refund_event = RefundEvent(
+                refund_id=f"{oid}-DEBUGTEST-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}",
+                amazon_order_id=oid,
+                posted_date=date.today().isoformat(),
+                item_adjustments=[RefundItemAdjustment(seller_sku=seller_sku, principal_amount=-unit_price)],
+            )
+            payload, skipped = build_credit_note_payload(
+                order, refund_event, mapping, order["sap_doc_entry"], invoice.get("DocumentLines") or [],
+                resolve_acct_code, get_bom_children,
+            )
+            if ev.get("dry_run") or payload is None:
+                return {"payload": payload, "skipped": skipped}
+            result = sap_client.post_credit_note(payload)
+            return {"posted": True, "doc_entry": result["doc_entry"], "doc_num": result["doc_num"], "payload": payload}
+        if ev.get("mode") == "debug_get_cn_doc":
+            from amazon_us import sap_client
+            path = f"CreditNotes({int(ev['doc_entry'])})?$select=DocEntry,DocNum,DocTotal,NumAtCard,DocumentLines"
+            status, body = sap_client._request("GET", path)
+            if status != 200:
+                return {"error": f"HTTP {status}", "body": body}
+            return {
+                "DocTotal": body.get("DocTotal"),
+                "NumAtCard": body.get("NumAtCard"),
+                "DocumentLines": [
+                    {
+                        "ItemCode": l.get("ItemCode"), "Quantity": l.get("Quantity"), "UnitPrice": l.get("UnitPrice"),
+                        "WithoutInventoryMovement": l.get("WithoutInventoryMovement"),
+                        "BaseLine": l.get("BaseLine"), "BaseEntry": l.get("BaseEntry"), "TreeType": l.get("TreeType"),
+                    }
+                    for l in (body.get("DocumentLines") or [])
+                ],
+            }
+
         posted_after = ev.get("posted_after") or (
             datetime.now(timezone.utc) - timedelta(days=45)
         ).strftime("%Y-%m-%dT%H:%M:%SZ")

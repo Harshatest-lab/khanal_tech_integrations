@@ -24,7 +24,7 @@ from typing import Any, Callable
 
 from amazon_us import constants
 from amazon_us.finances_api import RefundEvent
-from amazon_us.invoice_payload import build_line_udfs
+from amazon_us.invoice_payload import BomLookup, build_line_udfs
 from amazon_us.state_codes import normalize_us_state_code
 
 AcctResolver = Callable[[str], str]
@@ -37,6 +37,7 @@ def build_credit_note_payload(
     base_doc_entry: int,
     invoice_lines: list[dict],
     resolve_acct: AcctResolver,
+    get_bom_children: BomLookup,
 ) -> tuple[dict | None, list[dict]]:
     """Returns (payload, skipped). payload is None when nothing is
     postable (every adjustment unmatched)."""
@@ -78,6 +79,84 @@ def build_credit_note_payload(
         # Pop only once we know this adjustment will actually consume a line —
         # popping earlier would discard the line for a later same-item_code
         # adjustment even though this one turned out to be a no-op.
+        children = get_bom_children(item_code)
+        if children:
+            # Sales BOM (combo/bundle): the base invoice isn't one line for
+            # item_code, it's a zero-price "iSalesTree" parent line plus one
+            # real "iIngredient" line per component (see
+            # invoice_payload.build_invoice_payload). A CN must reverse the
+            # SAME rows it's linked from — BaseLine has to point at the
+            # actual invoiced row, and reversing the full refund amount
+            # against the zero-price parent would both fail SAP's
+            # remaining-open-amount check on that base line and leave the
+            # real revenue (booked on the child lines) unreversed.
+            parent_line = _pop_matching_invoice_line(lines_by_item_code, item_code)
+            if parent_line is None:
+                skipped.append({"seller_sku": adj.seller_sku, "reason": "No matching invoice line found"})
+                continue
+            doc_lines.append(
+                {
+                    "LineNum": line_num,
+                    "BaseType": 13,
+                    "BaseEntry": int(base_doc_entry),
+                    "BaseLine": parent_line.get("LineNum"),
+                    "ItemCode": item_code,
+                    "Quantity": qty,
+                    "UnitPrice": 0.0,
+                    "WarehouseCode": constants.SAP_WAREHOUSE,
+                    "TaxCode": constants.SAP_TAX_CODE,
+                    "TaxType": "tt_Yes",
+                    "TaxLiable": "tYES",
+                    "TaxTotal": 0.0,
+                    # NOT WithoutInventoryMovement here: SAP rejects it on a
+                    # Sales-BOM tree row ("row does not support the 'Without
+                    # Qty Posting' feature") — the parent carries no real
+                    # inventory quantity itself (that's on the children), so
+                    # the flag is meaningless on this row, not just unwanted.
+                    "TreeType": "iSalesTree",
+                    **line_udfs,
+                }
+            )
+            line_num += 1
+
+            # Refunded qty vs. what was actually invoiced on the parent row —
+            # scales down cleanly for a partial refund (e.g. 1 of 2 bundles).
+            original_parent_qty = float(parent_line.get("Quantity") or 0) or qty
+            scale = qty / original_parent_qty if original_parent_qty else 1.0
+            for child_code, _qty_per_unit in children:
+                child_invoice_line = _pop_matching_invoice_line(lines_by_item_code, child_code)
+                if child_invoice_line is None:
+                    skipped.append(
+                        {"seller_sku": adj.seller_sku, "reason": f"No matching invoice line for BOM component {child_code}"}
+                    )
+                    continue
+                child_qty = round(float(child_invoice_line.get("Quantity") or 0) * scale, 6)
+                if child_qty <= 0:
+                    continue
+                doc_lines.append(
+                    {
+                        "LineNum": line_num,
+                        "BaseType": 13,
+                        "BaseEntry": int(base_doc_entry),
+                        "BaseLine": child_invoice_line.get("LineNum"),
+                        "ItemCode": child_code,
+                        "Quantity": child_qty,
+                        # Reverse at the price actually invoiced on this row,
+                        # not a re-derived split — keeps the CN consistent
+                        # with what SAP has on file for that base line.
+                        "UnitPrice": float(child_invoice_line.get("UnitPrice") or 0),
+                        "WarehouseCode": constants.SAP_WAREHOUSE,
+                        "TaxCode": constants.SAP_TAX_CODE,
+                        "TaxType": "tt_Yes",
+                        "TaxLiable": "tYES",
+                        "WithoutInventoryMovement": "tYES",
+                        "TreeType": "iIngredient",
+                        **line_udfs,
+                    }
+                )
+                line_num += 1
+            continue
+
         invoice_line = _pop_matching_invoice_line(lines_by_item_code, item_code)
         if invoice_line is None:
             skipped.append({"seller_sku": adj.seller_sku, "reason": "No matching invoice line found"})
