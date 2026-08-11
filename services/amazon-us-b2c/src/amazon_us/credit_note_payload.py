@@ -74,6 +74,19 @@ def build_credit_note_payload(
 
         qty = round(abs(adj.principal_amount) / unit_price, 6)
         if qty <= 0:
+            # Refund amount for this line rounds to zero units at the
+            # order's unit price (e.g. a $0.00 principal adjustment, or one
+            # far smaller than a single unit) — nothing to reverse on the
+            # item line itself, though shipping/tax above already
+            # accumulated regardless. Log it instead of silently vanishing
+            # (this is exactly what looked like an unexplained "no
+            # postable lines: []" skip to Finance on 2026-08-11).
+            skipped.append(
+                {
+                    "seller_sku": adj.seller_sku,
+                    "reason": f"Refund amount ({adj.principal_amount}) rounds to zero qty at unit price {unit_price}",
+                }
+            )
             continue
 
         # Pop only once we know this adjustment will actually consume a line —

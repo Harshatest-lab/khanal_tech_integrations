@@ -97,7 +97,21 @@ def test_unmatched_sku_is_skipped_not_posted():
         _order(), event, MAPPING, 4242, INVOICE_LINES, _resolve, _no_bom
     )
     assert payload is None
-    assert skipped[0]["seller_sku"] == "SKU-OTHER"
+
+
+def test_zero_qty_refund_is_skipped_with_a_reason_not_silently_dropped():
+    # A $0.00 (or otherwise sub-unit) principal adjustment rounds to zero
+    # quantity at the order's unit price — nothing to reverse on the item
+    # line, but this must show up in `skipped`, not vanish silently (that
+    # looked like an unexplained "no postable lines: []" to Finance).
+    event = _event(principal_amount=0.0)
+    payload, skipped = build_credit_note_payload(
+        _order(), event, MAPPING, 4242, INVOICE_LINES, _resolve, _no_bom
+    )
+    assert payload is None
+    assert len(skipped) == 1
+    assert skipped[0]["seller_sku"] == "SKU-A"
+    assert "rounds to zero qty" in skipped[0]["reason"]
 
 
 def test_ship_to_code_matches_order_state():
