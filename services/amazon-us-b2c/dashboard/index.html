@@ -227,6 +227,22 @@
       </section>
 
       <section id="health-panel" class="panel hidden">
+        <div class="filter-card" style="margin: 1.35rem 1.35rem 0">
+          <div class="filter-card-grid">
+            <label class="filter-field">
+              <span class="filter-label">Date range from <span class="muted">(optional — applies to the 3 buttons below)</span></span>
+              <input type="date" id="health-date-from" />
+            </label>
+            <label class="filter-field">
+              <span class="filter-label">Date range to</span>
+              <input type="date" id="health-date-to" />
+            </label>
+          </div>
+          <p class="muted" style="margin: 0.5rem 0 0; font-size: 0.85rem">
+            Leave both blank to use each action's default window (incremental sync, last 21 days for FBA, no date filter for posting).
+            "Run invariants check" always checks current state and ignores this — it's a snapshot, not a period report.
+          </p>
+        </div>
         <div id="health-body" style="padding: 1.35rem">
           <p class="muted">Loading…</p>
         </div>

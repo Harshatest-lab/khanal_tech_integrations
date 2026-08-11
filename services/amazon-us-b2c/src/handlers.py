@@ -188,6 +188,7 @@ def post_invoices_handler(event, context):
             return post_invoices.post_ready_orders(
                 conn, limit=int(ev.get("limit") or post_invoices.DEFAULT_LIMIT),
                 dry_run=bool(ev.get("dry_run")),
+                ship_date_from=ev.get("ship_date_from"), ship_date_to=ev.get("ship_date_to"),
             )
 
     return _run("post_invoices", _go)
@@ -316,7 +317,12 @@ def dashboard_handler(event, context):
             return _json_response(202, {"triggered": "amazonFbaShipSync"})
 
         if path.endswith("/v1/amazon/post-ready") and method == "POST":
-            _invoke_async("amazonPostInvoices", {"limit": int(q.get("limit") or post_invoices.DEFAULT_LIMIT)})
+            payload = {"limit": int(q.get("limit") or post_invoices.DEFAULT_LIMIT)}
+            if q.get("from_date"):
+                payload["ship_date_from"] = q["from_date"]
+            if q.get("to_date"):
+                payload["ship_date_to"] = q["to_date"]
+            _invoke_async("amazonPostInvoices", payload)
             return _json_response(202, {"triggered": "amazonPostInvoices"})
 
         if path.endswith("/v1/amazon/run-recon") and method == "POST":

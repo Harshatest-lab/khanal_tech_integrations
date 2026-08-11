@@ -35,11 +35,19 @@ DEFAULT_LIMIT = 200
 MAX_ATTEMPTS = 3  # definitive-failure retries via the retry cron
 
 
-def post_ready_orders(conn, limit: int = DEFAULT_LIMIT, dry_run: bool = False) -> dict:
+def post_ready_orders(
+    conn, limit: int = DEFAULT_LIMIT, dry_run: bool = False,
+    ship_date_from: str | None = None, ship_date_to: str | None = None,
+) -> dict:
+    """ship_date_from/ship_date_to optionally narrow the ship-date window an
+    ops-triggered run posts (e.g. "just July"). ship_date_from can only
+    raise the floor above POSTING_CUTOFF_DATE, never lower it — the cutoff
+    is Finance-mandated and non-negotiable regardless of what's requested."""
     run_id = store.start_sync_log(conn, "post")
     try:
         mapping = store.get_sku_mapping(conn)
-        ready = store.list_ready_orders(conn, constants.POSTING_CUTOFF_DATE, limit)
+        effective_from = max(constants.POSTING_CUTOFF_DATE, ship_date_from) if ship_date_from else constants.POSTING_CUTOFF_DATE
+        ready = store.list_ready_orders(conn, effective_from, limit, to_date=ship_date_to)
         logger.info("%s ready orders (limit %s, dry_run=%s)", len(ready), limit, dry_run)
 
         counts = {"total": len(ready), "posted": 0, "recovered": 0, "failed": 0, "skipped": 0}

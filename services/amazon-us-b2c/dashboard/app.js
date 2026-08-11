@@ -313,21 +313,75 @@ function renderPanelActions(panelId) {
     btn.addEventListener("click", () => runRetryCn(btn));
     el.appendChild(btn);
   } else if (panelId === "health-panel") {
-    const triggers = [
-      ["Sync orders now", "/v1/amazon/sync-orders?mode=incremental", "Sync incremental orders now?"],
-      ["Sync FBA ship dates", "/v1/amazon/sync-fba", "Sync FBA ship dates now (last 21 days)?"],
-      ["Post ready orders", "/v1/amazon/post-ready?limit=200", "Post up to 200 ready orders to SAP now?"],
-      ["Run invariants check", "/v1/amazon/run-recon?mode=invariants", "Run the daily invariants check now?"],
+    const specs = [
+      {
+        label: "Sync orders now",
+        build: ({ from, to }) => {
+          const params = new URLSearchParams();
+          if (from && to) {
+            params.set("mode", "report");
+            params.set("from_date", from);
+            params.set("to_date", to);
+          } else {
+            params.set("mode", "incremental");
+          }
+          return {
+            path: `/v1/amazon/sync-orders?${params}`,
+            confirmMsg: from && to ? `Sync orders for ${from} → ${to} (report mode)?` : "Sync incremental orders now?",
+          };
+        },
+      },
+      {
+        label: "Sync FBA ship dates",
+        build: ({ from, to }) => {
+          const params = new URLSearchParams();
+          if (from) params.set("from_date", from);
+          if (to) params.set("to_date", to);
+          return {
+            path: `/v1/amazon/sync-fba?${params}`,
+            confirmMsg: from || to ? `Sync FBA ship dates for ${from || "…"} → ${to || "…"}?` : "Sync FBA ship dates now (last 21 days)?",
+          };
+        },
+      },
+      {
+        label: "Post ready orders",
+        build: ({ from, to }) => {
+          const params = new URLSearchParams({ limit: "200" });
+          if (from) params.set("from_date", from);
+          if (to) params.set("to_date", to);
+          return {
+            path: `/v1/amazon/post-ready?${params}`,
+            confirmMsg:
+              from || to
+                ? `Post up to 200 ready orders (ship date ${from || "cutoff"} → ${to || "no upper bound"})?`
+                : "Post up to 200 ready orders to SAP now?",
+          };
+        },
+      },
+      {
+        label: "Run invariants check",
+        build: () => ({ path: "/v1/amazon/run-recon?mode=invariants", confirmMsg: "Run the daily invariants check now?" }),
+      },
     ];
-    triggers.forEach(([label, path, confirmMsg]) => {
+    specs.forEach(({ label, build }) => {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "btn-outline btn-sm";
       btn.textContent = label;
-      btn.addEventListener("click", () => runTrigger(btn, path, confirmMsg));
+      btn.addEventListener("click", () => {
+        const { path, confirmMsg } = build(healthDateRange());
+        runTrigger(btn, path, confirmMsg);
+      });
       el.appendChild(btn);
     });
   }
+}
+
+function healthDateRange() {
+  return {
+    from: document.getElementById("health-date-from")?.value || "",
+    to: document.getElementById("health-date-to")?.value || "",
+  };
 }
 
 // ── Fire-and-forget triggers (sync/post/recon run async — results show up
