@@ -50,6 +50,58 @@ _AMOUNT_TOLERANCE = 0.02
 
 # ── Daily invariants ─────────────────────────────────────────────────────
 
+def check_docdate_drift(conn, from_date: str, to_date: str) -> list[dict]:
+    """Detective check: for every posted order in the window, compare its
+    current actual_ship_date against the DocDate already frozen into its
+    SAP invoice at post time. The write paths (set_actual_ship_dates,
+    upsert_order) both guard against touching actual_ship_date once an
+    order is posted/posting, and set_actual_ship_dates can only ever move
+    a date earlier, never later — so in theory these two should never
+    disagree. Found 3 real drifted orders in production (2026-08-12,
+    immaterial $ total) via manual investigation with no code path found
+    that explains it — could be a pre-guard-era artifact or a manual DB
+    edit. This exists to surface any future occurrence automatically
+    instead of it silently sitting as an unexplained gap in a Finance
+    reconciliation."""
+    from khanal_shared.hana.pool import hana_connection
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT amazon_order_id, actual_ship_date, sap_doc_entry
+            FROM amazon_us_orders
+            WHERE stage = 'posted' AND sap_doc_entry IS NOT NULL
+              AND actual_ship_date BETWEEN %s::date AND %s::date
+            """,
+            (from_date, to_date),
+        )
+        by_entry = {int(doc_entry): (oid, str(ship_date)[:10]) for oid, ship_date, doc_entry in cur.fetchall()}
+
+    if not by_entry:
+        return []
+
+    drifted = []
+    entries = list(by_entry.keys())
+    with hana_connection() as hconn:
+        cur = hconn.cursor()
+        for i in range(0, len(entries), 500):
+            chunk = entries[i:i + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            cur.execute(f'SELECT "DocEntry", "DocDate" FROM "OINV" WHERE "DocEntry" IN ({placeholders})', chunk)
+            for doc_entry, doc_date in cur.fetchall() or []:
+                oid, ship_date = by_entry[int(doc_entry)]
+                doc_date_str = str(doc_date)[:10]
+                if doc_date_str != ship_date:
+                    drifted.append({
+                        "amazon_order_id": oid,
+                        "actual_ship_date": ship_date,
+                        "sap_doc_date": doc_date_str,
+                        "sap_doc_entry": doc_entry,
+                    })
+        cur.close()
+    return drifted
+
+
 def run_invariants(conn) -> dict:
     run_id = store.start_sync_log(conn, "recon")
     try:
@@ -94,6 +146,10 @@ def run_invariants(conn) -> dict:
             )
             checks["unmapped_sku_orders"] = cur.fetchone()[0]
 
+        drifted = check_docdate_drift(conn, constants.POSTING_CUTOFF_DATE, horizon)
+        checks["docdate_drift_count"] = len(drifted)
+        checks["docdate_drift_sample"] = drifted[:10]
+
         watermark = store.get_watermark(conn, "orders_last_updated_after")
         watermark_age_h: float | None = None
         if watermark:
@@ -119,6 +175,12 @@ def run_invariants(conn) -> dict:
         if checks["shipped_not_posted"] > 50:
             breaches.append(
                 f"{checks['shipped_not_posted']} shipped orders older than 2 days not posted/failed"
+            )
+        if checks["docdate_drift_count"]:
+            breaches.append(
+                f"{checks['docdate_drift_count']} posted orders' actual_ship_date no longer matches "
+                f"their frozen SAP DocDate — Finance revenue reports will silently exclude these from "
+                f"the period their ship date now claims"
             )
 
         checks["breaches"] = breaches
