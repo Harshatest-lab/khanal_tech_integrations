@@ -81,12 +81,11 @@ provider:
         # to these two scheduled Lambdas (900s budget) instead of running
         # inline behind httpApi's 30s cap -- see handlers.py's
         # _invoke_retry_batch. Scoped to exactly these two functions.
-        - Effect: Allow
-          Action:
-            - lambda:InvokeFunction
-          Resource:
-            - Fn::GetAtt: [UnicommercePostInvoicesLambdaFunction, Arn]
-            - Fn::GetAtt: [UnicommercePostCreditNotesLambdaFunction, Arn]
+        # NOT declared inline here -- see UnicommerceRetryInvokePolicy in
+        # resources.Resources below for why (circular dependency: this
+        # role is those functions' execution role, so a statement here
+        # referencing their ARNs makes the role depend on the functions
+        # while the functions depend on the role).
   environment:
     STAGE: ${self:provider.stage}
     LOG_LEVEL: ${env:LOG_LEVEL, 'INFO'}
@@ -214,8 +213,8 @@ functions:
     memorySize: 512
     timeout: 30
     environment:
-      # Targets for _invoke_retry_batch's async hand-off -- see the
-      # lambda:InvokeFunction IAM statement above for why only these two.
+      # Targets for _invoke_retry_batch's async hand-off -- see
+      # UnicommerceRetryInvokePolicy below for the matching IAM grant.
       POST_INVOICES_FUNCTION_ARN:
         Fn::GetAtt: [UnicommercePostInvoicesLambdaFunction, Arn]
       POST_CREDIT_NOTES_FUNCTION_ARN:
@@ -233,6 +232,31 @@ functions:
 
 resources:
   Resources:
+    # dashboard_handler's retry-invoices/retry-cn hand-off needs
+    # lambda:InvokeFunction scoped to exactly these two functions. Declared
+    # as a standalone AWS::IAM::Policy (attached to the framework's default
+    # execution role by name) instead of inline under provider.iam.role.statements
+    # -- those two functions use that same role to execute, so an inline
+    # statement referencing their ARNs makes the role depend on the
+    # functions while the functions depend on the role, a circular
+    # dependency CloudFormation refuses to deploy. A separate policy
+    # resource only depends on the functions; nothing depends back on it.
+    UnicommerceRetryInvokePolicy:
+      Type: AWS::IAM::Policy
+      Properties:
+        PolicyName: ${self:service}-${self:provider.stage}-retry-invoke
+        Roles:
+          - !Ref IamRoleLambdaExecution
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - lambda:InvokeFunction
+              Resource:
+                - Fn::GetAtt: [UnicommercePostInvoicesLambdaFunction, Arn]
+                - Fn::GetAtt: [UnicommercePostCreditNotesLambdaFunction, Arn]
+
     UnicommerceDashboardUserPool:
       Type: AWS::Cognito::UserPool
       Properties:
