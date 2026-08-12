@@ -122,6 +122,29 @@ def find_credit_note_by_ref(refund_id: str) -> dict | None:
     return _find_by_num_at_card("CreditNotes", refund_id)
 
 
+def find_credit_notes_by_ref_prefix(refund_id: str) -> list[dict]:
+    """All live CNs already posted for this refund_id, base plus any prior
+    top-up ("-AMENDn") postings — Amazon can grow a refund event's
+    item_adjustments after we've already posted against its base NumAtCard
+    (confirmed 2026-08-12: SAP had 1 of 2 refunded units on an order whose
+    Finances API total later covered both, same refund_id throughout).
+    Since the base NumAtCard is a fixed idempotency key, detecting that
+    growth means summing everything already posted under this prefix."""
+    escaped = refund_id.replace("'", "''")
+    path = quote(
+        f"CreditNotes?$filter=startswith(NumAtCard,'{escaped}') and CancelStatus eq 'csNo'"
+        "&$select=DocEntry,DocNum,NumAtCard,DocumentLines",
+        safe="/?$&=',",
+    )
+    try:
+        status, body = _request("GET", path)
+    except Exception as e:
+        raise SapLookupError(f"CN prefix search failed for {refund_id}: {e}") from e
+    if status != 200 or not isinstance(body, dict):
+        raise SapLookupError(f"CN prefix search failed for {refund_id}: HTTP {status}")
+    return body.get("value", [])
+
+
 def _find_by_num_at_card(endpoint: str, ref: str) -> dict | None:
     escaped = ref.replace("'", "''")
     path = quote(
@@ -144,7 +167,7 @@ def _find_by_num_at_card(endpoint: str, ref: str) -> dict | None:
 def get_invoice_doc(doc_entry: int) -> dict:
     """Header fields + DocumentLines of a posted invoice. Callers verify
     NumAtCard against their order id before base-linking to doc_entry."""
-    path = f"Invoices({int(doc_entry)})?$select=DocEntry,DocNum,NumAtCard,CancelStatus,DocDate,DocumentLines"
+    path = f"Invoices({int(doc_entry)})?$select=DocEntry,DocNum,NumAtCard,CancelStatus,DocDate,DocTotal,DocumentLines"
     try:
         status, body = _request("GET", path)
     except Exception as e:
@@ -152,3 +175,46 @@ def get_invoice_doc(doc_entry: int) -> dict:
     if status != 200 or not isinstance(body, dict):
         raise SapLookupError(f"Invoice fetch failed for DocEntry={doc_entry}: HTTP {status}")
     return body
+
+
+def get_invoice_doc_debug(doc_entry: int) -> dict:
+    """Full document incl. AddressExtension — one-off ops query, not used
+    by the posting pipeline."""
+    path = f"Invoices({int(doc_entry)})"
+    status, body = _request("GET", path)
+    if status != 200 or not isinstance(body, dict):
+        raise SapLookupError(f"Invoice fetch failed for DocEntry={doc_entry}: HTTP {status}")
+    return {
+        "ShipToCode": body.get("ShipToCode"),
+        "PayToCode": body.get("PayToCode"),
+        "AddressExtension": body.get("AddressExtension"),
+    }
+
+
+def find_all_invoices_by_order_debug(amazon_order_id: str) -> list[dict]:
+    """All Invoices (any CancelStatus) with this NumAtCard — one-off ops
+    query to check for duplicates, bypasses the csNo-only dedup filter."""
+    escaped = amazon_order_id.replace("'", "''")
+    path = quote(
+        f"Invoices?$filter=NumAtCard eq '{escaped}'&$select=DocEntry,DocNum,DocTotal,CancelStatus,DocDate",
+        safe="/?$&=',",
+    )
+    status, body = _request("GET", path)
+    if status != 200 or not isinstance(body, dict):
+        raise SapLookupError(f"Invoice search failed for {amazon_order_id}: HTTP {status}")
+    return body.get("value", [])
+
+
+def list_ship_to_addresses(card_code: str) -> list[str]:
+    """AddressName values on this BP's Ship-To addresses — the exact set
+    of valid ShipToCode/PayToCode strings SAP will accept. Read-only ops
+    helper for cross-checking master data before a posting run."""
+    path = quote(f"BusinessPartners('{card_code}')?$select=BPAddresses", safe="/?$&='(),")
+    try:
+        status, body = _request("GET", path)
+    except Exception as e:
+        raise SapLookupError(f"BP address fetch failed for {card_code}: {e}") from e
+    if status != 200 or not isinstance(body, dict):
+        raise SapLookupError(f"BP address fetch failed for {card_code}: HTTP {status}")
+    addresses = body.get("BPAddresses", [])
+    return sorted({a["AddressName"] for a in addresses if a.get("AddressType") == "bo_ShipTo" and a.get("AddressName")})

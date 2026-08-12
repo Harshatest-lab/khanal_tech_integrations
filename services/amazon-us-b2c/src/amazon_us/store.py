@@ -182,24 +182,40 @@ def get_order(conn: psycopg.Connection, amazon_order_id: str) -> dict | None:
 
 
 def list_ready_orders(
-    conn: psycopg.Connection, cutoff_date: str, limit: int
+    conn: psycopg.Connection, cutoff_date: str, limit: int, to_date: str | None = None
 ) -> list[dict]:
     """READY orders eligible for SAP posting: actual_ship_date present
     (ship-date is the SAP DocDate — no ship date, no post) and on/after the
     posting cutoff (pre-cutoff revenue was manually booked by Finance).
-    Oldest ship dates first."""
+    Oldest ship dates first. `to_date` narrows the window further (e.g. an
+    ops-triggered "post just this range") — it can only shrink the window,
+    never extend it before cutoff_date."""
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT amazon_order_id FROM amazon_us_orders
-            WHERE stage = 'ready'
-              AND actual_ship_date IS NOT NULL
-              AND actual_ship_date >= %s::date
-            ORDER BY actual_ship_date ASC, amazon_order_id ASC
-            LIMIT %s
-            """,
-            (cutoff_date, limit),
-        )
+        if to_date:
+            cur.execute(
+                """
+                SELECT amazon_order_id FROM amazon_us_orders
+                WHERE stage = 'ready'
+                  AND actual_ship_date IS NOT NULL
+                  AND actual_ship_date >= %s::date
+                  AND actual_ship_date <= %s::date
+                ORDER BY actual_ship_date ASC, amazon_order_id ASC
+                LIMIT %s
+                """,
+                (cutoff_date, to_date, limit),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT amazon_order_id FROM amazon_us_orders
+                WHERE stage = 'ready'
+                  AND actual_ship_date IS NOT NULL
+                  AND actual_ship_date >= %s::date
+                ORDER BY actual_ship_date ASC, amazon_order_id ASC
+                LIMIT %s
+                """,
+                (cutoff_date, limit),
+            )
         ids = [r[0] for r in cur.fetchall()]
     return [o for oid in ids if (o := get_order(conn, oid))]
 

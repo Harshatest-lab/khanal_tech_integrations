@@ -24,6 +24,7 @@ from amazon_us import constants, sap_client, store
 from amazon_us.hana_access import (
     HanaUnavailableError,
     allocate_batches_fefo,
+    get_bom_children,
     resolve_acct_code,
 )
 from amazon_us.invoice_payload import build_invoice_payload
@@ -34,11 +35,19 @@ DEFAULT_LIMIT = 200
 MAX_ATTEMPTS = 3  # definitive-failure retries via the retry cron
 
 
-def post_ready_orders(conn, limit: int = DEFAULT_LIMIT, dry_run: bool = False) -> dict:
+def post_ready_orders(
+    conn, limit: int = DEFAULT_LIMIT, dry_run: bool = False,
+    ship_date_from: str | None = None, ship_date_to: str | None = None,
+) -> dict:
+    """ship_date_from/ship_date_to optionally narrow the ship-date window an
+    ops-triggered run posts (e.g. "just July"). ship_date_from can only
+    raise the floor above POSTING_CUTOFF_DATE, never lower it — the cutoff
+    is Finance-mandated and non-negotiable regardless of what's requested."""
     run_id = store.start_sync_log(conn, "post")
     try:
         mapping = store.get_sku_mapping(conn)
-        ready = store.list_ready_orders(conn, constants.POSTING_CUTOFF_DATE, limit)
+        effective_from = max(constants.POSTING_CUTOFF_DATE, ship_date_from) if ship_date_from else constants.POSTING_CUTOFF_DATE
+        ready = store.list_ready_orders(conn, effective_from, limit, to_date=ship_date_to)
         logger.info("%s ready orders (limit %s, dry_run=%s)", len(ready), limit, dry_run)
 
         counts = {"total": len(ready), "posted": 0, "recovered": 0, "failed": 0, "skipped": 0}
@@ -105,7 +114,7 @@ def _post_one_claimed(conn, order: dict, mapping: dict[str, str], counts: dict) 
             logger.info("RECOVERED %s -> already in SAP DocEntry=%s", oid, existing["doc_entry"])
             return True
 
-        payload, skipped = build_invoice_payload(order, mapping, allocate_batches_fefo, resolve_acct_code)
+        payload, skipped = build_invoice_payload(order, mapping, allocate_batches_fefo, resolve_acct_code, get_bom_children)
         if payload is None:
             reason = "; ".join(str(s) for s in skipped)
             if any(s.get("reason") == "ship_date_missing" for s in skipped):
@@ -180,7 +189,7 @@ def _dry_run(conn, ready: list[dict], mapping: dict[str, str]) -> dict:
         oid = order["amazon_order_id"]
         try:
             existing = sap_client.find_invoice_by_order_id(oid)
-            payload, skipped = build_invoice_payload(order, mapping, allocate_batches_fefo, resolve_acct_code)
+            payload, skipped = build_invoice_payload(order, mapping, allocate_batches_fefo, resolve_acct_code, get_bom_children)
         except Exception as e:
             counts["errors"] += 1
             logger.error("dry-run error for %s: %s", oid, e)

@@ -88,12 +88,96 @@ def fba_ship_sync_handler(event, context):
 
 
 def post_invoices_handler(event, context):
-    """{"limit": 200?, "dry_run": false?, "mode": "post"|"retry"}
+    """{"limit": 200?, "dry_run": false?, "mode": "post"|"retry"|"list_ship_to_codes"}
     {"amazon_order_id": str, "dry_run": false?} — manual pilot helper,
-    posts exactly that one order (bypasses ship-date ordering / limit)."""
+    posts exactly that one order (bypasses ship-date ordering / limit).
+    list_ship_to_codes: read-only SAP query, no DB, no posting — returns
+    the exact AddressName values SAP currently has for this BP's Ship-To
+    addresses (the valid ShipToCode/PayToCode set)."""
 
     def _go():
         ev = event or {}
+        if ev.get("mode") == "list_ship_to_codes":
+            from amazon_us import sap_client
+            return {"card_code": constants.SAP_CARD_CODE, "ship_to_codes": sap_client.list_ship_to_addresses(constants.SAP_CARD_CODE)}
+        if ev.get("mode") == "debug_invoice_doc":
+            from amazon_us import sap_client
+            return sap_client.get_invoice_doc_debug(int(ev["doc_entry"]))
+        if ev.get("mode") == "debug_invoice_lines":
+            from amazon_us import sap_client
+            doc = sap_client.get_invoice_doc(int(ev["doc_entry"]))
+            return {"DocTotal": doc.get("DocTotal"), "DocumentLines": doc.get("DocumentLines")}
+        if ev.get("mode") == "debug_find_all_invoices":
+            from amazon_us import sap_client
+            return {"invoices": sap_client.find_all_invoices_by_order_debug(ev["amazon_order_id"])}
+        if ev.get("mode") == "debug_sku_check":
+            from amazon_us.hana_access import fetch_amazon_sku_map
+            raw = fetch_amazon_sku_map()
+            targets = ev.get("skus") or []
+            return {sku: raw.get(sku, "NOT FOUND") for sku in targets}
+        if ev.get("mode") == "debug_build_payload":
+            from amazon_us.hana_access import allocate_batches_fefo, get_bom_children, resolve_acct_code
+            from amazon_us.invoice_payload import build_invoice_payload
+            with store.connect() as conn:
+                mapping = store.get_sku_mapping(conn)
+                order = store.get_order(conn, ev["amazon_order_id"])
+            payload, skipped = build_invoice_payload(order, mapping, allocate_batches_fefo, resolve_acct_code, get_bom_children)
+            return {"payload": payload, "skipped": skipped}
+        if ev.get("mode") == "export_recon":
+            return _export_recon(ev["period_from"], ev["period_to"], ev.get("s3_bucket") or constants.RECON_BUCKET)
+        if ev.get("mode") == "debug_bom_check":
+            from khanal_shared.hana.pool import hana_connection
+            out = {}
+            with hana_connection() as conn:
+                cur = conn.cursor()
+                for item_code in ev.get("item_codes") or []:
+                    cur.execute(
+                        'SELECT "ItemCode", "ItemName", "TreeType", "InvntItem" FROM "OITM" WHERE "ItemCode" = ?',
+                        [item_code],
+                    )
+                    itm = cur.fetchone()
+                    cur.execute(
+                        'SELECT "Code", "Quantity", "Warehouse" FROM "ITT1" WHERE "Father" = ?',
+                        [item_code],
+                    )
+                    children = cur.fetchall() or []
+                    out[item_code] = {
+                        "item_master": list(itm) if itm else "NOT FOUND",
+                        "bom_children": [list(r) for r in children],
+                    }
+                cur.close()
+            return out
+        if ev.get("mode") == "debug_stock_check":
+            from khanal_shared.hana.pool import hana_connection
+            out = {}
+            with hana_connection() as conn:
+                cur = conn.cursor()
+                for item_code in ev.get("item_codes") or []:
+                    cur.execute(
+                        'SELECT "ItemCode", "ItemName", "ManBtchNum", "ManSerNum", "InvntItem", "SellItem", "validFor", "frozenFor" FROM "OITM" WHERE "ItemCode" = ?',
+                        [item_code],
+                    )
+                    itm = cur.fetchone()
+                    cur.execute(
+                        'SELECT T0."WhsCode", T1."DistNumber", T0."Quantity" '
+                        'FROM "OBTQ" T0 JOIN "OBTN" T1 '
+                        'ON T0."ItemCode" = T1."ItemCode" AND T0."SysNumber" = T1."SysNumber" '
+                        'WHERE T0."ItemCode" = ? AND T0."Quantity" > 0',
+                        [item_code],
+                    )
+                    batches = cur.fetchall() or []
+                    cur.execute(
+                        'SELECT "WhsCode", "OnHand" FROM "OITW" WHERE "ItemCode" = ?',
+                        [item_code],
+                    )
+                    onhand = cur.fetchall() or []
+                    out[item_code] = {
+                        "item_master": list(itm) if itm else "NOT FOUND IN OITM",
+                        "batches_any_whs": [list(r) for r in batches],
+                        "on_hand_by_whs": [list(r) for r in onhand],
+                    }
+                cur.close()
+            return out
         with store.connect() as conn:
             if ev.get("amazon_order_id"):
                 return post_invoices.post_one_order(
@@ -104,6 +188,7 @@ def post_invoices_handler(event, context):
             return post_invoices.post_ready_orders(
                 conn, limit=int(ev.get("limit") or post_invoices.DEFAULT_LIMIT),
                 dry_run=bool(ev.get("dry_run")),
+                ship_date_from=ev.get("ship_date_from"), ship_date_to=ev.get("ship_date_to"),
             )
 
     return _run("post_invoices", _go)
@@ -111,10 +196,249 @@ def post_invoices_handler(event, context):
 
 def post_credit_notes_handler(event, context):
     """Default window: last 45 days (Finances PostedDate lags MTR).
-    Manual: {"posted_after": ISO, "posted_before": ISO, "dry_run": bool}."""
+    Manual: {"posted_after": ISO, "posted_before": ISO, "dry_run": bool}.
+    debug_test_bom_cn: {"mode": "debug_test_bom_cn", "amazon_order_id": ...,
+    "seller_sku": ..., "dry_run": bool} — one-off live validation of the
+    BOM credit-note fix against a real, already-posted BOM order. Builds a
+    synthetic RefundEvent and, unless dry_run, actually posts the CN to
+    SAP. Ops tooling only, not on any schedule."""
 
     def _go():
         ev = event or {}
+        if ev.get("mode") == "debug_test_bom_cn":
+            from amazon_us import sap_client
+            from amazon_us.credit_note_payload import build_credit_note_payload
+            from amazon_us.finances_api import RefundEvent, RefundItemAdjustment
+            from amazon_us.hana_access import get_bom_children, resolve_acct_code
+
+            oid = ev["amazon_order_id"]
+            with store.connect() as conn:
+                mapping = store.get_sku_mapping(conn)
+                order = store.get_order(conn, oid)
+            invoice = sap_client.get_invoice_doc(order["sap_doc_entry"])
+            seller_sku = ev["seller_sku"]
+            unit_price = next(
+                float(l["unit_price"]) for l in order["lines"] if l["seller_sku"] == seller_sku
+            )
+            refund_event = RefundEvent(
+                refund_id=f"{oid}-DEBUGTEST-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}",
+                amazon_order_id=oid,
+                posted_date=date.today().isoformat(),
+                item_adjustments=[RefundItemAdjustment(seller_sku=seller_sku, principal_amount=-unit_price)],
+            )
+            payload, skipped = build_credit_note_payload(
+                order, refund_event, mapping, order["sap_doc_entry"], invoice.get("DocumentLines") or [],
+                resolve_acct_code, get_bom_children,
+            )
+            if ev.get("dry_run") or payload is None:
+                return {"payload": payload, "skipped": skipped}
+            result = sap_client.post_credit_note(payload)
+            return {"posted": True, "doc_entry": result["doc_entry"], "doc_num": result["doc_num"], "payload": payload}
+        if ev.get("mode") == "debug_docdate_vs_purchasedate_scope":
+            from khanal_shared.hana.pool import hana_connection
+            period_from, period_to = ev["period_from"], ev["period_to"]
+            with hana_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    'SELECT "NumAtCard", "DocTotal" FROM "OINV" '
+                    'WHERE "CANCELED" = \'N\' AND "DocDate" BETWEEN ? AND ? '
+                    'AND "NumAtCard" LIKE \'___-_______-_______\'',
+                    [period_from, period_to],
+                )
+                sap_rows = {str(n).strip(): float(t or 0) for n, t in (cur.fetchall() or [])}
+                cur.close()
+            with store.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT amazon_order_id, purchase_date, actual_ship_date FROM amazon_us_orders "
+                        "WHERE amazon_order_id = ANY(%s)",
+                        [list(sap_rows.keys())],
+                    )
+                    order_rows = {r[0]: (str(r[1]) if r[1] else None, str(r[2]) if r[2] else None) for r in cur.fetchall()}
+            not_in_july_purchase = []
+            not_found_at_all = []
+            for oid, total in sap_rows.items():
+                info = order_rows.get(oid)
+                if info is None:
+                    not_found_at_all.append({"amazon_order_id": oid, "DocTotal": total})
+                    continue
+                purchase_date, ship_date = info
+                purchase_in_july = purchase_date and period_from <= purchase_date[:10] <= period_to
+                if not purchase_in_july:
+                    not_in_july_purchase.append(
+                        {"amazon_order_id": oid, "DocTotal": total, "purchase_date": purchase_date, "actual_ship_date": ship_date}
+                    )
+            return {
+                "sap_total": round(sum(sap_rows.values()), 2),
+                "sap_order_count": len(sap_rows),
+                "orders_not_found_in_our_db_count": len(not_found_at_all),
+                "orders_not_found_in_our_db_total": round(sum(r["DocTotal"] for r in not_found_at_all), 2),
+                "orders_with_purchase_date_outside_july_count": len(not_in_july_purchase),
+                "orders_with_purchase_date_outside_july_total": round(sum(r["DocTotal"] for r in not_in_july_purchase), 2),
+                "sample_outside_july_purchase": not_in_july_purchase[:15],
+                "sample_not_found": not_found_at_all[:15],
+            }
+        if ev.get("mode") == "debug_numatcard_dupes":
+            from khanal_shared.hana.pool import hana_connection
+            period_from, period_to = ev["period_from"], ev["period_to"]
+            with hana_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    'SELECT "NumAtCard", "DocTotal", "DocEntry" FROM "OINV" '
+                    'WHERE "CANCELED" = \'N\' AND "DocDate" BETWEEN ? AND ? '
+                    'AND "NumAtCard" LIKE \'___-_______-_______\'',
+                    [period_from, period_to],
+                )
+                rows = cur.fetchall() or []
+                cur.close()
+            by_stripped: dict[str, list] = {}
+            for num_at_card, total, doc_entry in rows:
+                key = str(num_at_card).strip()
+                by_stripped.setdefault(key, []).append(
+                    {"raw_num_at_card": repr(str(num_at_card)), "DocTotal": float(total or 0), "DocEntry": int(doc_entry)}
+                )
+            dupes = {k: v for k, v in by_stripped.items() if len(v) > 1}
+            total_all = sum(float(t) for _, t, _ in rows)
+            total_by_stripped_key_last_wins = sum(v[-1]["DocTotal"] for v in by_stripped.values())
+            return {
+                "raw_row_count": len(rows),
+                "distinct_raw_numatcard_count": len({str(n).strip() and n for n, _, _ in rows}),
+                "distinct_stripped_key_count": len(by_stripped),
+                "total_all_rows": round(total_all, 2),
+                "total_if_last_wins_per_stripped_key": round(total_by_stripped_key_last_wins, 2),
+                "dupe_stripped_keys_count": len(dupes),
+                "dupes_sample": dict(list(dupes.items())[:10]),
+            }
+        if ev.get("mode") == "debug_sap_revenue_scope":
+            from khanal_shared.hana.pool import hana_connection
+            period_from, period_to = ev["period_from"], ev["period_to"]
+            with hana_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    'SELECT SUM("DocTotal"), COUNT(*) FROM "OINV" '
+                    'WHERE "CardCode" = ? AND "CANCELED" = \'N\' AND "DocDate" BETWEEN ? AND ?',
+                    [constants.SAP_CARD_CODE, period_from, period_to],
+                )
+                all_row = cur.fetchone()
+                cur.execute(
+                    'SELECT SUM("DocTotal"), COUNT(*) FROM "OINV" '
+                    'WHERE "CardCode" = ? AND "CANCELED" = \'N\' AND "DocDate" BETWEEN ? AND ? '
+                    'AND "NumAtCard" LIKE \'___-_______-_______\'',
+                    [constants.SAP_CARD_CODE, period_from, period_to],
+                )
+                pattern_row = cur.fetchone()
+                cur.execute(
+                    'SELECT "NumAtCard", "DocTotal", "DocEntry", "DocDate" FROM "OINV" '
+                    'WHERE "CardCode" = ? AND "CANCELED" = \'N\' AND "DocDate" BETWEEN ? AND ? '
+                    'AND NOT ("NumAtCard" LIKE \'___-_______-_______\')',
+                    [constants.SAP_CARD_CODE, period_from, period_to],
+                )
+                non_matching = cur.fetchall() or []
+                cur.close()
+            return {
+                "all_cardcode_total": float(all_row[0] or 0), "all_cardcode_count": int(all_row[1] or 0),
+                "order_id_pattern_total": float(pattern_row[0] or 0), "order_id_pattern_count": int(pattern_row[1] or 0),
+                "non_matching_docs": [
+                    {"NumAtCard": r[0], "DocTotal": float(r[1] or 0), "DocEntry": int(r[2]), "DocDate": str(r[3])}
+                    for r in non_matching
+                ],
+            }
+        if ev.get("mode") == "debug_cn_amount_scan":
+            """Full-month scan: every real SAP CreditNote's DocTotal (by
+            exact NumAtCard = refund_id, not order-level) next to Amazon's
+            actual refund event total for that same refund_id -- finds
+            every under/over-posted CN, not just a hand-picked sample."""
+            from amazon_us import finances_api
+            from khanal_shared.hana.pool import hana_connection
+
+            period_from, period_to = ev["period_from"], ev["period_to"]
+            cn_to = ev.get("cn_to") or period_to
+            with hana_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    'SELECT "NumAtCard", "DocTotal", "DocEntry" FROM "ORIN" '
+                    'WHERE "CardCode" = ? AND "CANCELED" = \'N\' AND "DocDate" BETWEEN ? AND ?',
+                    [constants.SAP_CARD_CODE, period_from, cn_to],
+                )
+                sap_docs = {str(n).strip(): (float(t or 0), int(e)) for n, t, e in (cur.fetchall() or [])}
+                cur.close()
+
+            events = finances_api.list_refund_events(f"{period_from}T00:00:00Z", f"{period_to}T23:59:59Z")
+            mismatches = []
+            matched_count = 0
+            not_in_sap_count = 0
+            for e in events:
+                api_total = round(sum(
+                    a.principal_amount + a.tax_amount + a.shipping_amount + a.shipping_tax_amount
+                    for a in e.item_adjustments
+                ), 2)
+                sap_entry = sap_docs.get(e.refund_id)
+                if sap_entry is None:
+                    not_in_sap_count += 1
+                    continue
+                sap_total, doc_entry = sap_entry
+                diff = round(abs(api_total) - sap_total, 2)
+                if abs(diff) > 0.01:
+                    mismatches.append({
+                        "refund_id": e.refund_id, "amazon_order_id": e.amazon_order_id,
+                        "api_total": abs(api_total), "sap_total": sap_total,
+                        "sap_doc_entry": doc_entry, "diff": diff,
+                    })
+                else:
+                    matched_count += 1
+            return {
+                "total_refund_events": len(events),
+                "matched_exactly": matched_count,
+                "not_found_in_sap": not_in_sap_count,
+                "mismatches_count": len(mismatches),
+                "mismatches_total_diff": round(sum(m["diff"] for m in mismatches), 2),
+                "mismatches": mismatches,
+            }
+        if ev.get("mode") == "debug_refund_event":
+            from amazon_us import finances_api
+            oids = set(ev.get("amazon_order_ids") or [ev.get("amazon_order_id")])
+            events = finances_api.list_refund_events(ev["posted_after"], ev.get("posted_before"))
+            matches = [e for e in events if e.amazon_order_id in oids]
+            by_order: dict[str, list] = {}
+            for e in matches:
+                by_order.setdefault(e.amazon_order_id, []).append(
+                    {
+                        "refund_id": e.refund_id,
+                        "posted_date": e.posted_date,
+                        "total": round(sum(
+                            a.principal_amount + a.tax_amount + a.shipping_amount + a.shipping_tax_amount
+                            for a in e.item_adjustments
+                        ), 2),
+                        "adjustments": [
+                            {
+                                "seller_sku": a.seller_sku, "principal_amount": a.principal_amount,
+                                "tax_amount": a.tax_amount, "shipping_amount": a.shipping_amount,
+                                "shipping_tax_amount": a.shipping_tax_amount,
+                            }
+                            for a in e.item_adjustments
+                        ],
+                    }
+                )
+            return {"by_order": by_order}
+        if ev.get("mode") == "debug_get_cn_doc":
+            from amazon_us import sap_client
+            path = f"CreditNotes({int(ev['doc_entry'])})?$select=DocEntry,DocNum,DocTotal,NumAtCard,DocumentLines"
+            status, body = sap_client._request("GET", path)
+            if status != 200:
+                return {"error": f"HTTP {status}", "body": body}
+            return {
+                "DocTotal": body.get("DocTotal"),
+                "NumAtCard": body.get("NumAtCard"),
+                "DocumentLines": [
+                    {
+                        "ItemCode": l.get("ItemCode"), "Quantity": l.get("Quantity"), "UnitPrice": l.get("UnitPrice"),
+                        "WithoutInventoryMovement": l.get("WithoutInventoryMovement"),
+                        "BaseLine": l.get("BaseLine"), "BaseEntry": l.get("BaseEntry"), "TreeType": l.get("TreeType"),
+                    }
+                    for l in (body.get("DocumentLines") or [])
+                ],
+            }
+
         posted_after = ev.get("posted_after") or (
             datetime.now(timezone.utc) - timedelta(days=45)
         ).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -185,6 +509,24 @@ def _query_params(event: dict[str, Any]) -> dict[str, str]:
     return {str(k): str(v) for k, v in params.items() if v is not None} if isinstance(params, dict) else {}
 
 
+def _invoke_async(function_name_suffix: str, payload: dict) -> None:
+    """Fire-and-forget invoke of another function in this service. API
+    Gateway HTTP APIs hard-cap integration timeout at 30s, so anything that
+    can run long (order sync, FBA sync, a full post/recon pass) must be
+    handed off to its own 900s-timeout function rather than run in-process
+    here. Progress/results show up in Sync History, not in the response."""
+    import os
+
+    import boto3
+
+    function_name = f"amazon-us-b2c-{os.environ['STAGE']}-{function_name_suffix}"
+    boto3.client("lambda").invoke(
+        FunctionName=function_name,
+        InvocationType="Event",
+        Payload=json.dumps(payload).encode("utf-8"),
+    )
+
+
 def dashboard_handler(event, context):
     method = _http_method(event)
     if method == "OPTIONS":
@@ -194,6 +536,51 @@ def dashboard_handler(event, context):
     q = _query_params(event)
 
     try:
+        if path.endswith("/v1/amazon/sync-orders") and method == "POST":
+            mode = q.get("mode") or "incremental"
+            payload = {"mode": mode}
+            if q.get("from_date"):
+                payload["from_date"] = q["from_date"]
+            if q.get("to_date"):
+                payload["to_date"] = q["to_date"]
+            _invoke_async("amazonFetch", payload)
+            return _json_response(202, {"triggered": "amazonFetch", "mode": mode})
+
+        if path.endswith("/v1/amazon/sync-fba") and method == "POST":
+            payload = {}
+            if q.get("from_date"):
+                payload["from_date"] = q["from_date"]
+            if q.get("to_date"):
+                payload["to_date"] = q["to_date"]
+            _invoke_async("amazonFbaShipSync", payload)
+            return _json_response(202, {"triggered": "amazonFbaShipSync"})
+
+        if path.endswith("/v1/amazon/post-ready") and method == "POST":
+            payload = {"limit": int(q.get("limit") or post_invoices.DEFAULT_LIMIT)}
+            if q.get("from_date"):
+                payload["ship_date_from"] = q["from_date"]
+            if q.get("to_date"):
+                payload["ship_date_to"] = q["to_date"]
+            _invoke_async("amazonPostInvoices", payload)
+            return _json_response(202, {"triggered": "amazonPostInvoices"})
+
+        if path.endswith("/v1/amazon/run-recon") and method == "POST":
+            mode = q.get("mode") or "invariants"
+            payload = {"mode": mode}
+            for key in ("s3_bucket", "s3_key", "period_from", "period_to"):
+                if q.get(key):
+                    payload[key] = q[key]
+            _invoke_async("amazonRecon", payload)
+            return _json_response(202, {"triggered": "amazonRecon", "mode": mode})
+
+        if path.endswith("/v1/amazon/export-recon") and method == "POST":
+            period_from = (q.get("period_from") or "").strip()
+            period_to = (q.get("period_to") or "").strip()
+            if not period_from or not period_to:
+                return _json_response(400, {"error": "period_from and period_to are required"})
+            _invoke_async("amazonPostInvoices", {"mode": "export_recon", "period_from": period_from, "period_to": period_to})
+            return _json_response(202, {"triggered": "amazonPostInvoices", "mode": "export_recon"})
+
         if path.endswith("/v1/amazon/retry-invoices") and method == "POST":
             with store.connect() as conn:
                 limit = int(q.get("limit") or 50)
@@ -246,6 +633,7 @@ def dashboard_handler(event, context):
                         amazon_order_id=(q.get("amazon_order_id") or "").strip() or None,
                         order_date_from=q.get("order_date_from") or None,
                         order_date_to=q.get("order_date_to") or None,
+                        ship_country=q.get("ship_country") or None,
                         sort_by=q.get("sort_by") or None,
                         sort_dir=q.get("sort_dir") or None,
                     ),
@@ -278,3 +666,143 @@ def dashboard_handler(event, context):
         scrubbed = _scrub(str(exc))
         logger.error("dashboard_api_error path=%s error=%s", path, scrubbed)
         return _json_response(500, {"error": scrubbed})
+
+
+def _export_recon(period_from: str, period_to: str, s3_bucket: str) -> dict:
+    """Order-level reconciliation export: our staged (API-side) data next
+    to the live SAP-side aggregate from HANA, for invoices and credit
+    notes. Two CSVs written to S3 — a bulk single-query export, not a
+    per-order loop (this is meant for 10k+ row windows).
+
+    Invoices window: SAP recognizes revenue by DocDate (= actual_ship_date,
+    the posting pipeline's own rule — matches how Amazon's MTR indexes
+    revenue too), not purchase_date. An order purchased in June but
+    shipped in July contributes real July SAP revenue. Windowing only by
+    purchase_date silently drops those from the comparison — confirmed
+    2026-08-11 against a real Finance-reported diff (737 such orders,
+    exactly accounting for the gap to the cent). So this includes any
+    order where EITHER purchase_date OR actual_ship_date falls in the
+    window, and tags which one(s) matched via `in_window_by` — filter/sum
+    by `actual_ship_date` alone to match SAP's real period total exactly.
+
+    Credit notes: sap_order_refund_total_in_window is an ORDER-level total
+    (HANA/SAP has no per-refund-event key to split it by) — populated only
+    on the first row per order, blank on the rest, specifically so a naive
+    spreadsheet SUM() can't double-count an order with multiple refund
+    events (this bit Finance for real on 2026-08-11, off by exactly the
+    duplicated orders' total)."""
+    import csv
+    import io
+
+    import boto3
+
+    from amazon_us import finances_api
+
+    sap_side = recon.fetch_sap_side(period_from, period_to)
+
+    with store.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT o.amazon_order_id, o.order_status, o.stage, o.purchase_date, o.actual_ship_date,
+                       o.ship_city, o.ship_state, o.ship_country, o.order_total_amount,
+                       o.sap_doc_entry, o.sap_doc_num, o.posted_at, o.last_error,
+                       COALESCE(SUM(l.item_price_amount), 0), COALESCE(SUM(l.item_tax_amount), 0),
+                       COALESCE(SUM(l.shipping_price_amount), 0), COALESCE(SUM(l.shipping_tax_amount), 0)
+                FROM amazon_us_orders o
+                LEFT JOIN amazon_us_order_lines l ON l.amazon_order_id = o.amazon_order_id
+                WHERE (o.purchase_date >= %s AND o.purchase_date < %s::date + interval '1 day')
+                   OR (o.actual_ship_date >= %s::date AND o.actual_ship_date <= %s::date)
+                GROUP BY o.amazon_order_id, o.order_status, o.stage, o.purchase_date, o.actual_ship_date,
+                         o.ship_city, o.ship_state, o.ship_country, o.order_total_amount,
+                         o.sap_doc_entry, o.sap_doc_num, o.posted_at, o.last_error
+                ORDER BY o.actual_ship_date NULLS LAST, o.purchase_date
+                """,
+                [period_from, period_to, period_from, period_to],
+            )
+            order_rows = cur.fetchall()
+
+    inv_buf = io.StringIO()
+    w = csv.writer(inv_buf)
+    w.writerow([
+        "amazon_order_id", "order_status", "stage", "purchase_date", "actual_ship_date", "in_window_by",
+        "ship_city", "ship_state", "ship_country",
+        "api_item_price", "api_item_tax", "api_shipping", "api_shipping_tax",
+        "api_computed_total", "api_order_total_field",
+        "sap_doc_entry", "sap_doc_num", "posted_at",
+        "sap_actual_doctotal", "gross_diff",
+        "last_error",
+    ])
+    for (oid, status, stage, purchase_date, ship_date, city, state, country, order_total,
+         doc_entry, doc_num, posted_at, last_error,
+         item_price, item_tax, shipping, shipping_tax) in order_rows:
+        purchase_in_window = purchase_date and period_from <= str(purchase_date)[:10] < (
+            (datetime.strptime(period_to, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        )
+        ship_in_window = ship_date and period_from <= str(ship_date)[:10] <= period_to
+        in_window_by = "+".join(
+            label for label, matched in (("purchase_date", purchase_in_window), ("ship_date", ship_in_window)) if matched
+        )
+        api_computed_total = float(item_price) + float(item_tax) + float(shipping) + float(shipping_tax)
+        sap_total = sap_side.get(oid, {}).get("sales")
+        gross_diff = round(api_computed_total - sap_total, 2) if sap_total is not None else ""
+        w.writerow([
+            oid, status, stage, purchase_date, ship_date, in_window_by, city, state, country,
+            item_price, item_tax, shipping, shipping_tax,
+            round(api_computed_total, 2), order_total,
+            doc_entry or "", doc_num or "", posted_at or "",
+            sap_total if sap_total is not None else "", gross_diff,
+            last_error or "",
+        ])
+
+    events = finances_api.list_refund_events(f"{period_from}T00:00:00Z", f"{period_to}T23:59:59Z")
+    with store.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT refund_id, status, sap_doc_entry, sap_doc_num, base_doc_entry, skip_reason, error_message "
+                "FROM amazon_us_cn_log WHERE refund_id = ANY(%s)",
+                [[e.refund_id for e in events]],
+            )
+            cn_rows = {r[0]: r[1:] for r in cur.fetchall()}
+
+    cn_buf = io.StringIO()
+    w2 = csv.writer(cn_buf)
+    w2.writerow([
+        "refund_id", "amazon_order_id", "posted_date",
+        "api_principal", "api_item_tax", "api_shipping", "api_shipping_tax", "api_total",
+        "cn_status", "sap_doc_entry", "sap_doc_num", "base_doc_entry",
+        "sap_order_refund_total_in_window", "skip_reason", "error_message",
+    ])
+    seen_orders_for_sap_refund_total: set[str] = set()
+    for e in events:
+        principal = sum(a.principal_amount for a in e.item_adjustments)
+        item_tax = sum(a.tax_amount for a in e.item_adjustments)
+        ship = sum(a.shipping_amount for a in e.item_adjustments)
+        ship_tax = sum(a.shipping_tax_amount for a in e.item_adjustments)
+        total = principal + item_tax + ship + ship_tax
+        cn = cn_rows.get(e.refund_id)
+        status, doc_entry, doc_num, base_entry, skip_reason, err = cn if cn else ("", "", "", "", "", "")
+        # Only the first row per order carries the order-level SAP total —
+        # blank on the rest, so SUM()-ing this column in a spreadsheet
+        # can't double-count an order with multiple refund events.
+        sap_refund_total = ""
+        if e.amazon_order_id not in seen_orders_for_sap_refund_total:
+            seen_orders_for_sap_refund_total.add(e.amazon_order_id)
+            val = sap_side.get(e.amazon_order_id, {}).get("refunds")
+            sap_refund_total = val if val is not None else ""
+        w2.writerow([
+            e.refund_id, e.amazon_order_id, e.posted_date,
+            round(principal, 2), round(item_tax, 2), round(ship, 2), round(ship_tax, 2), round(total, 2),
+            status, doc_entry or "", doc_num or "", base_entry or "",
+            sap_refund_total, skip_reason or "", err or "",
+        ])
+
+    s3 = boto3.client("s3")
+    inv_key = f"recon-export/invoices_{period_from}_{period_to}.csv"
+    cn_key = f"recon-export/credit_notes_{period_from}_{period_to}.csv"
+    s3.put_object(Bucket=s3_bucket, Key=inv_key, Body=inv_buf.getvalue().encode("utf-8"))
+    s3.put_object(Bucket=s3_bucket, Key=cn_key, Body=cn_buf.getvalue().encode("utf-8"))
+    return {
+        "invoices_key": inv_key, "credit_notes_key": cn_key,
+        "invoice_rows": len(order_rows), "cn_rows": len(events),
+    }

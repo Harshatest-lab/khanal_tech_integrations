@@ -24,7 +24,7 @@ from typing import Any, Callable
 
 from amazon_us import constants
 from amazon_us.finances_api import RefundEvent
-from amazon_us.invoice_payload import build_line_udfs
+from amazon_us.invoice_payload import BomLookup, build_line_udfs
 from amazon_us.state_codes import normalize_us_state_code
 
 AcctResolver = Callable[[str], str]
@@ -37,9 +37,22 @@ def build_credit_note_payload(
     base_doc_entry: int,
     invoice_lines: list[dict],
     resolve_acct: AcctResolver,
+    get_bom_children: BomLookup,
+    already_posted: dict[str, Any] | None = None,
 ) -> tuple[dict | None, list[dict]]:
     """Returns (payload, skipped). payload is None when nothing is
-    postable (every adjustment unmatched)."""
+    postable (every adjustment unmatched).
+
+    already_posted: {"tax": float, "shipping": float, "qty_by_item": {item_code: qty}}
+    — what a PRIOR CN already posted for this same refund_id, when Amazon
+    has grown the event's item_adjustments since (see
+    sap_client.find_credit_notes_by_ref_prefix). Every quantity/amount
+    below is reduced by it, so only the newly-added remainder gets built."""
+    already_posted = already_posted or {}
+    already_qty_by_item: dict[str, float] = already_posted.get("qty_by_item") or {}
+    already_tax = float(already_posted.get("tax") or 0.0)
+    already_shipping = float(already_posted.get("shipping") or 0.0)
+
     unit_price_by_sku = {
         (line.get("seller_sku") or "").strip(): float(line.get("unit_price") or 0)
         for line in order.get("lines", [])
@@ -72,13 +85,128 @@ def build_credit_note_payload(
             continue
 
         qty = round(abs(adj.principal_amount) / unit_price, 6)
+        if item_code in already_qty_by_item:
+            # A pool to DRAW DOWN, not a flat per-line subtraction -- an
+            # event can carry multiple item_adjustments for the same
+            # item_code (2 separate refunded units posted as 2 lines, not
+            # one qty-2 line; confirmed for real 2026-08-12). Subtracting
+            # the same already-posted amount from every adjustment for
+            # that code would zero out ALL of them instead of just the
+            # ones it actually covers.
+            already = already_qty_by_item[item_code]
+            consume = min(qty, already)
+            qty = round(qty - consume, 6)
+            already_qty_by_item[item_code] = round(already - consume, 6)
         if qty <= 0:
+            # Refund amount for this line rounds to zero units at the
+            # order's unit price (e.g. a $0.00 principal adjustment, or one
+            # far smaller than a single unit) — nothing to reverse on the
+            # item line itself, though shipping/tax above already
+            # accumulated regardless. Log it instead of silently vanishing
+            # (this is exactly what looked like an unexplained "no
+            # postable lines: []" skip to Finance on 2026-08-11).
+            skipped.append(
+                {
+                    "seller_sku": adj.seller_sku,
+                    "reason": f"Refund amount ({adj.principal_amount}) rounds to zero qty at unit price {unit_price}",
+                }
+            )
             continue
 
         # Pop only once we know this adjustment will actually consume a line —
         # popping earlier would discard the line for a later same-item_code
         # adjustment even though this one turned out to be a no-op.
+        children = get_bom_children(item_code)
+        if children:
+            # Sales BOM (combo/bundle): the base invoice isn't one line for
+            # item_code, it's a zero-price "iSalesTree" parent line plus one
+            # real "iIngredient" line per component (see
+            # invoice_payload.build_invoice_payload). A CN must reverse the
+            # SAME rows it's linked from — BaseLine has to point at the
+            # actual invoiced row, and reversing the full refund amount
+            # against the zero-price parent would both fail SAP's
+            # remaining-open-amount check on that base line and leave the
+            # real revenue (booked on the child lines) unreversed.
+            parent_line = _pop_matching_invoice_line(lines_by_item_code, item_code)
+            if parent_line is None:
+                skipped.append({"seller_sku": adj.seller_sku, "reason": "No matching invoice line found"})
+                continue
+            doc_lines.append(
+                {
+                    "LineNum": line_num,
+                    "BaseType": 13,
+                    "BaseEntry": int(base_doc_entry),
+                    "BaseLine": parent_line.get("LineNum"),
+                    "ItemCode": item_code,
+                    "Quantity": qty,
+                    "UnitPrice": 0.0,
+                    "WarehouseCode": constants.SAP_WAREHOUSE,
+                    "TaxCode": constants.SAP_TAX_CODE,
+                    "TaxType": "tt_Yes",
+                    "TaxLiable": "tYES",
+                    "TaxTotal": 0.0,
+                    # NOT WithoutInventoryMovement here: SAP rejects it on a
+                    # Sales-BOM tree row ("row does not support the 'Without
+                    # Qty Posting' feature") — the parent carries no real
+                    # inventory quantity itself (that's on the children), so
+                    # the flag is meaningless on this row, not just unwanted.
+                    "TreeType": "iSalesTree",
+                    **line_udfs,
+                }
+            )
+            line_num += 1
+
+            # Refunded qty vs. what was actually invoiced on the parent row —
+            # scales down cleanly for a partial refund (e.g. 1 of 2 bundles).
+            original_parent_qty = float(parent_line.get("Quantity") or 0) or qty
+            scale = qty / original_parent_qty if original_parent_qty else 1.0
+            for child_code, _qty_per_unit in children:
+                child_invoice_line = _pop_matching_invoice_line(lines_by_item_code, child_code)
+                if child_invoice_line is None:
+                    skipped.append(
+                        {"seller_sku": adj.seller_sku, "reason": f"No matching invoice line for BOM component {child_code}"}
+                    )
+                    continue
+                child_qty = round(float(child_invoice_line.get("Quantity") or 0) * scale, 6)
+                if child_qty <= 0:
+                    continue
+                doc_lines.append(
+                    {
+                        "LineNum": line_num,
+                        "BaseType": 13,
+                        "BaseEntry": int(base_doc_entry),
+                        "BaseLine": child_invoice_line.get("LineNum"),
+                        "ItemCode": child_code,
+                        "Quantity": child_qty,
+                        # Reverse at the price actually invoiced on this row,
+                        # not a re-derived split — keeps the CN consistent
+                        # with what SAP has on file for that base line.
+                        "UnitPrice": float(child_invoice_line.get("UnitPrice") or 0),
+                        "WarehouseCode": constants.SAP_WAREHOUSE,
+                        "TaxCode": constants.SAP_TAX_CODE,
+                        "TaxType": "tt_Yes",
+                        "TaxLiable": "tYES",
+                        "WithoutInventoryMovement": "tYES",
+                        "TreeType": "iIngredient",
+                        **line_udfs,
+                    }
+                )
+                line_num += 1
+            continue
+
         invoice_line = _pop_matching_invoice_line(lines_by_item_code, item_code)
+        actual_item_code = item_code
+        if invoice_line is None:
+            # The SKU->item mapping can drift after an invoice posts (SAP
+            # master data corrected later) — confirmed for real 2026-08-11:
+            # an order invoiced against FGDC00009 whose current mapping had
+            # since moved to FGDC00005. The CN must reverse whatever's
+            # ACTUALLY on the invoice, not today's mapping, so fall back to
+            # matching by UnitPrice (unique per line on a typical order)
+            # and use that line's real ItemCode instead of item_code.
+            fallback = _pop_line_by_price_fallback(lines_by_item_code, unit_price)
+            if fallback:
+                actual_item_code, invoice_line = fallback
         if invoice_line is None:
             skipped.append({"seller_sku": adj.seller_sku, "reason": "No matching invoice line found"})
             continue
@@ -89,7 +217,7 @@ def build_credit_note_payload(
                 "BaseType": 13,  # AR Invoice
                 "BaseEntry": int(base_doc_entry),
                 "BaseLine": invoice_line.get("LineNum"),
-                "ItemCode": item_code,
+                "ItemCode": actual_item_code,
                 "Quantity": qty,
                 "UnitPrice": unit_price,
                 "WarehouseCode": constants.SAP_WAREHOUSE,
@@ -102,6 +230,15 @@ def build_credit_note_payload(
 
     if not doc_lines:
         return None, skipped
+
+    # Net out whatever a prior CN under this refund_id already reversed —
+    # only the newly-added remainder should hit the service lines below.
+    total_tax = round(total_tax - (already_tax if total_tax >= 0 else -already_tax), 2)
+    total_shipping = round(total_shipping - (already_shipping if total_shipping >= 0 else -already_shipping), 2)
+    if abs(total_tax) < 0.01:
+        total_tax = 0.0
+    if abs(total_shipping) < 0.01:
+        total_shipping = 0.0
 
     if total_tax:
         doc_lines.append(
@@ -128,8 +265,13 @@ def build_credit_note_payload(
     # Per-state Ship-To/Pay-To address code — same fix and fallback as
     # invoice_payload.build_invoice_payload, kept consistent between
     # invoices and their credit notes.
-    state_code = normalize_us_state_code(order.get("ship_state"))
-    ship_to_code = f"{constants.SAP_SHIP_TO_STATE_PREFIX}{state_code}" if state_code else constants.SAP_PAY_TO_CODE
+    country = (order.get("ship_country") or "").strip().upper()
+    is_domestic = country in ("", "US", "USA")
+    if is_domestic:
+        state_code = normalize_us_state_code(order.get("ship_state"))
+        ship_to_code = f"{constants.SAP_SHIP_TO_STATE_PREFIX}{state_code}" if state_code else constants.SAP_PAY_TO_CODE
+    else:
+        ship_to_code = constants.SAP_PAY_TO_CODE
 
     payload = {
         "CardCode": constants.SAP_CARD_CODE,
@@ -141,12 +283,28 @@ def build_credit_note_payload(
         "U_CreatedBy": constants.SAP_CREATED_BY,
         "DocumentLines": doc_lines,
     }
+    if not is_domestic:
+        payload["AddressExtension"] = {"ShipToCountry": country, "BillToCountry": country}
     return payload, skipped
 
 
 def _pop_matching_invoice_line(lines_by_item_code: dict[str, list[dict]], item_code: str) -> dict | None:
     lines = lines_by_item_code.get(item_code)
     return lines.pop(0) if lines else None
+
+
+def _pop_line_by_price_fallback(
+    lines_by_item_code: dict[str, list[dict]], target_price: float
+) -> tuple[str, dict] | None:
+    """Fallback when no line matches the current SKU mapping's item code —
+    match by UnitPrice instead (unique per line on a typical order) and
+    return the line's REAL ItemCode, so the CN reverses what's actually on
+    the invoice rather than today's (possibly since-changed) mapping."""
+    for code, lines in lines_by_item_code.items():
+        for i, line in enumerate(lines):
+            if abs(float(line.get("UnitPrice") or 0) - target_price) < 0.01:
+                return code, lines.pop(i)
+    return None
 
 
 def _service_line(line_num: int, item_code: str, amount: float, acct_code: str, udfs: dict) -> dict:
