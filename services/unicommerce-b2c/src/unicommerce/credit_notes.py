@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 
-from unicommerce import returns, sap_client, sap_payload, store
+from unicommerce import constants, returns, sap_client, sap_payload, store
 from unicommerce.mappers import normalize_text
 from unicommerce.settings import get_settings
 
@@ -228,7 +228,9 @@ def post_credit_notes(
         return result
 
     try:
-        rows = store.get_pending_credit_notes(conn, limit, start_date=start_date, end_date=end_date, channel_name=channel_name)
+        rows = store.get_pending_credit_notes(
+            conn, limit, constants.POSTING_CUTOFF_DATE, start_date=start_date, end_date=end_date, channel_name=channel_name
+        )
 
         processed = posted = deferred = failed = dead = 0
         skipped_parent_stuck = skipped_claimed = 0

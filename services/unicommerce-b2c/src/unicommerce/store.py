@@ -336,9 +336,14 @@ def defer_fetched(conn: psycopg.Connection, uniware_id: str, reason: str) -> Non
 # Ported from khanal_tech_integrations/unicommerce/workers/invoice.py's
 # store-layer operations (frappe.db.set_value / frappe.db.sql calls).
 
-def get_ready_orders(conn: psycopg.Connection, limit: int, ready_before=None, channel_name: str | None = None) -> list[dict]:
-    where = ["pipeline_status = 'ready'"]
-    params: list = []
+def get_ready_orders(
+    conn: psycopg.Connection, limit: int, cutoff_date: str, ready_before=None, channel_name: str | None = None
+) -> list[dict]:
+    """cutoff_date is a hard floor on order_date (see
+    unicommerce.constants.POSTING_CUTOFF_DATE) -- required, not optional,
+    so no caller can accidentally sweep in a pre-cutoff order."""
+    where = ["pipeline_status = 'ready'", "order_date >= %s"]
+    params: list = [cutoff_date]
     if ready_before is not None:
         where.append("updated_at < %s")
         params.append(ready_before)
@@ -686,6 +691,7 @@ def get_order(conn: psycopg.Connection, uniware_id: str) -> dict | None:
 def get_pending_credit_notes(
     conn: psycopg.Connection,
     limit: int,
+    cutoff_date: str,
     start_date: str | None = None,
     end_date: str | None = None,
     channel_name: str | None = None,
@@ -694,9 +700,14 @@ def get_pending_credit_notes(
     **parent order's** order_date falls in [start_date, end_date] and/or
     whose parent order is on channel_name -- matches the Ops Center
     "Post Credit Notes" date-range UX, which keys off the UC sale order
-    date (not the return date)."""
-    where = ["cn.status IN ('pending', 'failed')"]
-    params: list = []
+    date (not the return date). cutoff_date is a hard floor on top of
+    that -- required, not optional (see unicommerce.constants.
+    POSTING_CUTOFF_DATE) -- so a CN whose parent predates the cutoff
+    never posts even if start_date isn't passed. A CN whose parent order
+    isn't in unicommerce_orders at all (not fetched yet) has NULL
+    o.order_date, so this excludes it too until the parent exists."""
+    where = ["cn.status IN ('pending', 'failed')", "o.order_date >= %s"]
+    params: list = [cutoff_date]
     if start_date or end_date or channel_name:
         where.append("o.uniware_id IS NOT NULL")
         if start_date and end_date:

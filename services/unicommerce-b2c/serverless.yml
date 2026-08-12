@@ -95,6 +95,9 @@ provider:
     UC_ALERT_ADMIN_EMAIL: ${env:UC_ALERT_ADMIN_EMAIL, ''}
     UC_ALERT_FROM_EMAIL: ${env:UC_ALERT_FROM_EMAIL, ''}
     UC_SES_REGION: ${env:UC_SES_REGION, 'ap-south-1'}
+    # Hard floor on order_date/parent-order_date below which nothing posts
+    # to live SAP -- see unicommerce.constants.POSTING_CUTOFF_DATE.
+    UC_POSTING_CUTOFF_DATE: ${env:UC_POSTING_CUTOFF_DATE, '2026-08-01'}
     # Stage-keyed profile — "dev" stays on india_test (/sap/india_test/*)
     # forever, so it can never touch delivery-api's live prod SAP
     # session; "prod" resolves to empty, which khanal_shared's SSM config

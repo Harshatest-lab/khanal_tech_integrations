@@ -17,7 +17,7 @@ import logging
 import uuid
 from datetime import datetime
 
-from unicommerce import hana_access, sap_client, sap_payload, store
+from unicommerce import constants, hana_access, sap_client, sap_payload, store
 from unicommerce.mappers import normalize_text
 from unicommerce.settings import get_settings
 
@@ -331,7 +331,7 @@ def post_ready_orders(
         reservation_ctx = new_reservation_context()
         series_cache: dict = {}
 
-        orders = store.get_ready_orders(conn, limit, channel_name=channel_name)
+        orders = store.get_ready_orders(conn, limit, constants.POSTING_CUTOFF_DATE, channel_name=channel_name)
         batch_managed_cache, fefo_cache = _prewarm_caches(orders, settings)
 
         processed = posted = batch_hold = verify = failed = skipped_claimed = 0

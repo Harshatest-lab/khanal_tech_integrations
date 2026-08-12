@@ -110,6 +110,7 @@ jobs:
           UC_ALERT_ADMIN_EMAIL: ${{ secrets.UC_ALERT_ADMIN_EMAIL }}
           UC_ALERT_FROM_EMAIL: ${{ secrets.UC_ALERT_FROM_EMAIL }}
           UC_SES_REGION: ${{ secrets.UC_SES_REGION }}
+          UC_POSTING_CUTOFF_DATE: ${{ secrets.UC_POSTING_CUTOFF_DATE }}
         run: |
           npm install
           npx serverless deploy --stage ${{ inputs.stage }} --region ${{ secrets.AWS_REGION }}
