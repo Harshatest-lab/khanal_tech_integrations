@@ -140,43 +140,23 @@ def fetch_orders(
 
 
 def fetch_order_detail(conn: psycopg.Connection, uniware_id: str) -> dict[str, Any]:
+    """SELECT * on all three tables -- every stored column, not a curated
+    subset. Includes the large jsonb blobs (order_json, payload_json,
+    shippingpackages, returnitems) as-is; the dashboard renders those as
+    raw/expandable JSON rather than picking fields out of them."""
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT uniware_id, channel_name, pipeline_status, order_date, status,
-                   customer_name, city, state, district, pin_code,
-                   uc_taxable_value, uc_cgst, uc_sgst, uc_igst, uc_shipping, uc_total,
-                   sap_ar_invoice_docentry, sap_ar_invoice_docnum, sap_ar_creditnote_docentry,
-                   ar_invoice_tax_expected, ar_invoice_tax_actual, ar_invoice_tax_diff,
-                   ar_invoice_unit_price_expected, ar_invoice_unit_price_actual, ar_invoice_unit_price_diff,
-                   ar_invoice_reconciled, ar_invoice_reconciliation_status,
-                   attempt_count, last_error, created_at, updated_at
-            FROM unicommerce_orders WHERE uniware_id = %s
-            """,
-            (uniware_id,),
-        )
+        cur.execute("SELECT * FROM unicommerce_orders WHERE uniware_id = %s", (uniware_id,))
         header_rows = _rows_to_dicts(cur)
         header = header_rows[0] if header_rows else None
 
         lines: list[dict[str, Any]] = []
         cn_rows: list[dict[str, Any]] = []
         if header is not None:
-            cur.execute(
-                """
-                SELECT item_id, itemsku, sellerskucode, quantity, selling_price, total_price,
-                       batchcode, vendorbatchnumber, statuscode, uniware_return_status
-                FROM unicommerce_order_lines WHERE uniware_id = %s ORDER BY id
-                """,
-                (uniware_id,),
-            )
+            cur.execute("SELECT * FROM unicommerce_order_lines WHERE uniware_id = %s ORDER BY id", (uniware_id,))
             lines = _rows_to_dicts(cur)
 
             cur.execute(
-                """
-                SELECT uc_return_id, return_type, return_date, status, sap_cn_docentry,
-                       sap_cn_docnum, attempt_count, last_error
-                FROM unicommerce_cn_staging WHERE uc_order_id = %s ORDER BY created_at DESC
-                """,
+                "SELECT * FROM unicommerce_cn_staging WHERE uc_order_id = %s ORDER BY created_at DESC",
                 (uniware_id,),
             )
             cn_rows = _rows_to_dicts(cur)

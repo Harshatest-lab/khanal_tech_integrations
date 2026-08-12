@@ -583,17 +583,36 @@ function renderOrderDetail(detail) {
       <div class="trace-card"><span class="trace-card-label">Total</span><span class="trace-card-value">${formatMoney(h.uc_total)}</span></div>
       <div class="trace-card"><span class="trace-card-label">SAP Invoice DocEntry</span><span class="trace-card-value">${h.sap_ar_invoice_docentry ?? "—"}</span></div>
       <div class="trace-card"><span class="trace-card-label">SAP Invoice DocNum</span><span class="trace-card-value">${h.sap_ar_invoice_docnum ?? "—"}</span></div>
+      <div class="trace-card"><span class="trace-card-label">SAP CN DocEntry</span><span class="trace-card-value">${h.sap_ar_creditnote_docentry ?? "—"}</span></div>
       <div class="trace-card"><span class="trace-card-label">Attempts</span><span class="trace-card-value">${h.attempt_count ?? 0}</span></div>
+      <div class="trace-card"><span class="trace-card-label">Shipping provider</span><span class="trace-card-value">${escapeHtml(h.shippingprovider || "—")}</span></div>
+      <div class="trace-card"><span class="trace-card-label">Tracking number</span><span class="trace-card-value">${escapeHtml(h.trackingnumber || "—")}</span></div>
+      <div class="trace-card"><span class="trace-card-label">Tracking status</span><span class="trace-card-value">${escapeHtml(h.trackingstatus || "—")}</span></div>
+      <div class="trace-card"><span class="trace-card-label">Shipment status</span><span class="trace-card-value">${escapeHtml(h.shipment_status || "—")}</span></div>
+      <div class="trace-card"><span class="trace-card-label">Shipment date</span><span class="trace-card-value">${formatDateOnly(h.shipment_date)}</span></div>
+      <div class="trace-card"><span class="trace-card-label">COD</span><span class="trace-card-value">${escapeHtml(h.cod || "—")}</span></div>
     </div>
     ${h.last_error ? `<p class="sap-error-inline">${escapeHtml(h.last_error)}</p>` : ""}
+    ${h.ar_invoice_mismatch_reason ? `<p class="sap-error-inline">Recon mismatch: ${escapeHtml(h.ar_invoice_mismatch_reason)}</p>` : ""}
 
     <div class="order-detail-box" style="margin-top:1rem">
-      <div class="order-detail-box-title">Reconciliation</div>
+      <div class="order-detail-box-title">Reconciliation — Invoice</div>
       <table class="trace-table">
         <thead><tr><th></th><th>Expected</th><th>Actual</th><th>Diff</th></tr></thead>
         <tbody>
           <tr><td>Tax</td><td class="cell-mono">${formatMoney(h.ar_invoice_tax_expected)}</td><td class="cell-mono">${formatMoney(h.ar_invoice_tax_actual)}</td><td class="cell-mono">${formatMoney(h.ar_invoice_tax_diff)}</td></tr>
           <tr><td>Unit price</td><td class="cell-mono">${formatMoney(h.ar_invoice_unit_price_expected)}</td><td class="cell-mono">${formatMoney(h.ar_invoice_unit_price_actual)}</td><td class="cell-mono">${formatMoney(h.ar_invoice_unit_price_diff)}</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="order-detail-box" style="margin-top:1rem">
+      <div class="order-detail-box-title">Reconciliation — Credit note</div>
+      <table class="trace-table">
+        <thead><tr><th></th><th>Expected</th><th>Actual</th><th>Diff</th></tr></thead>
+        <tbody>
+          <tr><td>Tax</td><td class="cell-mono">${formatMoney(h.ar_creditnote_tax_expected)}</td><td class="cell-mono">${formatMoney(h.ar_creditnote_tax_actual)}</td><td class="cell-mono">${formatMoney(h.ar_creditnote_tax_diff)}</td></tr>
+          <tr><td>Unit price</td><td class="cell-mono">${formatMoney(h.ar_creditnote_unit_price_expected)}</td><td class="cell-mono">${formatMoney(h.ar_creditnote_unit_price_actual)}</td><td class="cell-mono">${formatMoney(h.ar_creditnote_unit_price_diff)}</td></tr>
         </tbody>
       </table>
     </div>
@@ -613,6 +632,11 @@ function renderOrderDetail(detail) {
         <tbody>${cnRows || `<tr><td colspan="5" class="muted">No returns for this order.</td></tr>`}</tbody>
       </table>
     </div>
+
+    <details class="order-detail-box" style="margin-top:1rem">
+      <summary class="order-detail-box-title" style="cursor:pointer">All fields (raw)</summary>
+      <pre class="raw-json">${escapeHtml(JSON.stringify(detail, null, 2))}</pre>
+    </details>
   `;
 }
 

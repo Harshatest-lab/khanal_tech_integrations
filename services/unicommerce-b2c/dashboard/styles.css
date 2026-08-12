@@ -237,6 +237,8 @@ body {
 
 .sap-error-inline { margin: 0 0 1rem; padding: 0.75rem; background: var(--red-bg); color: #991b1b; border: 1px solid #fecaca; border-radius: 8px; font-size: 0.74rem; line-height: 1.45; white-space: pre-wrap; word-break: break-word; overflow: auto; max-height: 200px; }
 
+.raw-json { margin: 0; padding: 0.85rem 1rem; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.72rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word; overflow: auto; max-height: 400px; background: #fafbfc; }
+
 .muted { color: var(--muted); font-size: 0.85rem; }
 .trace-error { color: var(--red); padding: 1rem; }
 
