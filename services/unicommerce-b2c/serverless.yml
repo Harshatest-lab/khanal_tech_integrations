@@ -47,11 +47,16 @@ provider:
         # SAP Service Layer + HANA — India entity. Profile (and therefore
         # SSM prefix) is keyed by stage, see custom.sapProfileByStage /
         # custom.currentSapPrefix below: "dev" stays on the TEST company
-        # DB (/sap/india_test/*) forever, so it can never touch
-        # delivery-api's live session; "prod" resolves to the same
-        # default /sap/* family delivery-api already uses in production
-        # (confirmed same physical host/entity, 2026-07-23). NOT
-        # amazon-us-b2c/B2C_Invoice's /sap/inc/* (US entity) either.
+        # DB (/sap/india_test/*) forever. "prod" used to resolve to the
+        # bare default /sap/* family, same as delivery-api -- but that
+        # parameter was discovered 2026-08-12 to hold a TEST company
+        # (TEST_KFL_11072026), not the real live one, and delivery-api
+        # reads that exact same unstaged path with no separation of its
+        # own. Rather than fix a parameter shared with another service
+        # (and risk delivery-api-dev suddenly pointing at real prod data),
+        # unicommerce-b2c now owns a dedicated profile (/sap/unicommerce/*)
+        # with the correct company (KFL_LIVE) -- fully independent of
+        # delivery-api and of whatever /sap/* ends up meaning for it.
         # Resource paths here are built from the same
         # custom.currentSapPrefix the environment vars below use, so IAM
         # and env always agree per-stage automatically — no manual
@@ -99,13 +104,12 @@ provider:
     # to live SAP -- see unicommerce.constants.POSTING_CUTOFF_DATE.
     UC_POSTING_CUTOFF_DATE: ${env:UC_POSTING_CUTOFF_DATE, '2026-08-01'}
     # Stage-keyed profile — "dev" stays on india_test (/sap/india_test/*)
-    # forever, so it can never touch delivery-api's live prod SAP
-    # session; "prod" resolves to empty, which khanal_shared's SSM config
-    # modules treat as "no profile" -> default /sap/* (the same family
-    # delivery-api already uses live). See custom.sapProfileByStage below
-    # — do NOT repoint /sap/india_test/*'s values to the prod company DB;
-    # add a new profile entry the same way instead if a third environment
-    # is ever needed.
+    # forever; "prod" resolves to "unicommerce" (/sap/unicommerce/*), its
+    # own dedicated company DB (KFL_LIVE), independent of delivery-api's
+    # /sap/* default. See custom.sapProfileByStage below — do NOT repoint
+    # /sap/india_test/*'s values to the prod company DB; add a new
+    # profile entry the same way instead if a third environment is ever
+    # needed.
     SAP_SL_PROFILE: ${self:custom.currentSapProfile}
     HANA_PROFILE: ${self:custom.currentSapProfile}
     SAP_SL_USE_SSM: ${env:SAP_SL_USE_SSM, 'true'}
@@ -116,19 +120,20 @@ custom:
   ucApiParamName: ${env:UC_API_PARAM_NAME, '/unicommerce/api_credentials'}
   ucSettingsParamName: ${env:UC_SETTINGS_PARAM_NAME, '/unicommerce/settings'}
   # Stage-keyed SAP/HANA profile -- "dev" stays isolated on the TEST
-  # company DB forever; "prod" resolves to "" (khanal_shared's SSM config
-  # treats empty/unset as "default" -> /sap/*, the same family
-  # delivery-api already uses live). Any stage not listed here
-  # (staging, one-off preview stages, etc.) falls back to india_test, the
-  # safer default -- never silently defaults to touching the prod SAP
-  # session.
+  # company DB forever; "prod" resolves to "unicommerce", its own
+  # dedicated profile/company (KFL_LIVE) -- NOT the bare default /sap/*
+  # family, which is shared with delivery-api and (as of 2026-08-12) was
+  # found to hold a test company, not real production data. Any stage
+  # not listed here (staging, one-off preview stages, etc.) falls back to
+  # india_test, the safer default -- never silently defaults to touching
+  # a real SAP session.
   sapProfileByStage:
     dev: india_test
-    prod: ""
+    prod: unicommerce
   currentSapProfile: ${self:custom.sapProfileByStage.${self:provider.stage}, 'india_test'}
   sapPrefixByStage:
     dev: /sap/india_test
-    prod: /sap
+    prod: /sap/unicommerce
   currentSapPrefix: ${self:custom.sapPrefixByStage.${self:provider.stage}, '/sap/india_test'}
 
 layers:
