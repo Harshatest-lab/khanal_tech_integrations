@@ -62,15 +62,20 @@ def _process_event(conn, event: finances_api.RefundEvent, mapping: dict[str, str
     """Returns 'posted' | 'skipped'. Raises on real failures."""
     rid = event.refund_id
 
+    # A refund_id we've already posted needs the amendment path, not the
+    # normal claim/post flow below — claim_cn's WHERE clause refuses to
+    # reclaim a 'posted' row, so without this check an Amazon-side
+    # amendment (event grows after we posted its base CN, same refund_id)
+    # would silently never be looked at again.
+    local = store.get_cn_log(conn, rid)
+    if local and local["status"] == "posted":
+        return _process_amendment(conn, event, mapping, dry_run)
+
     if not dry_run:
         # Atomic claim: closes the window where two overlapping invocations
         # (manual backfill overlapping the schedule, an ops re-invoke) could
         # both pass the SAP existence check below and both post a CN.
         if not store.claim_cn(conn, rid, event.amazon_order_id, event.posted_date):
-            return "skipped"
-    else:
-        local = store.get_cn_log(conn, rid)
-        if local and local["status"] == "posted":
             return "skipped"
 
     existing = sap_client.find_credit_note_by_ref(rid)
@@ -81,7 +86,7 @@ def _process_event(conn, event: finances_api.RefundEvent, mapping: dict[str, str
                 doc_entry=existing["doc_entry"], doc_num=existing["doc_num"],
                 skip_reason="already in SAP",
             )
-        return "skipped"
+        return _process_amendment(conn, event, mapping, dry_run)
 
     order = store.get_order(conn, event.amazon_order_id)
     if order is None or not order.get("sap_doc_entry"):
@@ -128,6 +133,119 @@ def _process_event(conn, event: finances_api.RefundEvent, mapping: dict[str, str
         base_doc_entry=order["sap_doc_entry"], payload=payload, response=result["response"],
     )
     logger.info("OK %s -> DocEntry=%s DocNum=%s", rid, result["doc_entry"], result["doc_num"])
+    return "posted"
+
+
+def _process_amendment(conn, event: finances_api.RefundEvent, mapping: dict[str, str], dry_run: bool) -> str:
+    """A refund_id we've already posted a CN for. Amazon can grow that same
+    event's item_adjustments afterward (confirmed 2026-08-12: SAP had 1 of
+    2 refunded units on an order whose Finances API total later covered
+    both, same refund_id the whole time) — the base NumAtCard is a fixed
+    idempotency key, so nothing upstream ever looks again on its own. Sum
+    every live CN already posted under this refund_id (base + prior
+    top-ups) and, if the event's current total exceeds it, post one more
+    CN for exactly the remainder, keyed off its own (self-idempotent)
+    NumAtCard so this is safe to run over and over."""
+    rid = event.refund_id
+    logger.info("AMEND-CHECK %s: entering amendment path", rid)
+    posted_docs = sap_client.find_credit_notes_by_ref_prefix(rid)
+    if not posted_docs:
+        # cn_log says posted but SAP has nothing live under this prefix
+        # (e.g. the CN was cancelled by hand) — that's an ops decision,
+        # not something to guess at here.
+        logger.info("AMEND-SKIP %s: find_credit_notes_by_ref_prefix returned nothing", rid)
+        return "skipped"
+    logger.info("AMEND-CHECK %s: %s posted_docs found: %s", rid, len(posted_docs), [d.get("NumAtCard") for d in posted_docs])
+
+    already_tax = already_shipping = 0.0
+    already_qty_by_item: dict[str, float] = {}
+    for doc in posted_docs:
+        for line in doc.get("DocumentLines") or []:
+            code = line.get("ItemCode")
+            if code == constants.SAP_TAX_ITEM_CODE:
+                already_tax += float(line.get("UnitPrice") or 0)
+            elif code == constants.SAP_SHIPPING_ITEM_CODE:
+                already_shipping += float(line.get("UnitPrice") or 0)
+            else:
+                already_qty_by_item[code] = already_qty_by_item.get(code, 0.0) + float(line.get("Quantity") or 0)
+    logger.info(
+        "AMEND-CHECK %s: already_tax=%s already_shipping=%s already_qty_by_item=%s",
+        rid, already_tax, already_shipping, already_qty_by_item,
+    )
+
+    # base_doc_entry comes from the ALREADY-POSTED CN's own BaseEntry, not
+    # order["sap_doc_entry"] -- confirmed for real 2026-08-12: all 3 of
+    # that day's amendment cases had a genuinely posted SAP invoice, but
+    # amazon_us_orders.sap_doc_entry had gone stale/null locally, which
+    # would have silently blocked every one of them. The CN we already
+    # posted already proved which invoice it reverses; trust that over a
+    # local pointer that can drift for reasons unrelated to whether SAP
+    # itself still has a valid, live invoice.
+    base_doc_entry = next(
+        (int(l["BaseEntry"]) for d in posted_docs for l in (d.get("DocumentLines") or []) if l.get("BaseEntry")),
+        None,
+    )
+    if base_doc_entry is None:
+        logger.info("AMEND-SKIP %s: no BaseEntry on any posted_docs line", rid)
+        return "skipped"
+
+    order = store.get_order(conn, event.amazon_order_id)
+    if order is None:
+        logger.info("AMEND-SKIP %s: order not found locally", rid)
+        return "skipped"
+    # No cutoff re-check here: posted_docs existing already proves this
+    # order was posted by us (not booked manually by Finance) — the
+    # cutoff guard exists to stop double-counting NEW pre-cutoff revenue,
+    # not to block completing revenue we already recorded. Skipping it
+    # here mattered for real: all 3 of the 2026-08-12 amendment cases
+    # shipped 2026-06-25/26/29, just before the 2026-07-01 cutoff, and the
+    # normal cutoff check silently ate every one of them.
+
+    invoice = sap_client.get_invoice_doc(base_doc_entry)
+    if (invoice.get("NumAtCard") or "").strip() != event.amazon_order_id:
+        logger.info("AMEND-SKIP %s: stale invoice pointer NumAtCard=%r", rid, invoice.get("NumAtCard"))
+        return "skipped"
+    if (invoice.get("CancelStatus") or "csNo") != "csNo":
+        logger.info("AMEND-SKIP %s: invoice cancelled", rid)
+        return "skipped"
+
+    payload, line_skips = build_credit_note_payload(
+        order, event, mapping, base_doc_entry, invoice.get("DocumentLines") or [], resolve_acct_code,
+        get_bom_children,
+        already_posted={"tax": already_tax, "shipping": already_shipping, "qty_by_item": already_qty_by_item},
+    )
+    if payload is None:
+        logger.info("AMEND-SKIP %s: build_credit_note_payload returned None, line_skips=%s", rid, line_skips)
+        # Already fully covered by prior CN(s) under this refund_id —
+        # rounding dust, not a real amendment.
+        return "skipped"
+
+    amend_rid = f"{rid}-AMEND{len(posted_docs)}"
+    payload["NumAtCard"] = amend_rid
+
+    if dry_run:
+        logger.info("dry-run would top up %s -> %s (%s lines)", rid, amend_rid, len(payload["DocumentLines"]))
+        return "posted"
+
+    if not store.claim_cn(conn, amend_rid, event.amazon_order_id, event.posted_date):
+        return "skipped"
+
+    existing_amend = sap_client.find_credit_note_by_ref(amend_rid)
+    if existing_amend:
+        store.upsert_cn_log(
+            conn, amend_rid, event.amazon_order_id, event.posted_date, "posted",
+            doc_entry=existing_amend["doc_entry"], doc_num=existing_amend["doc_num"],
+            skip_reason="already in SAP",
+        )
+        return "skipped"
+
+    result = sap_client.post_credit_note(payload)
+    store.upsert_cn_log(
+        conn, amend_rid, event.amazon_order_id, event.posted_date, "posted",
+        doc_entry=result["doc_entry"], doc_num=result["doc_num"],
+        base_doc_entry=base_doc_entry, payload=payload, response=result["response"],
+    )
+    logger.info("OK top-up %s -> %s DocEntry=%s DocNum=%s", rid, amend_rid, result["doc_entry"], result["doc_num"])
     return "posted"
 
 

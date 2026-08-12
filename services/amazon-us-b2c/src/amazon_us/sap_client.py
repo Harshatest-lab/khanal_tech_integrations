@@ -122,6 +122,29 @@ def find_credit_note_by_ref(refund_id: str) -> dict | None:
     return _find_by_num_at_card("CreditNotes", refund_id)
 
 
+def find_credit_notes_by_ref_prefix(refund_id: str) -> list[dict]:
+    """All live CNs already posted for this refund_id, base plus any prior
+    top-up ("-AMENDn") postings — Amazon can grow a refund event's
+    item_adjustments after we've already posted against its base NumAtCard
+    (confirmed 2026-08-12: SAP had 1 of 2 refunded units on an order whose
+    Finances API total later covered both, same refund_id throughout).
+    Since the base NumAtCard is a fixed idempotency key, detecting that
+    growth means summing everything already posted under this prefix."""
+    escaped = refund_id.replace("'", "''")
+    path = quote(
+        f"CreditNotes?$filter=startswith(NumAtCard,'{escaped}') and CancelStatus eq 'csNo'"
+        "&$select=DocEntry,DocNum,NumAtCard,DocumentLines",
+        safe="/?$&=',",
+    )
+    try:
+        status, body = _request("GET", path)
+    except Exception as e:
+        raise SapLookupError(f"CN prefix search failed for {refund_id}: {e}") from e
+    if status != 200 or not isinstance(body, dict):
+        raise SapLookupError(f"CN prefix search failed for {refund_id}: HTTP {status}")
+    return body.get("value", [])
+
+
 def _find_by_num_at_card(endpoint: str, ref: str) -> dict | None:
     escaped = ref.replace("'", "''")
     path = quote(

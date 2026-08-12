@@ -343,16 +343,72 @@ def post_credit_notes_handler(event, context):
                     for r in non_matching
                 ],
             }
+        if ev.get("mode") == "debug_cn_amount_scan":
+            """Full-month scan: every real SAP CreditNote's DocTotal (by
+            exact NumAtCard = refund_id, not order-level) next to Amazon's
+            actual refund event total for that same refund_id -- finds
+            every under/over-posted CN, not just a hand-picked sample."""
+            from amazon_us import finances_api
+            from khanal_shared.hana.pool import hana_connection
+
+            period_from, period_to = ev["period_from"], ev["period_to"]
+            cn_to = ev.get("cn_to") or period_to
+            with hana_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    'SELECT "NumAtCard", "DocTotal", "DocEntry" FROM "ORIN" '
+                    'WHERE "CardCode" = ? AND "CANCELED" = \'N\' AND "DocDate" BETWEEN ? AND ?',
+                    [constants.SAP_CARD_CODE, period_from, cn_to],
+                )
+                sap_docs = {str(n).strip(): (float(t or 0), int(e)) for n, t, e in (cur.fetchall() or [])}
+                cur.close()
+
+            events = finances_api.list_refund_events(f"{period_from}T00:00:00Z", f"{period_to}T23:59:59Z")
+            mismatches = []
+            matched_count = 0
+            not_in_sap_count = 0
+            for e in events:
+                api_total = round(sum(
+                    a.principal_amount + a.tax_amount + a.shipping_amount + a.shipping_tax_amount
+                    for a in e.item_adjustments
+                ), 2)
+                sap_entry = sap_docs.get(e.refund_id)
+                if sap_entry is None:
+                    not_in_sap_count += 1
+                    continue
+                sap_total, doc_entry = sap_entry
+                diff = round(abs(api_total) - sap_total, 2)
+                if abs(diff) > 0.01:
+                    mismatches.append({
+                        "refund_id": e.refund_id, "amazon_order_id": e.amazon_order_id,
+                        "api_total": abs(api_total), "sap_total": sap_total,
+                        "sap_doc_entry": doc_entry, "diff": diff,
+                    })
+                else:
+                    matched_count += 1
+            return {
+                "total_refund_events": len(events),
+                "matched_exactly": matched_count,
+                "not_found_in_sap": not_in_sap_count,
+                "mismatches_count": len(mismatches),
+                "mismatches_total_diff": round(sum(m["diff"] for m in mismatches), 2),
+                "mismatches": mismatches,
+            }
         if ev.get("mode") == "debug_refund_event":
             from amazon_us import finances_api
-            oid = ev["amazon_order_id"]
+            oids = set(ev.get("amazon_order_ids") or [ev.get("amazon_order_id")])
             events = finances_api.list_refund_events(ev["posted_after"], ev.get("posted_before"))
-            matches = [e for e in events if e.amazon_order_id == oid]
-            return {
-                "matches": [
+            matches = [e for e in events if e.amazon_order_id in oids]
+            by_order: dict[str, list] = {}
+            for e in matches:
+                by_order.setdefault(e.amazon_order_id, []).append(
                     {
                         "refund_id": e.refund_id,
                         "posted_date": e.posted_date,
+                        "total": round(sum(
+                            a.principal_amount + a.tax_amount + a.shipping_amount + a.shipping_tax_amount
+                            for a in e.item_adjustments
+                        ), 2),
                         "adjustments": [
                             {
                                 "seller_sku": a.seller_sku, "principal_amount": a.principal_amount,
@@ -362,9 +418,8 @@ def post_credit_notes_handler(event, context):
                             for a in e.item_adjustments
                         ],
                     }
-                    for e in matches
-                ]
-            }
+                )
+            return {"by_order": by_order}
         if ev.get("mode") == "debug_get_cn_doc":
             from amazon_us import sap_client
             path = f"CreditNotes({int(ev['doc_entry'])})?$select=DocEntry,DocNum,DocTotal,NumAtCard,DocumentLines"

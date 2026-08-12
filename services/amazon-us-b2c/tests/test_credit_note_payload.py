@@ -194,6 +194,72 @@ def test_bom_refund_reverses_parent_and_child_rows_not_the_zero_price_parent_alo
     assert child_b["UnitPrice"] == 20.0
 
 
+# ── Amendment (Amazon grows a refund event's item_adjustments after we've
+# already posted a CN under its refund_id) ──────────────────────────────
+
+def test_amendment_only_reverses_the_new_remainder():
+    # A prior CN already reversed 1 of the order's 2 units plus its full
+    # tax/shipping; this event has since grown to cover both units
+    # (confirmed for real 2026-08-12, same refund_id throughout). The
+    # payload must carry only the newly-added unit and its tax delta —
+    # shipping is already fully covered, so no shipping line at all.
+    already_posted = {"tax": 0.59 + 0.25, "shipping": 3.99, "qty_by_item": {"FGDC0001": 1.0}}
+    event = _event(principal_amount=-26.99, tax_amount=-1.18)  # 2 units now, not 1
+    payload, skipped = build_credit_note_payload(
+        _order(), event, MAPPING, 4242, INVOICE_LINES, _resolve, _no_bom,
+        already_posted=already_posted,
+    )
+    assert skipped == []
+    lines = payload["DocumentLines"]
+    assert len(lines) == 2  # item + tax only, no shipping line
+    item = lines[0]
+    assert item["Quantity"] == 1.0  # 2.0 inferred - 1.0 already posted
+    tax = lines[1]
+    assert tax["ItemCode"] == "EXP000003"
+    assert tax["UnitPrice"] == 0.59  # (1.18 + 0.25) - already-posted 0.84
+
+
+def test_amendment_pool_is_consumed_not_reapplied_to_every_adjustment():
+    # Real 2026-08-12 bug: an event can carry TWO item_adjustments for the
+    # same item_code (2 refunded units posted as 2 separate lines, not one
+    # qty-2 line). Only 1 unit was already covered by the prior CN --
+    # subtracting that from EVERY adjustment (instead of draining it as a
+    # pool) zeroed out both and silently lost the real second-unit delta.
+    already_posted = {"tax": 0.0, "shipping": 0.0, "qty_by_item": {"FGDC0001": 1.0}}
+    two_invoice_lines = [
+        {"LineNum": 0, "ItemCode": "FGDC0001"},
+        {"LineNum": 1, "ItemCode": "FGDC0001"},
+    ]
+    event = RefundEvent(
+        refund_id="111-1234567-1234567-2026-07-01T10:00:00Z",
+        amazon_order_id="111-1234567-1234567",
+        posted_date="2026-07-01",
+        item_adjustments=[
+            RefundItemAdjustment(seller_sku="SKU-A", principal_amount=-13.495, tax_amount=0, shipping_amount=0, shipping_tax_amount=0),
+            RefundItemAdjustment(seller_sku="SKU-A", principal_amount=-13.495, tax_amount=0, shipping_amount=0, shipping_tax_amount=0),
+        ],
+    )
+    payload, skipped = build_credit_note_payload(
+        _order(), event, MAPPING, 4242, two_invoice_lines, _resolve, _no_bom,
+        already_posted=already_posted,
+    )
+    assert payload is not None
+    lines = payload["DocumentLines"]
+    assert len(lines) == 1  # one adjustment fully covered (skipped), one is the real new delta
+    assert lines[0]["Quantity"] == 1.0  # the second unit, not zero
+
+
+def test_amendment_fully_covered_by_prior_cn_yields_no_payload():
+    # Prior CN already reversed everything this event now reports -- pure
+    # rounding dust, not a real amendment. Must not manufacture a $0 CN.
+    already_posted = {"tax": 0.59 + 0.25, "shipping": 3.99, "qty_by_item": {"FGDC0001": 1.0}}
+    payload, skipped = build_credit_note_payload(
+        _order(), _event(), MAPPING, 4242, INVOICE_LINES, _resolve, _no_bom,
+        already_posted=already_posted,
+    )
+    assert payload is None
+
+
 def test_bom_partial_refund_scales_child_quantities():
     # Original invoice had 2 bundle units; this refund is for 1 of them.
     invoice_lines = [

@@ -38,9 +38,21 @@ def build_credit_note_payload(
     invoice_lines: list[dict],
     resolve_acct: AcctResolver,
     get_bom_children: BomLookup,
+    already_posted: dict[str, Any] | None = None,
 ) -> tuple[dict | None, list[dict]]:
     """Returns (payload, skipped). payload is None when nothing is
-    postable (every adjustment unmatched)."""
+    postable (every adjustment unmatched).
+
+    already_posted: {"tax": float, "shipping": float, "qty_by_item": {item_code: qty}}
+    — what a PRIOR CN already posted for this same refund_id, when Amazon
+    has grown the event's item_adjustments since (see
+    sap_client.find_credit_notes_by_ref_prefix). Every quantity/amount
+    below is reduced by it, so only the newly-added remainder gets built."""
+    already_posted = already_posted or {}
+    already_qty_by_item: dict[str, float] = already_posted.get("qty_by_item") or {}
+    already_tax = float(already_posted.get("tax") or 0.0)
+    already_shipping = float(already_posted.get("shipping") or 0.0)
+
     unit_price_by_sku = {
         (line.get("seller_sku") or "").strip(): float(line.get("unit_price") or 0)
         for line in order.get("lines", [])
@@ -73,6 +85,18 @@ def build_credit_note_payload(
             continue
 
         qty = round(abs(adj.principal_amount) / unit_price, 6)
+        if item_code in already_qty_by_item:
+            # A pool to DRAW DOWN, not a flat per-line subtraction -- an
+            # event can carry multiple item_adjustments for the same
+            # item_code (2 separate refunded units posted as 2 lines, not
+            # one qty-2 line; confirmed for real 2026-08-12). Subtracting
+            # the same already-posted amount from every adjustment for
+            # that code would zero out ALL of them instead of just the
+            # ones it actually covers.
+            already = already_qty_by_item[item_code]
+            consume = min(qty, already)
+            qty = round(qty - consume, 6)
+            already_qty_by_item[item_code] = round(already - consume, 6)
         if qty <= 0:
             # Refund amount for this line rounds to zero units at the
             # order's unit price (e.g. a $0.00 principal adjustment, or one
@@ -206,6 +230,15 @@ def build_credit_note_payload(
 
     if not doc_lines:
         return None, skipped
+
+    # Net out whatever a prior CN under this refund_id already reversed —
+    # only the newly-added remainder should hit the service lines below.
+    total_tax = round(total_tax - (already_tax if total_tax >= 0 else -already_tax), 2)
+    total_shipping = round(total_shipping - (already_shipping if total_shipping >= 0 else -already_shipping), 2)
+    if abs(total_tax) < 0.01:
+        total_tax = 0.0
+    if abs(total_shipping) < 0.01:
+        total_shipping = 0.0
 
     if total_tax:
         doc_lines.append(
