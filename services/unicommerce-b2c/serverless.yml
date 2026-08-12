@@ -157,34 +157,38 @@ functions:
       # 30-min offset so future posting/credit-note/PO/inventory functions
       # (same cadence as the Frappe cron) don't collide — see
       # docs/migration/03-unicommerce-b2c.md's function table.
-      # Deployed disabled until verified in a dual-run against Frappe's
-      # own fetch_orders, same dual-run-safe pattern used for every other
-      # cutover in this migration.
+      # Enabled 2026-08-12: Frappe's own fetch_orders/fetch_returns crons
+      # are still running (confirmed live via Scheduled Job Type
+      # last_execution) -- dual-fetch is safe by design (read-only from
+      # UC, writes to separate DBs), this is the documented dual-run step.
       - schedule:
           rate: cron(2,32 * * * ? *)
-          enabled: false
+          enabled: true
 
   unicommercePostInvoices:
     handler: src.handlers.post_invoices_handler
     layers: [{ Ref: SharedLambdaLayer }]
     events:
       # Same 30-min offset pattern as the Frappe cron (7,37 * * * *).
-      # Deployed disabled until verified in a dual-run against Frappe's
-      # own post_invoices.
+      # Enabled 2026-08-12: Frappe's own post_invoices cron confirmed
+      # `stopped=1` since 2026-08-06 (Scheduled Job Type query) -- no
+      # double-posting risk, this is now the only system posting invoices.
       - schedule:
           rate: cron(7,37 * * * ? *)
-          enabled: false
+          enabled: true
 
   unicommercePostCreditNotes:
     handler: src.handlers.post_credit_notes_handler
     layers: [{ Ref: SharedLambdaLayer }]
     events:
       # Same 30-min offset pattern as the Frappe cron (17,47 * * * *).
-      # Deployed disabled until verified in a dual-run against Frappe's
-      # own post_credit_notes.
+      # Enabled 2026-08-12: Frappe's own post_credit_notes cron was
+      # confirmed running (last_execution minutes prior) then explicitly
+      # stopped (`stopped=1`) immediately before this flip, same
+      # back-to-back discipline as every other cutover here.
       - schedule:
           rate: cron(17,47 * * * ? *)
-          enabled: false
+          enabled: true
 
   unicommercePoGrn:
     handler: src.handlers.pogrn_handler
