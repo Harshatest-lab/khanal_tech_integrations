@@ -159,7 +159,12 @@ def _post_credit_note(conn, uc_return_id: str, settings) -> None:
             logger.info("Credit note already in SAP for return %s -- marked posted (DocEntry=%s)", uc_return_id, existing["doc_entry"])
             return
     except sap_client.SapLookupError as check_err:
-        logger.warning("Credit note pre-check failed for %s (will attempt post): %s", uc_return_id, check_err)
+        # Could not prove the CN is absent from SAP -- do NOT post blind.
+        # Unlike the invoice path there's no dedicated 'verify' polling
+        # here; re-raise so the caller's mark_cn_failed retry path picks
+        # it up and re-runs this same check next cycle.
+        logger.error("Credit note pre-check failed for %s; deferred to retry: %s", uc_return_id, check_err)
+        raise
 
     payload = sap_payload.credit_note_payload(cn, parent or {}, settings)
     try:

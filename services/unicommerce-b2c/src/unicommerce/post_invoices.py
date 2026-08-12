@@ -225,12 +225,14 @@ def _post_order(conn, row: dict, settings, batch_managed_cache: dict, fefo_cache
             store.mark_posted(conn, uniware_id, str(existing["doc_entry"]), str(existing["doc_num"]), existing.get("doc_tax_amount") or 0, None)
             logger.info("_post_order(%s): SAP invoice already exists (DocEntry=%s); skipping re-post.", uniware_id, existing["doc_entry"])
             return "posted", []
-    except Exception:
-        # If the lookup itself fails, proceed with posting -- worst case
-        # is a duplicate that verify_posted_orders catches next cycle.
-        # Suppressing here avoids blocking the whole run on a transient
-        # SAP outage.
-        logger.warning("_post_order(%s): idempotency check failed (SAP unreachable?); proceeding with post", uniware_id, exc_info=True)
+    except sap_client.SapLookupError as e:
+        # Could not prove the order is absent from SAP -- do NOT post
+        # blind. Route to the same 'verify' state the post-timeout path
+        # below uses: next cycle's _verify_posted_orders re-checks SAP
+        # directly and either confirms posted or requeues to ready.
+        store.unclaim_order(conn, uniware_id, "verify")
+        logger.error("_post_order(%s): idempotency check failed; deferred to verify: %s", uniware_id, e)
+        return "verify", []
 
     uc_data = json.loads(row["order_json"] or "{}") if isinstance(row["order_json"], str) else (row["order_json"] or {})
     channel_name = row.get("channel_name") or ""
