@@ -125,6 +125,8 @@ def post_invoices_handler(event, context):
             return {"payload": payload, "skipped": skipped}
         if ev.get("mode") == "export_recon":
             return _export_recon(ev["period_from"], ev["period_to"], ev.get("s3_bucket") or constants.RECON_BUCKET)
+        if ev.get("mode") == "export_finance_revenue_report":
+            return _export_finance_revenue_report(ev["period_from"], ev["period_to"], ev.get("s3_bucket") or constants.RECON_BUCKET)
         if ev.get("mode") == "debug_bom_check":
             from khanal_shared.hana.pool import hana_connection
             out = {}
@@ -581,6 +583,14 @@ def dashboard_handler(event, context):
             _invoke_async("amazonPostInvoices", {"mode": "export_recon", "period_from": period_from, "period_to": period_to})
             return _json_response(202, {"triggered": "amazonPostInvoices", "mode": "export_recon"})
 
+        if path.endswith("/v1/amazon/export-finance-revenue") and method == "POST":
+            period_from = (q.get("period_from") or "").strip()
+            period_to = (q.get("period_to") or "").strip()
+            if not period_from or not period_to:
+                return _json_response(400, {"error": "period_from and period_to are required"})
+            _invoke_async("amazonPostInvoices", {"mode": "export_finance_revenue_report", "period_from": period_from, "period_to": period_to})
+            return _json_response(202, {"triggered": "amazonPostInvoices", "mode": "export_finance_revenue_report"})
+
         if path.endswith("/v1/amazon/retry-invoices") and method == "POST":
             with store.connect() as conn:
                 limit = int(q.get("limit") or 50)
@@ -805,4 +815,38 @@ def _export_recon(period_from: str, period_to: str, s3_bucket: str) -> dict:
     return {
         "invoices_key": inv_key, "credit_notes_key": cn_key,
         "invoice_rows": len(order_rows), "cn_rows": len(events),
+    }
+
+
+def _export_finance_revenue_report(period_from: str, period_to: str, s3_bucket: str) -> dict:
+    """Runs Finance's own Revenue Recognition SQL (recon.FINANCE_REVENUE_QUERY,
+    pasted from their SAP HANA report, unmodified) scoped to Amazon US B2C
+    (CardCode C00001), writes it to S3 line-for-line as Finance would pull
+    it themselves. Exists so "does our revenue match Finance's report" is
+    answered by running their exact query, not by us re-deriving Taxable
+    Value / Freight / COGS and hoping the formulas agree."""
+    import csv
+    import io
+
+    import boto3
+
+    rows = recon.fetch_finance_revenue_rows(period_from, period_to)
+
+    buf = io.StringIO()
+    fieldnames = list(rows[0].keys()) if rows else ["Document Date"]
+    w = csv.DictWriter(buf, fieldnames=fieldnames)
+    w.writeheader()
+    w.writerows(rows)
+
+    key = f"recon-export/finance_revenue_report_{period_from}_{period_to}.csv"
+    s3 = boto3.client("s3")
+    s3.put_object(Bucket=s3_bucket, Key=key, Body=buf.getvalue().encode("utf-8"))
+
+    net_taxable_total = round(sum(float(r.get("Net Taxable Value") or 0) for r in rows), 2)
+    taxable_total = round(sum(float(r.get("Taxable Value") or 0) for r in rows), 2)
+    return {
+        "key": key,
+        "rows": len(rows),
+        "net_taxable_value_total": net_taxable_total,
+        "taxable_value_total": taxable_total,
     }

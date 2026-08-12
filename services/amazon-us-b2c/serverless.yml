@@ -327,6 +327,11 @@ functions:
           method: post
           authorizer:
             name: dashboardCognitoJwt
+      - httpApi:
+          path: /v1/amazon/export-finance-revenue
+          method: post
+          authorizer:
+            name: dashboardCognitoJwt
 
 resources:
   Resources:
