@@ -228,6 +228,202 @@ def fetch_sap_side(period_from: str, period_to: str) -> dict[str, dict]:
     return result
 
 
+# ── Finance's own Revenue Recognition query (SAP HANA, unmodified) ──────
+#
+# Pasted verbatim from Finance's SAP HANA report (2026-08-12) with the
+# `[%0]`/`[%1]` Crystal-style date parameters swapped for `?` placeholders
+# and one addition: `AND A."CardCode" = ?` in both branches, so this can be
+# scoped to Amazon US B2C (CardCode C00001) instead of the whole company.
+# Deliberately NOT reimplemented in Python — Taxable Value / Discount /
+# Freight / COGS / Gross Margin / channel (GroupCode) are Finance's own
+# formulas; keeping the SQL untouched means this can never quietly drift
+# from what Finance's pivot actually computes. DocDate (= ship date) is
+# already the window field on both sides, matching amazon_us's own
+# actual_ship_date-based posting rule (see [[fetch_sap_side]] above).
+FINANCE_REVENUE_QUERY = '''
+SELECT
+    'KF Inc. US' as "Company",
+    'No' as "RR-KFPL-India",
+    'Yes' as "RR-KFPL-USA",
+    CASE WHEN X."CardCode" = 'C00009' THEN 'No' else 'Yes' end as "RR-KFPL-CFS",
+    CASE WHEN X."CardCode" = 'C00009' THEN 'No' else 'Yes' end as "Revenue Recognition",
+    TO_VARCHAR(X."DocDate",'DD-Mon-YYYY') as "Document Date",
+    TO_VARCHAR(X."DocDate", 'Mon-YY') AS "Month",
+    CASE WHEN X."ObjType" = '13' then 'SALES INVOICE'
+         WHEN X."ObjType" = '14' THEN 'CREDIT MEMO'
+         ELSE 'Others' end as "Document",
+    X."NumAtCard" as "BP Reference No.",
+    X."DocNum" as "Document Number",
+    X."SeriesName" as "Series",
+    X."KFIN DocNum" as "Document No",
+    X."FormatCode" as "G/L Code",
+    X."AcctName" as "G/L Name",
+    X."CardCode",
+    X."CardName",
+    X."CardFName" as "Common Name",
+    case when x."GroupCode" = '100' then 'E-com'
+         WHEN X."GroupCode" = '102' THEN 'Export'
+         WHEN X."GroupCode" = '103' THEN 'Offline Dogsee'
+         WHEN X."GroupCode" = '104' THEN 'Other Customer'
+         else 'Others' end as "Channel",
+    X."State",
+    X."Currency",
+    X."DocRate",
+    X."Dscription",
+    X."Actual ItemName",
+    X."Actual ItemCode",
+    X."Product Category",
+    X."Brand Category",
+    X."Brand Name",
+    CASE WHEN X."Country" = 'USA' then 'Domestic' else 'International' end as "Geography",
+    X."Country",
+    X."U_UoM_MIS" as "UoM",
+    X."Quantity",
+    X."PriceBefDi" as "Unit Price",
+    (X."Quantity" * X."PriceBefDi") as "Taxable Value",
+    (IFNULL(X."PriceBefDi",0) * IFNULL(X."Quantity",0) * IFNULL(X."DiscPrcnt",0)) / 100 AS "Discount Value",
+    CASE
+        WHEN X."ObjType" = '13' THEN
+            IFNULL(X."Freight",0) + IFNULL(X."Taxable Value",0) - (IFNULL(X."DiscPrcnt",0)) / 100
+        WHEN X."ObjType" = '14' THEN
+            IFNULL(X."Freight",0) + IFNULL(X."Taxable Value",0) + (IFNULL(X."DiscPrcnt",0)) / 100
+        ELSE 0
+    END AS "Net Taxable Value",
+    IFNULL(X."Freight",0) as "Freight",
+    X."COGS per unit",
+    X."COGS",
+    X."Gross Margin",
+    TO_DECIMAL(X."Gross Margin" / NULLIF(X."Taxable Value", 0), 10, 4) * 100 || '%' AS "Gross Margin %",
+    CASE
+        WHEN X."WhsName" LIKE 'ShipCube%' THEN 'ShipCube'
+        WHEN X."WhsName" LIKE 'Wow%' THEN 'WowPets'
+        ELSE X."WhsName"
+    END AS "Location",
+    X."Comments"
+FROM
+(
+    ----------------------------------------------------------------------
+    -- AR INVOICE
+    ----------------------------------------------------------------------
+    SELECT
+        A."Comments", W."WhsName", B."LineNum",
+        'AR Invoice' AS "DocTypeName",
+        A."DocEntry", A."DocType" AS "Item/Service", A."DocDate", A."ObjType", A."DocNum", A."DocCur",
+        I."U_BC" as "Brand Category", I."U_BN" as "Brand Name", I."U_PSC" as "Product Category",
+        I."U_UoM_MIS", A."DocRate", BP."GroupCode", BP."Currency", SE."SeriesName", BP."CardFName", A."DocStatus",
+        CASE WHEN IFNULL(SE."SeriesName",'') = '' THEN TO_VARCHAR(A."DocNum")
+             ELSE SE."SeriesName" || '/' || A."DocNum" END AS "KFIN DocNum",
+        B."AcctCode" AS "G/L Code", AB."FormatCode", AB."AcctName",
+        A."CardCode", A."CardName",
+        S."Name" AS "State", CO."Name" as "Country",
+        A."NumAtCard", B."ItemCode", B."Dscription",
+        B."StockPrice" AS "COGS per unit", B."DiscPrcnt",
+        CASE WHEN A."DocType" = 'I' THEN (B."StockPrice" * B."Quantity") ELSE 0 END AS "COGS",
+        (
+            SELECT T."TotalFreight" / NULLIF(T."TotalLines",0)
+            FROM (
+                SELECT COUNT(*) AS "TotalLines", MAX(I3."LineTotal") AS "TotalFreight"
+                FROM INV1 I1
+                LEFT JOIN INV3 I3 ON I1."DocEntry" = I3."DocEntry" AND I3."ExpnsCode" = 1
+                WHERE I1."DocEntry" = B."DocEntry"
+            ) T
+        ) AS "Freight",
+        (
+            CASE WHEN A."DocType" = 'I' THEN (B."Quantity" * B."Price") ELSE B."Price" END
+            - CASE WHEN A."DocType" = 'I' THEN (B."StockPrice" * B."Quantity") ELSE 0 END
+        ) AS "Gross Margin",
+        CASE WHEN IFNULL(B."U_ActualItem", '') = '' THEN B."ItemCode" ELSE B."U_ActualItem" END AS "Actual ItemCode",
+        CASE WHEN IFNULL(C."ItemName", '') = '' THEN B."Dscription" ELSE C."ItemName" END AS "Actual ItemName",
+        B."Quantity", B."PriceBefDi",
+        CASE WHEN A."DocType" = 'I' THEN (B."Quantity" * B."Price") ELSE B."Price" END AS "Taxable Value"
+    FROM OINV A
+    LEFT JOIN NNM1 SE ON SE."Series" = A."Series"
+    INNER JOIN INV1 B ON A."DocEntry" = B."DocEntry"
+    INNER JOIN OITM I ON B."ItemCode" = I."ItemCode"
+    INNER JOIN OWHS W ON B."WhsCode" = W."WhsCode"
+    LEFT JOIN OCRD BP ON A."CardCode" = BP."CardCode"
+    LEFT JOIN CRD1 AD ON BP."CardCode" = AD."CardCode" AND AD."Address" = A."ShipToCode" AND AD."AdresType" = 'S'
+    LEFT JOIN OCST S ON S."Code" = AD."State" AND S."Country" = AD."Country"
+    LEFT JOIN OCRY CO ON CO."Code" = AD."Country"
+    INNER JOIN OACT AB ON B."AcctCode" = AB."AcctCode"
+    LEFT JOIN OITM C ON C."ItemCode" = B."U_ActualItem"
+    WHERE A."CANCELED" = 'N' AND A."DocDate" BETWEEN ? AND ? AND A."CardCode" = ?
+
+    UNION ALL
+
+    ----------------------------------------------------------------------
+    -- AR CREDIT MEMO
+    ----------------------------------------------------------------------
+    SELECT
+        A."Comments", W."WhsName", B."LineNum",
+        'AR Credit Memo' AS "DocTypeName",
+        A."DocEntry", A."DocType" AS "Item/Service", A."DocDate", A."ObjType", A."DocNum", A."DocCur",
+        I."U_BC" as "Brand Category", I."U_BN" as "Brand Name", I."U_PSC" as "Product Category",
+        I."U_UoM_MIS", A."DocRate", BP."GroupCode", BP."Currency", SE."SeriesName", BP."CardFName", A."DocStatus",
+        CASE WHEN IFNULL(SE."SeriesName",'') = '' THEN TO_VARCHAR(A."DocNum")
+             ELSE SE."SeriesName" || '/' || A."DocNum" END AS "KFIN DocNum",
+        B."AcctCode" AS "G/L Code", AB."FormatCode", AB."AcctName",
+        A."CardCode", A."CardName",
+        S."Name" AS "State", CO."Name" as "Country",
+        A."NumAtCard", B."ItemCode", B."Dscription",
+        B."StockPrice" AS "COGS per unit", B."DiscPrcnt",
+        CASE WHEN A."DocType" = 'I' THEN -(B."StockPrice" * B."Quantity") ELSE 0 END AS "COGS",
+        (
+            SELECT -(T."TotalFreight" / NULLIF(T."TotalLines",0))
+            FROM (
+                SELECT COUNT(*) AS "TotalLines", MAX(R3."LineTotal") AS "TotalFreight"
+                FROM RIN1 R1
+                LEFT JOIN RIN3 R3 ON R1."DocEntry" = R3."DocEntry" AND R3."ExpnsCode" = 1
+                WHERE R1."DocEntry" = B."DocEntry"
+            ) T
+        ) AS "Freight",
+        (
+            (CASE WHEN A."DocType" = 'I' THEN -(B."Quantity" * B."Price") ELSE -(B."Price") END)
+            - CASE WHEN A."DocType" = 'I' THEN -(B."StockPrice" * B."Quantity") ELSE 0 END
+        ) AS "Gross Margin",
+        CASE WHEN IFNULL(B."U_ActualItem", '') = '' THEN B."ItemCode" ELSE B."U_ActualItem" END AS "Actual ItemCode",
+        CASE WHEN IFNULL(C."ItemName", '') = '' THEN B."Dscription" ELSE C."ItemName" END AS "Actual ItemName",
+        -(B."Quantity") AS "Quantity", B."PriceBefDi",
+        CASE WHEN A."DocType" = 'I' THEN -(B."Quantity" * B."Price") ELSE -(B."Price") END AS "Taxable Value"
+    FROM ORIN A
+    LEFT JOIN NNM1 SE ON SE."Series" = A."Series"
+    INNER JOIN RIN1 B ON A."DocEntry" = B."DocEntry"
+    INNER JOIN OITM I ON B."ItemCode" = I."ItemCode"
+    INNER JOIN OWHS W ON W."WhsCode" = B."WhsCode"
+    LEFT JOIN OCRD BP ON A."CardCode" = BP."CardCode"
+    LEFT JOIN CRD1 AD ON BP."CardCode" = AD."CardCode" AND AD."Address" = A."ShipToCode" AND AD."AdresType" = 'S'
+    LEFT JOIN OCST S ON S."Code" = AD."State" AND S."Country" = AD."Country"
+    LEFT JOIN OCRY CO ON CO."Code" = AD."Country"
+    INNER JOIN OACT AB ON B."AcctCode" = AB."AcctCode"
+    LEFT JOIN OITM C ON C."ItemCode" = B."U_ActualItem"
+    WHERE A."CANCELED" = 'N' AND A."DocDate" BETWEEN ? AND ? AND A."CardCode" = ?
+) X
+GROUP BY
+    X."LineNum", X."DocEntry", X."Item/Service", X."DocDate", X."NumAtCard", X."DocNum", X."KFIN DocNum",
+    X."DocTypeName", X."FormatCode", X."AcctName", X."CardCode", X."CardName", X."State", X."Country",
+    X."Dscription", X."Actual ItemCode", X."Actual ItemName", X."Quantity", X."PriceBefDi", x."DiscPrcnt",
+    X."Freight", X."Taxable Value", X."COGS per unit", X."COGS", X."Gross Margin", x."ObjType", x."DocStatus",
+    X."CardFName", X."GroupCode", X."Currency", X."DocRate", X."SeriesName", X."Brand Category", X."Brand Name",
+    X."Product Category", X."U_UoM_MIS", X."WhsName", X."Comments"
+'''
+
+
+def fetch_finance_revenue_rows(period_from: str, period_to: str, card_code: str = constants.SAP_CARD_CODE) -> list[dict]:
+    """Runs Finance's own Revenue Recognition SQL (see FINANCE_REVENUE_QUERY
+    above) filtered to `card_code`, returning one dict per row with Finance's
+    exact column names (including "Net Taxable Value", "Freight", "COGS",
+    "Gross Margin", "Channel") — not our own recomputation of any of it."""
+    from khanal_shared.hana.pool import hana_connection
+
+    with hana_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(FINANCE_REVENUE_QUERY, [period_from, period_to, card_code, period_from, period_to, card_code])
+        cols = [d[0] for d in cur.description]
+        rows = [dict(zip(cols, r)) for r in cur.fetchall() or []]
+        cur.close()
+    return rows
+
+
 # ── Comparison (pure) ────────────────────────────────────────────────────
 
 def compare(mtr: dict[str, dict], sap: dict[str, dict], cutoff: str, order_dates: dict[str, str]) -> list[dict]:

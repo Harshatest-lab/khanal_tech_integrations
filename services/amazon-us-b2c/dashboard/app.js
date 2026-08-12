@@ -631,6 +631,23 @@ runExportReconBtn.addEventListener("click", async () => {
   );
 });
 
+const runExportFinanceRevenueBtn = document.getElementById("run-export-finance-revenue-btn");
+
+runExportFinanceRevenueBtn.addEventListener("click", async () => {
+  const from = reconPeriodFrom.value;
+  const to = reconPeriodTo.value;
+  if (!from || !to) {
+    showError("Finance revenue report export needs both period from and period to.");
+    return;
+  }
+  const params = new URLSearchParams({ period_from: from, period_to: to });
+  await runTrigger(
+    runExportFinanceRevenueBtn,
+    `/v1/amazon/export-finance-revenue?${params}`,
+    `Run Finance's own Revenue Recognition SQL (scoped to Amazon USA) for ${from} → ${to}?`
+  );
+});
+
 // ── Orders panel ─────────────────────────────────────────────────────────
 
 let currentOffset = 0;
