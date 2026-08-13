@@ -51,6 +51,16 @@ def poll_report(report_id: str, poll_interval: int = 30, max_wait: int = 840) ->
     raise TimeoutError(f"Report {report_id} not ready after {max_wait}s")
 
 
+def cancel_report(report_id: str) -> bool:
+    """Cancel a still-queued/in-progress report. Only valid while status is
+    IN_QUEUE or IN_PROGRESS -- Amazon rejects cancelling a DONE/FATAL/
+    CANCELLED report. Returns True on success."""
+    resp = sp_api.delete(f"{_REPORTS_BASE}/reports/{report_id}")
+    if resp.status_code not in (200, 202):
+        raise RuntimeError(f"cancel_report failed: {resp.status_code} {resp.text[:300]}")
+    return True
+
+
 def download_report(report_document_id: str) -> str:
     """Fetch presigned URL and return report content (gunzipped if needed)."""
     resp = sp_api.get(f"{_REPORTS_BASE}/documents/{report_document_id}")

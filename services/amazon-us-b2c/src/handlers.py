@@ -76,11 +76,56 @@ def fetch_handler(event, context):
 
 
 def fba_ship_sync_handler(event, context):
-    """Default window: last 21 days (Pacific). Manual: {"from_date", "to_date"}."""
+    """Default window: last 21 days (Pacific). Manual: {"from_date", "to_date"}.
+    debug_resume_report: {"mode": "debug_resume_report", "report_id": str} — Amazon's
+    report queue can take much longer than one Lambda invoke's poll budget on a large
+    window; this resumes polling an ALREADY-REQUESTED report_id (from a previous
+    timeout's logs) instead of creating a brand new report request each retry."""
 
     def _go():
-        from_date = (event or {}).get("from_date") or (date.today() - timedelta(days=21)).isoformat()
-        to_date = (event or {}).get("to_date") or date.today().isoformat()
+        ev = event or {}
+        if ev.get("mode") == "debug_resume_report":
+            from amazon_us import reports_api
+            from amazon_us.fba_ship_sync import parse_earliest_ship_dates
+
+            report_id = ev["report_id"]
+            doc_id = reports_api.poll_report(report_id)
+            content = reports_api.download_report(doc_id)
+            ship_dates = parse_earliest_ship_dates(content)
+            with store.connect() as conn:
+                updated = store.set_actual_ship_dates(conn, ship_dates)
+            return {"status": "success", "parsed": len(ship_dates), "updated": updated}
+        if ev.get("mode") == "debug_cancel_report":
+            from amazon_us import reports_api
+
+            return {"cancelled": reports_api.cancel_report(ev["report_id"])}
+        if ev.get("mode") == "debug_rate_limit_check":
+            # ONE raw request, zero retries -- sp_api.post() retries up to 20x
+            # internally with backoff, so even a "quick" create_report call
+            # blocks for minutes while still rate-limited. This bypasses that
+            # to give an instant yes/no on whether the createReport quota has
+            # recovered, before committing to a real (possibly 900s) attempt.
+            import requests as _requests
+
+            from amazon_us import constants as _constants
+            from amazon_us import sp_api as _sp_api
+
+            url = _constants.SP_API_BASE + "/reports/2021-06-30/reports"
+            body = {
+                "reportType": "GET_AMAZON_FULFILLED_SHIPMENTS_DATA_GENERAL",
+                "marketplaceIds": [_constants.MARKETPLACE_ID],
+                "dataStartTime": "2026-08-10T00:00:00Z",
+                "dataEndTime": "2026-08-11T00:00:00Z",
+            }
+            resp = _requests.post(url, headers=_sp_api._headers(), json=body, timeout=15)
+            return {
+                "status_code": resp.status_code,
+                "headers": dict(resp.headers),
+                "body": resp.text[:1000],
+            }
+
+        from_date = ev.get("from_date") or (date.today() - timedelta(days=21)).isoformat()
+        to_date = ev.get("to_date") or date.today().isoformat()
         with store.connect() as conn:
             return sync_ship_dates(conn, from_date, to_date)
 
