@@ -25,7 +25,7 @@ from typing import Any, Callable
 from amazon_us import constants
 from amazon_us.finances_api import RefundEvent
 from amazon_us.invoice_payload import BomLookup, build_line_udfs
-from amazon_us.state_codes import normalize_us_state_code
+from amazon_us.state_codes import US_TERRITORY_COUNTRY_CODES, normalize_us_state_code
 
 AcctResolver = Callable[[str], str]
 
@@ -264,9 +264,10 @@ def build_credit_note_payload(
 
     # Per-state Ship-To/Pay-To address code — same fix and fallback as
     # invoice_payload.build_invoice_payload, kept consistent between
-    # invoices and their credit notes.
+    # invoices and their credit notes. US territories (Puerto Rico, Guam,
+    # etc.) count as domestic here too -- see US_TERRITORY_COUNTRY_CODES.
     country = (order.get("ship_country") or "").strip().upper()
-    is_domestic = country in ("", "US", "USA")
+    is_domestic = country in ("", "US", "USA") or country in US_TERRITORY_COUNTRY_CODES
     if is_domestic:
         state_code = normalize_us_state_code(order.get("ship_state"))
         ship_to_code = f"{constants.SAP_SHIP_TO_STATE_PREFIX}{state_code}" if state_code else constants.SAP_PAY_TO_CODE
