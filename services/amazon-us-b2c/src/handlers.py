@@ -796,6 +796,35 @@ def dashboard_handler(event, context):
                     ],
                 })
 
+            if path.endswith("/v1/amazon/debug-prod-era-posted"):
+                # Every "posted" order whose posted_at is on/after the date
+                # real prod Lambdas first existed (2026-08-12) -- the only
+                # postings that could possibly be genuine prod activity
+                # rather than the dev-era Aug 7-10 batch. Listed individually
+                # (not just counted) so each doc_entry can be verified
+                # directly against SAP.
+                since = q.get("since") or "2026-08-12"
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT amazon_order_id, sap_doc_entry, sap_doc_num, purchase_date, posted_at "
+                        "FROM amazon_us_orders WHERE stage = 'posted' AND posted_at >= %s "
+                        "ORDER BY posted_at ASC",
+                        [since],
+                    )
+                    rows = cur.fetchall() or []
+                return _json_response(200, {
+                    "since": since,
+                    "count": len(rows),
+                    "orders": [
+                        {
+                            "amazon_order_id": r[0], "sap_doc_entry": r[1], "sap_doc_num": r[2],
+                            "purchase_date": str(r[3]) if r[3] else None,
+                            "posted_at": str(r[4]) if r[4] else None,
+                        }
+                        for r in rows
+                    ],
+                })
+
             if path.endswith("/v1/amazon/debug-pg-identity"):
                 # Which actual Postgres database this Lambda is connected to
                 # right now -- dev and prod share one RDS instance, only the
