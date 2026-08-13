@@ -101,6 +101,10 @@ jobs:
           # Optional: set to false for self-signed SAP SL TLS (dev); omit or true for verify.
           SAP_SL_VERIFY_SSL: ${{ secrets.SAP_SL_VERIFY_SSL }}
           # amazon-us-b2c only — falls back to serverless.yml defaults if unset.
+          # AMZ_PROD_DATABASE_URL: amazon-us-b2c prod's own dedicated database
+          # (amazon_us_b2c_prod), separate from the shared DATABASE_URL every
+          # other service/stage still reads. Only used when stage=prod.
+          AMZ_PROD_DATABASE_URL: ${{ secrets.AMZ_PROD_DATABASE_URL }}
           AMZ_POSTING_CUTOFF_DATE: ${{ secrets.AMZ_POSTING_CUTOFF_DATE }}
           AMZ_ALERT_ADMIN_EMAIL: ${{ secrets.AMZ_ALERT_ADMIN_EMAIL }}
           AMZ_ALERT_FROM_EMAIL: ${{ secrets.AMZ_ALERT_FROM_EMAIL }}

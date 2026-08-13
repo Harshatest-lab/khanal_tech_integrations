@@ -115,7 +115,19 @@ provider:
   environment:
     STAGE: ${self:provider.stage}
     LOG_LEVEL: ${env:LOG_LEVEL, 'INFO'}
-    DATABASE_URL: ${env:DATABASE_URL, ''}
+    # Stage-keyed DATABASE_URL (see custom.currentDatabaseUrl below):
+    # DATABASE_URL is a single repo-wide secret shared by every service and
+    # every stage -- "dev" and every other service must keep reading it
+    # unchanged. "prod" gets its own dedicated database (amazon_us_b2c_prod,
+    # created 2026-08-12, same RDS instance) via AMZ_PROD_DATABASE_URL, so
+    # amazon-us-b2c prod stops silently reading/writing the shared dev
+    # database its own bookkeeping never actually separated from before
+    # this change (confirmed live 2026-08-13: prod's Lambdas had
+    # current_database() = "khanal_serverless", not "amazon_us_b2c_prod",
+    # despite that database existing with a real, untouched 28,419-order
+    # backfill). Any stage not listed falls back to the shared DATABASE_URL,
+    # unchanged from before this split.
+    DATABASE_URL: ${self:custom.currentDatabaseUrl}
     # SAP SL profile, stage-keyed (see custom.currentSlProfile below):
     # "dev" stays on inc_amzn_test forever, so it can never touch the
     # live inc_amzn company DB; "prod" resolves to inc_amzn, the same
@@ -139,6 +151,12 @@ provider:
 
 custom:
   reconBucket: ${env:AMZ_RECON_BUCKET, 'amazon-us-b2c-recon-${self:provider.stage}'}
+  # Stage-keyed database URL -- only "prod" gets its own dedicated database
+  # (AMZ_PROD_DATABASE_URL); every other stage keeps reading the shared
+  # DATABASE_URL secret unchanged, same as every other service in this repo.
+  databaseUrlByStage:
+    prod: ${env:AMZ_PROD_DATABASE_URL, env:DATABASE_URL, ''}
+  currentDatabaseUrl: ${self:custom.databaseUrlByStage.${self:provider.stage}, env:DATABASE_URL, ''}
   # Stage-keyed SAP Service Layer profile -- "dev" stays isolated on
   # inc_amzn_test forever (no SSM params created there yet on purpose,
   # so a dev posting attempt fails loudly instead of silently hitting
