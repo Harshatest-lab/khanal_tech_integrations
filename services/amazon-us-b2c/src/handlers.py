@@ -720,6 +720,36 @@ def dashboard_handler(event, context):
             if path.endswith("/v1/amazon/stats"):
                 return _json_response(200, dashboard_queries.fetch_stats(conn))
 
+            if path.endswith("/v1/amazon/debug-docentry-scope"):
+                # Sizes the blast radius of a discovered mismatch: SAP's live
+                # OINV table currently tops out at a much lower DocEntry than
+                # many orders in our own DB claim to be posted at -- this
+                # counts how many "posted" orders point above a given
+                # threshold (their invoice may not actually exist in SAP).
+                threshold = int(q.get("threshold") or 16741)
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT "
+                        "COUNT(*) FILTER (WHERE sap_doc_entry > %s) AS above, "
+                        "COUNT(*) FILTER (WHERE sap_doc_entry <= %s) AS at_or_below, "
+                        "MIN(sap_doc_entry) FILTER (WHERE sap_doc_entry > %s) AS min_above, "
+                        "MAX(sap_doc_entry) AS max_doc_entry, "
+                        "MIN(purchase_date) FILTER (WHERE sap_doc_entry > %s) AS earliest_purchase_above, "
+                        "MIN(posted_at) FILTER (WHERE sap_doc_entry > %s) AS earliest_posted_at_above "
+                        "FROM amazon_us_orders WHERE stage = 'posted'",
+                        [threshold, threshold, threshold, threshold, threshold],
+                    )
+                    row = cur.fetchone()
+                return _json_response(200, {
+                    "threshold": threshold,
+                    "posted_orders_above_threshold": int(row[0] or 0),
+                    "posted_orders_at_or_below_threshold": int(row[1] or 0),
+                    "min_doc_entry_above_threshold": row[2],
+                    "max_doc_entry_overall": row[3],
+                    "earliest_purchase_date_above_threshold": str(row[4]) if row[4] else None,
+                    "earliest_posted_at_above_threshold": str(row[5]) if row[5] else None,
+                })
+
             if path.endswith("/v1/amazon/orders"):
                 limit = dashboard_queries._clamp_limit(q.get("limit"))
                 offset = dashboard_queries._clamp_offset(q.get("offset"))
