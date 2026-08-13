@@ -737,6 +737,15 @@ def dashboard_handler(event, context):
                 # counts how many "posted" orders point above a given
                 # threshold (their invoice may not actually exist in SAP).
                 threshold = int(q.get("threshold") or 16741)
+                where = ["stage = 'posted'"]
+                params: list[Any] = []
+                if q.get("purchase_date_from"):
+                    where.append("purchase_date >= %s")
+                    params.append(q["purchase_date_from"])
+                if q.get("purchase_date_to"):
+                    where.append("purchase_date < %s::date + interval '1 day'")
+                    params.append(q["purchase_date_to"])
+                where_sql = " AND ".join(where)
                 with conn.cursor() as cur:
                     cur.execute(
                         "SELECT "
@@ -746,18 +755,68 @@ def dashboard_handler(event, context):
                         "MAX(sap_doc_entry) AS max_doc_entry, "
                         "MIN(purchase_date) FILTER (WHERE sap_doc_entry > %s) AS earliest_purchase_above, "
                         "MIN(posted_at) FILTER (WHERE sap_doc_entry > %s) AS earliest_posted_at_above "
-                        "FROM amazon_us_orders WHERE stage = 'posted'",
-                        [threshold, threshold, threshold, threshold, threshold],
+                        f"FROM amazon_us_orders WHERE {where_sql}",
+                        [threshold, threshold, threshold, threshold, threshold, *params],
                     )
                     row = cur.fetchone()
                 return _json_response(200, {
                     "threshold": threshold,
+                    "purchase_date_from": q.get("purchase_date_from"),
+                    "purchase_date_to": q.get("purchase_date_to"),
                     "posted_orders_above_threshold": int(row[0] or 0),
                     "posted_orders_at_or_below_threshold": int(row[1] or 0),
                     "min_doc_entry_above_threshold": row[2],
                     "max_doc_entry_overall": row[3],
                     "earliest_purchase_date_above_threshold": str(row[4]) if row[4] else None,
                     "earliest_posted_at_above_threshold": str(row[5]) if row[5] else None,
+                })
+
+            if path.endswith("/v1/amazon/debug-pg-identity"):
+                # Which actual Postgres database this Lambda is connected to
+                # right now -- dev and prod share one RDS instance, only the
+                # dbname differs; a stale DATABASE_URL would silently point
+                # "prod" at dev's database (same class of bug already found
+                # twice this project for SAP company/HANA schema).
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT current_database(), inet_server_addr()::text, inet_server_port()"
+                    )
+                    dbname, host, port = cur.fetchone()
+                    cur.execute("SELECT COUNT(*) FROM amazon_us_orders")
+                    total_orders = int(cur.fetchone()[0])
+                return _json_response(200, {
+                    "current_database": dbname, "server_host": host, "server_port": port,
+                    "total_orders_in_this_db": total_orders,
+                })
+
+            if path.endswith("/v1/amazon/debug-precutoff-check"):
+                # Verifies the posting-cutoff guard actually held: no order
+                # or credit note dated before AMZ_POSTING_CUTOFF_DATE should
+                # ever have a real sap_doc_entry -- pre-cutoff revenue was
+                # booked manually by Finance and must never be double-posted.
+                cutoff = q.get("cutoff") or constants.POSTING_CUTOFF_DATE
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT COUNT(*), MIN(purchase_date), MAX(purchase_date) FROM amazon_us_orders "
+                        "WHERE stage = 'posted' AND purchase_date < %s",
+                        [cutoff],
+                    )
+                    orders_row = cur.fetchone()
+                    cur.execute(
+                        "SELECT COUNT(*), MIN(o.purchase_date), MAX(o.purchase_date) "
+                        "FROM amazon_us_cn_log c JOIN amazon_us_orders o ON o.amazon_order_id = c.amazon_order_id "
+                        "WHERE c.status = 'posted' AND o.purchase_date < %s",
+                        [cutoff],
+                    )
+                    cn_row = cur.fetchone()
+                return _json_response(200, {
+                    "cutoff": cutoff,
+                    "posted_orders_before_cutoff": int(orders_row[0] or 0),
+                    "earliest_purchase_date_before_cutoff": str(orders_row[1]) if orders_row[1] else None,
+                    "latest_purchase_date_before_cutoff": str(orders_row[2]) if orders_row[2] else None,
+                    "posted_cn_before_cutoff": int(cn_row[0] or 0),
+                    "earliest_cn_order_purchase_date_before_cutoff": str(cn_row[1]) if cn_row[1] else None,
+                    "latest_cn_order_purchase_date_before_cutoff": str(cn_row[2]) if cn_row[2] else None,
                 })
 
             if path.endswith("/v1/amazon/orders"):
