@@ -401,23 +401,49 @@ def post_credit_notes_handler(event, context):
             # isolates whether a doc_entry that 404s via Service Layer is
             # actually missing from the database or just unreachable through
             # the API (routing/session/entity-specific SL issue).
+            #
+            # Optional "schema" overrides the pool's configured company --
+            # DocEntry sequences are independent per SAP company, so a doc
+            # entry missing from the live company (KF_INC_22012026) may
+            # still be a real invoice sitting in a DIFFERENT company (e.g.
+            # the TEST company this profile was once misconfigured to,
+            # TEST_US_02072026) that our postings actually went to.
+            from khanal_shared.hana.config import quote_hana_identifier
             from khanal_shared.hana.pool import hana_connection
             doc_entries = [int(d) for d in ev["doc_entries"]]
             placeholders = ",".join("?" for _ in doc_entries)
             with hana_connection() as conn:
                 cur = conn.cursor()
-                cur.execute(
-                    f'SELECT "DocEntry", "DocNum", "NumAtCard", "CANCELED", "DocDate", "DocTotal", '
-                    f'"DocStatus", "CardCode" FROM "OINV" WHERE "DocEntry" IN ({placeholders})',
-                    doc_entries,
-                )
-                rows = cur.fetchall() or []
-                cur.close()
+                cur.execute("SELECT CURRENT_SCHEMA FROM \"DUMMY\"")
+                original_schema = cur.fetchone()[0]
+                schema = ev.get("schema")
+                try:
+                    if schema:
+                        cur.execute(f"SET SCHEMA {quote_hana_identifier(schema)}")
+                    cur.execute("SELECT CURRENT_SCHEMA FROM \"DUMMY\"")
+                    current_schema = cur.fetchone()[0]
+                    cur.execute(
+                        f'SELECT "DocEntry", "DocNum", "NumAtCard", "CANCELED", "DocDate", "DocTotal", '
+                        f'"DocStatus", "CardCode" FROM "OINV" WHERE "DocEntry" IN ({placeholders})',
+                        doc_entries,
+                    )
+                    rows = cur.fetchall() or []
+                finally:
+                    # This connection returns to the shared pool on close() --
+                    # a lingering schema switch would silently redirect any
+                    # OTHER warm-Lambda invocation that reuses it next.
+                    if schema:
+                        cur.execute(f"SET SCHEMA {quote_hana_identifier(original_schema)}")
+                    cur.close()
             found = {int(r[0]): {
                 "DocNum": int(r[1]), "NumAtCard": r[2], "CANCELED": r[3], "DocDate": str(r[4]),
                 "DocTotal": float(r[5] or 0), "DocStatus": r[6], "CardCode": r[7],
             } for r in rows}
-            return {"requested": doc_entries, "found": found, "missing": [d for d in doc_entries if d not in found]}
+            return {
+                "schema_queried": current_schema,
+                "requested": doc_entries, "found": found,
+                "missing": [d for d in doc_entries if d not in found],
+            }
         if ev.get("mode") == "debug_hana_identity":
             # Which schema/database this Lambda's HANA connection is
             # actually pointed at right now, and a max(DocEntry) sanity
