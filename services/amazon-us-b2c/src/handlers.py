@@ -761,6 +761,41 @@ def dashboard_handler(event, context):
                     "earliest_posted_at_above_threshold": str(row[5]) if row[5] else None,
                 })
 
+            if path.endswith("/v1/amazon/debug-low-docentry-sample"):
+                # Sample of "posted" orders whose sap_doc_entry falls within
+                # the live SAP company's real range (<= threshold) -- these
+                # are the ones plausibly real, unlike the bulk that reference
+                # doc entries the live company has never reached. Returned
+                # for spot-checking directly against SAP.
+                threshold = int(q.get("threshold") or 16741)
+                where = ["stage = 'posted'", "sap_doc_entry <= %s"]
+                params: list[Any] = [threshold]
+                if q.get("purchase_date_from"):
+                    where.append("purchase_date >= %s")
+                    params.append(q["purchase_date_from"])
+                if q.get("purchase_date_to"):
+                    where.append("purchase_date < %s::date + interval '1 day'")
+                    params.append(q["purchase_date_to"])
+                where_sql = " AND ".join(where)
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT amazon_order_id, sap_doc_entry, sap_doc_num, purchase_date, posted_at "
+                        f"FROM amazon_us_orders WHERE {where_sql} ORDER BY posted_at ASC LIMIT 10",
+                        params,
+                    )
+                    rows = cur.fetchall() or []
+                return _json_response(200, {
+                    "threshold": threshold,
+                    "sample": [
+                        {
+                            "amazon_order_id": r[0], "sap_doc_entry": r[1], "sap_doc_num": r[2],
+                            "purchase_date": str(r[3]) if r[3] else None,
+                            "posted_at": str(r[4]) if r[4] else None,
+                        }
+                        for r in rows
+                    ],
+                })
+
             if path.endswith("/v1/amazon/debug-pg-identity"):
                 # Which actual Postgres database this Lambda is connected to
                 # right now -- dev and prod share one RDS instance, only the
@@ -787,8 +822,10 @@ def dashboard_handler(event, context):
                 cutoff = q.get("cutoff") or constants.POSTING_CUTOFF_DATE
                 with conn.cursor() as cur:
                     cur.execute(
-                        "SELECT COUNT(*), MIN(purchase_date), MAX(purchase_date) FROM amazon_us_orders "
-                        "WHERE stage = 'posted' AND purchase_date < %s",
+                        "SELECT COUNT(*), MIN(purchase_date), MAX(purchase_date), "
+                        "MIN(posted_at), MAX(posted_at), "
+                        "COUNT(*) FILTER (WHERE posted_at >= '2026-08-12') "
+                        "FROM amazon_us_orders WHERE stage = 'posted' AND purchase_date < %s",
                         [cutoff],
                     )
                     orders_row = cur.fetchone()
@@ -804,6 +841,9 @@ def dashboard_handler(event, context):
                     "posted_orders_before_cutoff": int(orders_row[0] or 0),
                     "earliest_purchase_date_before_cutoff": str(orders_row[1]) if orders_row[1] else None,
                     "latest_purchase_date_before_cutoff": str(orders_row[2]) if orders_row[2] else None,
+                    "earliest_posted_at_before_cutoff": str(orders_row[3]) if orders_row[3] else None,
+                    "latest_posted_at_before_cutoff": str(orders_row[4]) if orders_row[4] else None,
+                    "posted_on_or_after_2026_08_12": int(orders_row[5] or 0),
                     "posted_cn_before_cutoff": int(cn_row[0] or 0),
                     "earliest_cn_order_purchase_date_before_cutoff": str(cn_row[1]) if cn_row[1] else None,
                     "latest_cn_order_purchase_date_before_cutoff": str(cn_row[2]) if cn_row[2] else None,
