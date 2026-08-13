@@ -29,6 +29,14 @@ _US_STATE_CODES = {
 }
 _VALID_STATE_CODES = set(_US_STATE_CODES.values())
 
+# ship_country values Amazon reports for US territories that are NOT "US" but
+# still have real, dedicated, non-colliding SAP Ship-To codes (confirmed live
+# against KF_INC_22012026: "Amazon USA-PR" exists). Unlike Canada ("CA") or
+# Colombia ("CO"), these can never collide with a real USPS state code, so
+# they're safe to route through normalize_us_state_code like a domestic
+# order instead of falling back to the generic non-US code.
+US_TERRITORY_COUNTRY_CODES = {"PR", "GU", "VI", "AS", "MP"}
+
 
 def normalize_us_state_code(value: str | None) -> str | None:
     """"California" / "california" / "CA" / "ca" / "N.Y." -> "CA"/"NY".

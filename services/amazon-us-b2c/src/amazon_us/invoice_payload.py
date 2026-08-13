@@ -24,7 +24,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from amazon_us import constants
-from amazon_us.state_codes import normalize_us_state_code
+from amazon_us.state_codes import US_TERRITORY_COUNTRY_CODES, normalize_us_state_code
 
 # (item_code, qty, warehouse) -> list of SAP BatchNumbers dicts
 BatchAllocator = Callable[[str, float, str], list[dict]]
@@ -191,8 +191,14 @@ def build_invoice_payload(
     # The real destination country instead rides AddressExtension below,
     # which SAP applies as a per-document override independent of
     # whatever the referenced address code's own country is.
+    #
+    # US territories (Puerto Rico, Guam, etc.) are the one exception: Amazon
+    # reports them with their own ship_country ("PR", not "US"), but they
+    # have real, dedicated, non-colliding SAP codes (confirmed live:
+    # "Amazon USA-PR") — treat them as domestic instead of routing to the
+    # generic fallback, which has no matching SAP address at all.
     country = (order.get("ship_country") or "").strip().upper()
-    is_domestic = country in ("", "US", "USA")
+    is_domestic = country in ("", "US", "USA") or country in US_TERRITORY_COUNTRY_CODES
     if is_domestic:
         state_code = normalize_us_state_code(order.get("ship_state"))
         ship_to_code = f"{constants.SAP_SHIP_TO_STATE_PREFIX}{state_code}" if state_code else constants.SAP_PAY_TO_CODE
