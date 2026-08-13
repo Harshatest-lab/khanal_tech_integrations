@@ -418,6 +418,31 @@ def post_credit_notes_handler(event, context):
                 "DocTotal": float(r[5] or 0), "DocStatus": r[6], "CardCode": r[7],
             } for r in rows}
             return {"requested": doc_entries, "found": found, "missing": [d for d in doc_entries if d not in found]}
+        if ev.get("mode") == "debug_hana_identity":
+            # Which schema/database this Lambda's HANA connection is
+            # actually pointed at right now, and a max(DocEntry) sanity
+            # check against OINV -- ground truth for whether debug_oinv_lookup
+            # is even querying the same company Service Layer talks to.
+            from khanal_shared.hana.pool import hana_connection
+            with hana_connection() as conn:
+                cur = conn.cursor()
+                cur.execute('SELECT CURRENT_SCHEMA FROM "DUMMY"')
+                schema = cur.fetchone()[0]
+                cur.execute('SELECT COUNT(*), MAX("DocEntry"), MIN("DocEntry") FROM "OINV"')
+                count, max_entry, min_entry = cur.fetchone()
+                cur.execute(
+                    'SELECT DISTINCT "CardCode" FROM "OINV" WHERE "DocEntry" > ? ORDER BY "CardCode"',
+                    [max(0, int(max_entry or 0) - 500)],
+                )
+                recent_cardcodes = [r[0] for r in (cur.fetchall() or [])]
+                cur.close()
+            return {
+                "current_schema": schema,
+                "oinv_row_count": int(count or 0),
+                "oinv_max_docentry": int(max_entry) if max_entry is not None else None,
+                "oinv_min_docentry": int(min_entry) if min_entry is not None else None,
+                "recent_cardcodes_sample": recent_cardcodes[:20],
+            }
         if ev.get("mode") == "debug_cn_amount_scan":
             """Full-month scan: every real SAP CreditNote's DocTotal (by
             exact NumAtCard = refund_id, not order-level) next to Amazon's
