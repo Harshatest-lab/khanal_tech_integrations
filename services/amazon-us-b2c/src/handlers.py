@@ -151,7 +151,15 @@ def post_invoices_handler(event, context):
         if ev.get("mode") == "debug_invoice_lines":
             from amazon_us import sap_client
             doc = sap_client.get_invoice_doc(int(ev["doc_entry"]))
-            return {"DocTotal": doc.get("DocTotal"), "DocumentLines": doc.get("DocumentLines")}
+            return {
+                "DocEntry": doc.get("DocEntry"),
+                "DocNum": doc.get("DocNum"),
+                "NumAtCard": doc.get("NumAtCard"),
+                "CancelStatus": doc.get("CancelStatus"),
+                "DocDate": doc.get("DocDate"),
+                "DocTotal": doc.get("DocTotal"),
+                "DocumentLines": doc.get("DocumentLines"),
+            }
         if ev.get("mode") == "debug_find_all_invoices":
             from amazon_us import sap_client
             return {"invoices": sap_client.find_all_invoices_by_order_debug(ev["amazon_order_id"])}
@@ -388,6 +396,28 @@ def post_credit_notes_handler(event, context):
                     for r in non_matching
                 ],
             }
+        if ev.get("mode") == "debug_oinv_lookup":
+            # Direct HANA read of OINV, bypassing Service Layer/OData entirely --
+            # isolates whether a doc_entry that 404s via Service Layer is
+            # actually missing from the database or just unreachable through
+            # the API (routing/session/entity-specific SL issue).
+            from khanal_shared.hana.pool import hana_connection
+            doc_entries = [int(d) for d in ev["doc_entries"]]
+            placeholders = ",".join("?" for _ in doc_entries)
+            with hana_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    f'SELECT "DocEntry", "DocNum", "NumAtCard", "CANCELED", "DocDate", "DocTotal", '
+                    f'"DocStatus", "CardCode" FROM "OINV" WHERE "DocEntry" IN ({placeholders})',
+                    doc_entries,
+                )
+                rows = cur.fetchall() or []
+                cur.close()
+            found = {int(r[0]): {
+                "DocNum": int(r[1]), "NumAtCard": r[2], "CANCELED": r[3], "DocDate": str(r[4]),
+                "DocTotal": float(r[5] or 0), "DocStatus": r[6], "CardCode": r[7],
+            } for r in rows}
+            return {"requested": doc_entries, "found": found, "missing": [d for d in doc_entries if d not in found]}
         if ev.get("mode") == "debug_cn_amount_scan":
             """Full-month scan: every real SAP CreditNote's DocTotal (by
             exact NumAtCard = refund_id, not order-level) next to Amazon's
