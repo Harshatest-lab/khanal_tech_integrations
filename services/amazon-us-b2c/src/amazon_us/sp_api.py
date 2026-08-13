@@ -112,6 +112,26 @@ def post(path: str, body: dict) -> requests.Response:
     return resp  # type: ignore[return-value]
 
 
+def delete(path: str) -> requests.Response:
+    """DELETE with 429 backoff and 401 token refresh."""
+    url = constants.SP_API_BASE + path
+    resp: requests.Response | None = None
+    for attempt in range(_MAX_ATTEMPTS):
+        resp = requests.delete(url, headers=_headers(), timeout=30)
+        if resp.status_code == 429:
+            wait = min(2**attempt, 64)
+            logger.warning("SP-API 429 on DELETE %s, retry in %ss", path, wait)
+            time.sleep(wait)
+            continue
+        if resp.status_code == 401:
+            get_lwa_token(force_refresh=True)
+            resp = requests.delete(url, headers=_headers(), timeout=30)
+            if resp.status_code == 401:
+                raise SpApiAuthError(f"SP-API 401 on DELETE {path} after token refresh")
+        return resp
+    return resp  # type: ignore[return-value]
+
+
 # ── Orders API ───────────────────────────────────────────────────────────
 
 def fetch_orders(created_after: str, created_before: str | None = None) -> list[dict]:
