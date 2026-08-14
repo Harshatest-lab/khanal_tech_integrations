@@ -37,6 +37,33 @@ class SapPostError(Exception):
     """SAP B1 rejected a document. Message carries SAP's error text."""
 
 
+# SAP error -5002, "One of the base documents has already been closed":
+# confirmed for real 2026-08-14 on 2 stuck CN amendments (orders
+# 112-2529340-1576227, 113-3540322-6622669) -- NOT a remaining-open-quantity
+# problem. Both invoices' own GET response shows the base line still fully
+# open (RemainingOpenQuantity == original qty, LineStatus bost_Open) even
+# though a live, uncancelled CN is already BaseType/BaseEntry/BaseLine-linked
+# to it. Both invoice lines carry BaseType=-1 (created standalone via our
+# SP-API pipeline, not through a real Order->Delivery chain) -- SAP's
+# multi-partial-consumption bookkeeping only applies to lines that came from
+# such a chain. A standalone line accepts exactly ONE linked reversing
+# document, ever; the first CN posted against it permanently exhausts its
+# linkability regardless of quantity, and RemainingOpenQuantity never
+# reflects that because it isn't the field SAP checks. So this is not
+# "not enough left to cover the top-up" (retrying with a smaller/different
+# quantity would still fail) -- it is "this line can never accept a second
+# linked document," full stop. Distinct from every other SapPostError
+# (network blips, throttling, real rejected payloads), which ARE worth
+# retrying.
+_BASE_DOCUMENT_CLOSED_MARKER = "already been closed"
+
+
+def is_base_document_closed(exc: Exception) -> bool:
+    """True if `exc` is a SapPostError caused by SAP -5002 base-document-line
+    closure -- i.e. permanently unrecoverable, not worth retrying."""
+    return isinstance(exc, SapPostError) and _BASE_DOCUMENT_CLOSED_MARKER in str(exc)
+
+
 class SapLookupError(Exception):
     """A duplicate-guard or document lookup failed. NEVER treat as 'not found'."""
 

@@ -45,9 +45,15 @@ def post_refunds(conn, posted_after: str, posted_before: str | None = None, dry_
             except Exception as e:
                 counts["failed"] += 1
                 if not dry_run:
+                    # SAP -5002 "base document already closed" is not a
+                    # transient rejection worth retrying (see
+                    # sap_client.is_base_document_closed) -- 'failed_permanent'
+                    # is excluded from claim_cn's reclaim, so this stops
+                    # retrying every schedule run instead of failing forever.
+                    status = "failed_permanent" if sap_client.is_base_document_closed(e) else "failed"
                     store.upsert_cn_log(
                         conn, event.refund_id, event.amazon_order_id, event.posted_date,
-                        "failed", error=str(e),
+                        status, error=str(e),
                     )
                 logger.error("FAIL %s: %s", event.refund_id, e)
 
@@ -158,7 +164,20 @@ def _process_amendment(conn, event: finances_api.RefundEvent, mapping: dict[str,
     logger.info("AMEND-CHECK %s: %s posted_docs found: %s", rid, len(posted_docs), [d.get("NumAtCard") for d in posted_docs])
 
     already_tax = already_shipping = 0.0
-    already_qty_by_item: dict[str, float] = {}
+    # Keyed by UnitPrice, not ItemCode -- confirmed for real 2026-08-14 on
+    # orders 112-2529340-1576227 and 113-3540322-6622669: both SKUs'
+    # seller_sku -> SAP item_code mapping drifted after the base CN posted
+    # (Denties_S_C_L: FGDC00009 -> FGDC00005; DC_REFL_140G_FBA: FGDC0423 ->
+    # FGDC0316). Keying this draw-down by item_code meant it could never
+    # match a since-remapped SKU's current item_code, so the full
+    # already-credited amount looked "new" every run -- the resulting
+    # phantom top-up then failed at SAP with -5002 "base document already
+    # closed" (the invoice line really was already fully reversed; our own
+    # math just couldn't see it). UnitPrice comes from the order's own
+    # historical data and doesn't drift the way a live SKU mapping does --
+    # same fallback-by-price identity _pop_line_by_price_fallback below
+    # already relies on for this exact remap scenario.
+    already_qty_by_price: dict[float, float] = {}
     for doc in posted_docs:
         for line in doc.get("DocumentLines") or []:
             code = line.get("ItemCode")
@@ -167,10 +186,11 @@ def _process_amendment(conn, event: finances_api.RefundEvent, mapping: dict[str,
             elif code == constants.SAP_SHIPPING_ITEM_CODE:
                 already_shipping += float(line.get("UnitPrice") or 0)
             else:
-                already_qty_by_item[code] = already_qty_by_item.get(code, 0.0) + float(line.get("Quantity") or 0)
+                price_key = round(float(line.get("UnitPrice") or 0), 2)
+                already_qty_by_price[price_key] = already_qty_by_price.get(price_key, 0.0) + float(line.get("Quantity") or 0)
     logger.info(
-        "AMEND-CHECK %s: already_tax=%s already_shipping=%s already_qty_by_item=%s",
-        rid, already_tax, already_shipping, already_qty_by_item,
+        "AMEND-CHECK %s: already_tax=%s already_shipping=%s already_qty_by_price=%s",
+        rid, already_tax, already_shipping, already_qty_by_price,
     )
 
     # base_doc_entry comes from the ALREADY-POSTED CN's own BaseEntry, not
@@ -212,7 +232,7 @@ def _process_amendment(conn, event: finances_api.RefundEvent, mapping: dict[str,
     payload, line_skips = build_credit_note_payload(
         order, event, mapping, base_doc_entry, invoice.get("DocumentLines") or [], resolve_acct_code,
         get_bom_children,
-        already_posted={"tax": already_tax, "shipping": already_shipping, "qty_by_item": already_qty_by_item},
+        already_posted={"tax": already_tax, "shipping": already_shipping, "qty_by_price": already_qty_by_price},
     )
     if payload is None:
         logger.info("AMEND-SKIP %s: build_credit_note_payload returned None, line_skips=%s", rid, line_skips)
@@ -239,7 +259,38 @@ def _process_amendment(conn, event: finances_api.RefundEvent, mapping: dict[str,
         )
         return "skipped"
 
-    result = sap_client.post_credit_note(payload)
+    try:
+        result = sap_client.post_credit_note(payload)
+    except Exception as e:
+        # claim_cn above already moved amend_rid's own row to 'posting' --
+        # the caller's generic except block logs failures against
+        # event.refund_id (the BASE rid), a different row that's usually
+        # already 'posted', so it never touches this one. Left as-is,
+        # amend_rid stays stuck at 'posting' forever: nothing ever revisits
+        # it (a later retry recomputes the same amend_rid only while this
+        # top-up is still owed, but build_credit_note_payload may start
+        # returning None for it -- e.g. once a rounding-dust fix lands --
+        # which returns "skipped" above without ever reaching claim_cn
+        # again). Confirmed for real 2026-08-14: 3 rows orphaned this way,
+        # one from the exact dust-fix scenario just described. Record the
+        # failure against the row that's actually claimed.
+        #
+        # SAP -5002 "base document already closed" here means the invoice
+        # line this top-up would link to already has ONE live linked CN on
+        # it (confirmed for real 2026-08-14, orders 112-2529340-1576227 and
+        # 113-3540322-6622669 -- see sap_client.is_base_document_closed) --
+        # a standalone (non-Order-chain) invoice line accepts exactly one
+        # linked reversal, ever. No recomputed quantity will ever change
+        # that, so mark it 'failed_permanent' instead of 'failed' -- claim_cn
+        # excludes that status from reclaim, so this stops retrying every
+        # 6h run instead of failing identically forever.
+        status = "failed_permanent" if sap_client.is_base_document_closed(e) else "failed"
+        store.upsert_cn_log(
+            conn, amend_rid, event.amazon_order_id, event.posted_date, status, error=str(e),
+        )
+        logger.error("FAIL top-up %s -> %s: %s", rid, amend_rid, e)
+        return "failed"
+
     store.upsert_cn_log(
         conn, amend_rid, event.amazon_order_id, event.posted_date, "posted",
         doc_entry=result["doc_entry"], doc_num=result["doc_num"],

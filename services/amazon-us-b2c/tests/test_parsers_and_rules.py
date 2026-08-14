@@ -81,6 +81,80 @@ def test_posted_before_clamped_to_five_minutes_ago():
     assert clamp_posted_before(past) == past
 
 
+class _FakeResponse:
+    def __init__(self, status_code, payload=None, text=""):
+        self.status_code = status_code
+        self._payload = payload or {}
+        self.text = text
+
+    def json(self):
+        return {"payload": self._payload}
+
+
+def _refund_page(order_id, next_token=None):
+    return {
+        "FinancialEvents": {
+            "RefundEventList": [
+                {
+                    "AmazonOrderId": order_id,
+                    "PostedDate": "2026-07-01T10:00:00Z",
+                    "ShipmentItemAdjustmentList": [
+                        {
+                            "SellerSKU": "SKU-A",
+                            "ItemChargeAdjustmentList": [
+                                {"ChargeType": "Principal", "ChargeAmount": {"CurrencyAmount": -10.0}},
+                            ],
+                        }
+                    ],
+                }
+            ]
+        },
+        "NextToken": next_token,
+    }
+
+
+def test_list_refund_events_retries_transient_page_failure_then_succeeds(monkeypatch):
+    # Real 2026-08-14 bug: a mid-pagination page 400'd once with an empty
+    # reason phrase and killed the whole fetch, discarding every refund
+    # already collected. A single retry should recover transparently.
+    import amazon_us.finances_api as finances_api
+
+    calls = {"n": 0}
+
+    def fake_get(path, params):
+        calls["n"] += 1
+        if "NextToken" in params:
+            if calls["n"] == 2:
+                return _FakeResponse(400, text="")
+            return _FakeResponse(200, _refund_page("222-2-2"))
+        return _FakeResponse(200, _refund_page("111-1-1", next_token="tok1"))
+
+    monkeypatch.setattr(finances_api.sp_api, "get", fake_get)
+    monkeypatch.setattr(finances_api.time, "sleep", lambda _: None)
+
+    events = finances_api.list_refund_events("2026-07-01T00:00:00Z")
+    assert [e.amazon_order_id for e in events] == ["111-1-1", "222-2-2"]
+
+
+def test_list_refund_events_returns_partial_results_when_page_permanently_fails(monkeypatch):
+    # If a page keeps 400ing across every retry, don't raise and lose the
+    # events already collected from earlier pages -- post_refunds is
+    # idempotent by refund_id, so returning the partial list lets the
+    # caller post what it found instead of the whole run dying.
+    import amazon_us.finances_api as finances_api
+
+    def fake_get(path, params):
+        if "NextToken" in params:
+            return _FakeResponse(400, text='{"errors": [{"message": "stale token"}]}')
+        return _FakeResponse(200, _refund_page("111-1-1", next_token="tok1"))
+
+    monkeypatch.setattr(finances_api.sp_api, "get", fake_get)
+    monkeypatch.setattr(finances_api.time, "sleep", lambda _: None)
+
+    events = finances_api.list_refund_events("2026-07-01T00:00:00Z")
+    assert [e.amazon_order_id for e in events] == ["111-1-1"]
+
+
 # ── Orders flat-file report ──────────────────────────────────────────────
 
 _REPORT = (
