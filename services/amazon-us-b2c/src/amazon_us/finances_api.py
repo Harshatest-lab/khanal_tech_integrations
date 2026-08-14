@@ -19,10 +19,14 @@ monthly MTR reconciliation is the safety net that catches those.
 
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from amazon_us import sp_api
+
+logger = logging.getLogger(__name__)
 
 _FINANCES_BASE = "/finances/v0"
 
@@ -69,6 +73,7 @@ def list_refund_events(posted_after: str, posted_before: str | None = None) -> l
 
     events: list[RefundEvent] = []
     next_token = None
+    _PAGE_RETRY_ATTEMPTS = 3
 
     while True:
         if next_token:
@@ -78,8 +83,40 @@ def list_refund_events(posted_after: str, posted_before: str | None = None) -> l
             if posted_before:
                 params["PostedBefore"] = posted_before
 
-        resp = sp_api.get(f"{_FINANCES_BASE}/financialEvents", params)
-        resp.raise_for_status()
+        # financialEvents returns EVERY event type (fees, shipments,
+        # adjustments, not just refunds), so a wide/open-ended window can
+        # mean hundreds of pages just to surface a handful of refunds.
+        # Confirmed for real 2026-08-14: a page mid-pagination 400'd with
+        # an empty reason phrase (likely the NextToken going stale from
+        # SP-API rate-limit backoff time accumulating between pages, sp_api
+        # itself only retries 429/ConnectionError, not 400) -- that raised
+        # straight out of this function, discarding every refund event
+        # already collected from earlier pages and forcing a full re-scan
+        # from posted_after on the caller's next attempt (which then hit
+        # the exact same wall again -- 3 consecutive failed runs before
+        # this was root-caused). Retry a failing page a few times with
+        # backoff, and if it still won't recover, return what was already
+        # collected instead of losing it -- post_refunds is idempotent by
+        # refund_id, so a partial page just means the remainder gets
+        # picked up on the next run rather than the whole run dying.
+        resp = None
+        for attempt in range(_PAGE_RETRY_ATTEMPTS):
+            resp = sp_api.get(f"{_FINANCES_BASE}/financialEvents", params)
+            if resp.status_code < 400:
+                break
+            logger.warning(
+                "financialEvents page failed (attempt %s/%s): HTTP %s: %s",
+                attempt + 1, _PAGE_RETRY_ATTEMPTS, resp.status_code, resp.text[:500],
+            )
+            if attempt + 1 < _PAGE_RETRY_ATTEMPTS:
+                time.sleep(2**attempt)
+        if resp.status_code >= 400:
+            logger.error(
+                "financialEvents page permanently failed after %s attempts, returning %s events collected so far",
+                _PAGE_RETRY_ATTEMPTS, len(events),
+            )
+            return events
+
         payload = resp.json().get("payload", {})
         financial_events = payload.get("FinancialEvents", {})
 
