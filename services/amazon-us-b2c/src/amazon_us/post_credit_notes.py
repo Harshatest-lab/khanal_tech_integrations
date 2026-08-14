@@ -45,9 +45,15 @@ def post_refunds(conn, posted_after: str, posted_before: str | None = None, dry_
             except Exception as e:
                 counts["failed"] += 1
                 if not dry_run:
+                    # SAP -5002 "base document already closed" is not a
+                    # transient rejection worth retrying (see
+                    # sap_client.is_base_document_closed) -- 'failed_permanent'
+                    # is excluded from claim_cn's reclaim, so this stops
+                    # retrying every schedule run instead of failing forever.
+                    status = "failed_permanent" if sap_client.is_base_document_closed(e) else "failed"
                     store.upsert_cn_log(
                         conn, event.refund_id, event.amazon_order_id, event.posted_date,
-                        "failed", error=str(e),
+                        status, error=str(e),
                     )
                 logger.error("FAIL %s: %s", event.refund_id, e)
 
@@ -254,8 +260,19 @@ def _process_amendment(conn, event: finances_api.RefundEvent, mapping: dict[str,
         # again). Confirmed for real 2026-08-14: 3 rows orphaned this way,
         # one from the exact dust-fix scenario just described. Record the
         # failure against the row that's actually claimed.
+        #
+        # SAP -5002 "base document already closed" here means the invoice
+        # line this top-up would link to already has ONE live linked CN on
+        # it (confirmed for real 2026-08-14, orders 112-2529340-1576227 and
+        # 113-3540322-6622669 -- see sap_client.is_base_document_closed) --
+        # a standalone (non-Order-chain) invoice line accepts exactly one
+        # linked reversal, ever. No recomputed quantity will ever change
+        # that, so mark it 'failed_permanent' instead of 'failed' -- claim_cn
+        # excludes that status from reclaim, so this stops retrying every
+        # 6h run instead of failing identically forever.
+        status = "failed_permanent" if sap_client.is_base_document_closed(e) else "failed"
         store.upsert_cn_log(
-            conn, amend_rid, event.amazon_order_id, event.posted_date, "failed", error=str(e),
+            conn, amend_rid, event.amazon_order_id, event.posted_date, status, error=str(e),
         )
         logger.error("FAIL top-up %s -> %s: %s", rid, amend_rid, e)
         return "failed"

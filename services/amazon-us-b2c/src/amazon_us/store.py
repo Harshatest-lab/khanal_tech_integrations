@@ -372,10 +372,14 @@ def get_cn_log(conn: psycopg.Connection, refund_id: str) -> dict | None:
 
 def claim_cn(conn: psycopg.Connection, refund_id: str, amazon_order_id: str, posted_date: str | None) -> bool:
     """Atomically claim a refund event for posting (marks it 'posting').
-    False means it's already posted, or another run claimed it <30min ago —
-    the caller must not post in either case. A stale 'posting' claim (crashed
-    worker) is reclaimable after 30 minutes, same threshold as the order
-    stage's stuck-posting invariant."""
+    False means it's already posted, permanently failed, or another run
+    claimed it <30min ago -- the caller must not post in any of those
+    cases. 'failed_permanent' (SAP says the base document line is
+    structurally closed -- see sap_client.is_base_document_closed) is
+    excluded from reclaim on purpose: unlike a plain 'failed' (worth
+    retrying next run), retrying this never succeeds. A stale 'posting'
+    claim (crashed worker) is reclaimable after 30 minutes, same threshold
+    as the order stage's stuck-posting invariant."""
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -385,7 +389,7 @@ def claim_cn(conn: psycopg.Connection, refund_id: str, amazon_order_id: str, pos
               status = 'posting',
               attempt_count = amazon_us_cn_log.attempt_count + 1,
               updated_at = now()
-            WHERE amazon_us_cn_log.status != 'posted'
+            WHERE amazon_us_cn_log.status NOT IN ('posted', 'failed_permanent')
               AND (amazon_us_cn_log.status != 'posting'
                    OR amazon_us_cn_log.updated_at < now() - interval '30 minutes')
             """,

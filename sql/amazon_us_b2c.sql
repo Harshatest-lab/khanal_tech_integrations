@@ -97,7 +97,7 @@ CREATE TABLE IF NOT EXISTS amazon_us_cn_log (
   refund_id       text        PRIMARY KEY,
   amazon_order_id text        NOT NULL,
   posted_date     date,
-  status          text        NOT NULL,   -- posted | skipped | failed
+  status          text        NOT NULL,   -- posted | skipped | failed | failed_permanent
   skip_reason     text,
   sap_doc_entry   integer,
   sap_doc_num     integer,

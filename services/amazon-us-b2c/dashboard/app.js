@@ -266,7 +266,7 @@ function stageBadge(stage) {
 }
 
 function cnStatusBadge(status) {
-  const map = { posting: "badge-running", posted: "badge-success", skipped: "badge-acknowledged", failed: "badge-failed" };
+  const map = { posting: "badge-running", posted: "badge-success", skipped: "badge-acknowledged", failed: "badge-failed", failed_permanent: "badge-failed" };
   const cls = map[status] || "badge-default";
   return `<span class="badge ${cls}">${escapeHtml(status || "—")}</span>`;
 }
@@ -434,7 +434,7 @@ async function loadStats() {
   const ready = byStage.ready || 0;
   const fetched = byStage.fetched || 0;
   const cnPosted = stats.cn_by_status?.posted || 0;
-  const cnFailed = stats.cn_by_status?.failed || 0;
+  const cnFailed = (stats.cn_by_status?.failed || 0) + (stats.cn_by_status?.failed_permanent || 0);
   chips.innerHTML = `
     <span class="stat-chip">${escapeHtml(String(stats.total_orders ?? 0))} orders</span>
     <span class="stat-chip stat-chip--success">${escapeHtml(String(posted))} posted</span>
