@@ -214,13 +214,13 @@ functions:
       # dozens of orders per run — the per-order item calls are fine.
       - schedule:
           rate: cron(10 * * * ? *)
-          enabled: false
+          enabled: true
           input: { mode: incremental }
       # Daily bulk report with MTR lookback: self-heals anything the
       # incremental path missed. 20:15 UTC = 01:45 IST.
       - schedule:
           rate: cron(15 20 * * ? *)
-          enabled: false
+          enabled: true
           input: { mode: report }
 
   amazonFbaShipSync:
@@ -230,7 +230,7 @@ functions:
       # Daily, before invoice posting. 20:45 UTC = 02:15 IST.
       - schedule:
           rate: cron(45 20 * * ? *)
-          enabled: false
+          enabled: true
 
   amazonPostInvoices:
     handler: src.handlers.post_invoices_handler
@@ -240,11 +240,11 @@ functions:
       # orders (~4 min at SAP's ~57 docs/min ceiling).
       - schedule:
           rate: cron(30 21-23,0-14 * * ? *)
-          enabled: false
+          enabled: true
       # Daily retry safety net for transient failures (stock races).
       - schedule:
           rate: cron(0 3 * * ? *)
-          enabled: false
+          enabled: true
           input: { mode: retry }
 
   amazonPostCreditNotes:
@@ -255,7 +255,7 @@ functions:
       # and the duplicate guards make re-processing free.
       - schedule:
           rate: rate(6 hours)
-          enabled: false
+          enabled: true
 
   amazonRecon:
     handler: src.handlers.recon_handler
@@ -264,7 +264,7 @@ functions:
       # Daily invariants after the posting window. 15:30 UTC = 21:00 IST.
       - schedule:
           rate: cron(30 15 * * ? *)
-          enabled: false
+          enabled: true
           input: { mode: invariants }
 
   amazonDashboardApi:
