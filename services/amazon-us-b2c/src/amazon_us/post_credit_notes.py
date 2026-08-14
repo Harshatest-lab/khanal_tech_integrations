@@ -164,7 +164,20 @@ def _process_amendment(conn, event: finances_api.RefundEvent, mapping: dict[str,
     logger.info("AMEND-CHECK %s: %s posted_docs found: %s", rid, len(posted_docs), [d.get("NumAtCard") for d in posted_docs])
 
     already_tax = already_shipping = 0.0
-    already_qty_by_item: dict[str, float] = {}
+    # Keyed by UnitPrice, not ItemCode -- confirmed for real 2026-08-14 on
+    # orders 112-2529340-1576227 and 113-3540322-6622669: both SKUs'
+    # seller_sku -> SAP item_code mapping drifted after the base CN posted
+    # (Denties_S_C_L: FGDC00009 -> FGDC00005; DC_REFL_140G_FBA: FGDC0423 ->
+    # FGDC0316). Keying this draw-down by item_code meant it could never
+    # match a since-remapped SKU's current item_code, so the full
+    # already-credited amount looked "new" every run -- the resulting
+    # phantom top-up then failed at SAP with -5002 "base document already
+    # closed" (the invoice line really was already fully reversed; our own
+    # math just couldn't see it). UnitPrice comes from the order's own
+    # historical data and doesn't drift the way a live SKU mapping does --
+    # same fallback-by-price identity _pop_line_by_price_fallback below
+    # already relies on for this exact remap scenario.
+    already_qty_by_price: dict[float, float] = {}
     for doc in posted_docs:
         for line in doc.get("DocumentLines") or []:
             code = line.get("ItemCode")
@@ -173,10 +186,11 @@ def _process_amendment(conn, event: finances_api.RefundEvent, mapping: dict[str,
             elif code == constants.SAP_SHIPPING_ITEM_CODE:
                 already_shipping += float(line.get("UnitPrice") or 0)
             else:
-                already_qty_by_item[code] = already_qty_by_item.get(code, 0.0) + float(line.get("Quantity") or 0)
+                price_key = round(float(line.get("UnitPrice") or 0), 2)
+                already_qty_by_price[price_key] = already_qty_by_price.get(price_key, 0.0) + float(line.get("Quantity") or 0)
     logger.info(
-        "AMEND-CHECK %s: already_tax=%s already_shipping=%s already_qty_by_item=%s",
-        rid, already_tax, already_shipping, already_qty_by_item,
+        "AMEND-CHECK %s: already_tax=%s already_shipping=%s already_qty_by_price=%s",
+        rid, already_tax, already_shipping, already_qty_by_price,
     )
 
     # base_doc_entry comes from the ALREADY-POSTED CN's own BaseEntry, not
@@ -218,7 +232,7 @@ def _process_amendment(conn, event: finances_api.RefundEvent, mapping: dict[str,
     payload, line_skips = build_credit_note_payload(
         order, event, mapping, base_doc_entry, invoice.get("DocumentLines") or [], resolve_acct_code,
         get_bom_children,
-        already_posted={"tax": already_tax, "shipping": already_shipping, "qty_by_item": already_qty_by_item},
+        already_posted={"tax": already_tax, "shipping": already_shipping, "qty_by_price": already_qty_by_price},
     )
     if payload is None:
         logger.info("AMEND-SKIP %s: build_credit_note_payload returned None, line_skips=%s", rid, line_skips)

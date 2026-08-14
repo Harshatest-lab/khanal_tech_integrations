@@ -51,13 +51,20 @@ def build_credit_note_payload(
     """Returns (payload, skipped). payload is None when nothing is
     postable (every adjustment unmatched).
 
-    already_posted: {"tax": float, "shipping": float, "qty_by_item": {item_code: qty}}
+    already_posted: {"tax": float, "shipping": float, "qty_by_price": {unit_price: qty}}
     — what a PRIOR CN already posted for this same refund_id, when Amazon
     has grown the event's item_adjustments since (see
     sap_client.find_credit_notes_by_ref_prefix). Every quantity/amount
-    below is reduced by it, so only the newly-added remainder gets built."""
+    below is reduced by it, so only the newly-added remainder gets built.
+    Keyed by UnitPrice, not item_code -- confirmed for real 2026-08-14: a
+    seller_sku's SAP item_code mapping can drift after the base CN posted
+    (item_mapping reflects TODAY's mapping, but already_posted reflects
+    whatever item_code was actually on SAP at post time), so item_code
+    keying can silently never match and treat a fully-covered order as
+    unclaimed. UnitPrice comes from the order's own historical data and
+    doesn't drift the way a live SKU mapping does."""
     already_posted = already_posted or {}
-    already_qty_by_item: dict[str, float] = already_posted.get("qty_by_item") or {}
+    already_qty_by_price: dict[float, float] = already_posted.get("qty_by_price") or {}
     already_tax = float(already_posted.get("tax") or 0.0)
     already_shipping = float(already_posted.get("shipping") or 0.0)
 
@@ -93,7 +100,8 @@ def build_credit_note_payload(
             continue
 
         qty = round(abs(adj.principal_amount) / unit_price, 6)
-        if item_code in already_qty_by_item:
+        price_key = round(unit_price, 2)
+        if price_key in already_qty_by_price:
             # A pool to DRAW DOWN, not a flat per-line subtraction -- an
             # event can carry multiple item_adjustments for the same
             # item_code (2 separate refunded units posted as 2 lines, not
@@ -101,10 +109,10 @@ def build_credit_note_payload(
             # the same already-posted amount from every adjustment for
             # that code would zero out ALL of them instead of just the
             # ones it actually covers.
-            already = already_qty_by_item[item_code]
+            already = already_qty_by_price[price_key]
             consume = min(qty, already)
             qty = round(qty - consume, 6)
-            already_qty_by_item[item_code] = round(already - consume, 6)
+            already_qty_by_price[price_key] = round(already - consume, 6)
         if qty < _MIN_POSTABLE_QTY:
             # Refund amount for this line rounds to zero units at the
             # order's unit price (e.g. a $0.00 principal adjustment, or one

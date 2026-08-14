@@ -203,7 +203,7 @@ def test_amendment_only_reverses_the_new_remainder():
     # (confirmed for real 2026-08-12, same refund_id throughout). The
     # payload must carry only the newly-added unit and its tax delta —
     # shipping is already fully covered, so no shipping line at all.
-    already_posted = {"tax": 0.59 + 0.25, "shipping": 3.99, "qty_by_item": {"FGDC0001": 1.0}}
+    already_posted = {"tax": 0.59 + 0.25, "shipping": 3.99, "qty_by_price": {round(13.495, 2): 1.0}}
     event = _event(principal_amount=-26.99, tax_amount=-1.18)  # 2 units now, not 1
     payload, skipped = build_credit_note_payload(
         _order(), event, MAPPING, 4242, INVOICE_LINES, _resolve, _no_bom,
@@ -225,7 +225,7 @@ def test_amendment_pool_is_consumed_not_reapplied_to_every_adjustment():
     # qty-2 line). Only 1 unit was already covered by the prior CN --
     # subtracting that from EVERY adjustment (instead of draining it as a
     # pool) zeroed out both and silently lost the real second-unit delta.
-    already_posted = {"tax": 0.0, "shipping": 0.0, "qty_by_item": {"FGDC0001": 1.0}}
+    already_posted = {"tax": 0.0, "shipping": 0.0, "qty_by_price": {round(13.495, 2): 1.0}}
     two_invoice_lines = [
         {"LineNum": 0, "ItemCode": "FGDC0001"},
         {"LineNum": 1, "ItemCode": "FGDC0001"},
@@ -252,7 +252,7 @@ def test_amendment_pool_is_consumed_not_reapplied_to_every_adjustment():
 def test_amendment_fully_covered_by_prior_cn_yields_no_payload():
     # Prior CN already reversed everything this event now reports -- pure
     # rounding dust, not a real amendment. Must not manufacture a $0 CN.
-    already_posted = {"tax": 0.59 + 0.25, "shipping": 3.99, "qty_by_item": {"FGDC0001": 1.0}}
+    already_posted = {"tax": 0.59 + 0.25, "shipping": 3.99, "qty_by_price": {round(13.495, 2): 1.0}}
     payload, skipped = build_credit_note_payload(
         _order(), _event(), MAPPING, 4242, INVOICE_LINES, _resolve, _no_bom,
         already_posted=already_posted,
@@ -268,12 +268,32 @@ def test_amendment_precision_dust_below_sap_storage_is_not_posted():
     # remainder that is pure rounding dust, not a real top-up. Before the
     # fix this slipped past a bare `qty <= 0` check and SAP rejected the
     # whole document with "Quantity cannot be zero".
-    already_posted = {"tax": 0.0, "shipping": 0.0, "qty_by_item": {"FGDC0001": 0.999}}
+    already_posted = {"tax": 0.0, "shipping": 0.0, "qty_by_price": {round(13.65, 2): 0.999}}
     order = _order()
     order["lines"] = [{"seller_sku": "SKU-A", "quantity": 1, "unit_price": 13.65}]
     event = _event(principal_amount=-13.64, tax_amount=0, shipping_amount=0, shipping_tax_amount=0)
     payload, skipped = build_credit_note_payload(
         order, event, MAPPING, 4242, INVOICE_LINES, _resolve, _no_bom,
+        already_posted=already_posted,
+    )
+    assert payload is None
+
+
+def test_amendment_survives_sku_mapping_drift_after_base_cn_posted():
+    # Real 2026-08-14 bug (orders 112-2529340-1576227, 113-3540322-6622669):
+    # a seller_sku's SAP item_code mapping can change after the base CN
+    # posts (e.g. Denties_S_C_L: FGDC00009 at post time -> FGDC00005 today).
+    # The draw-down used to be keyed by item_code, so it looked up TODAY's
+    # (drifted) code in a pool keyed by the code that was actually posted --
+    # never matched, so a fully-already-credited single-unit order looked
+    # unclaimed and rebuilt the whole original line as a bogus "amendment",
+    # which SAP then rejected with -5002 "base document already closed"
+    # (the line really was already fully reversed). Keying by UnitPrice
+    # (stable, from the order's own historical data) instead of item_code
+    # (drifts with the live mapping) must still net this to zero.
+    already_posted = {"tax": 0.59 + 0.25, "shipping": 3.99, "qty_by_price": {round(13.495, 2): 1.0}}
+    payload, skipped = build_credit_note_payload(
+        _order(), _event(), {"SKU-A": "FGDC0099"}, 4242, INVOICE_LINES, _resolve, _no_bom,
         already_posted=already_posted,
     )
     assert payload is None
