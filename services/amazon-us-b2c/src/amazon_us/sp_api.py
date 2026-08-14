@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 _PAGE_SIZE = 100
 _LWA_BUFFER_SEC = 60
 _MAX_ATTEMPTS = 20
+_LWA_MAX_ATTEMPTS = 4
 
 
 class SpApiAuthError(Exception):
@@ -32,26 +33,47 @@ _token_expires_at: float = 0.0
 
 
 def get_lwa_token(force_refresh: bool = False) -> str:
+    """Fetch (or reuse the cached) LWA access token.
+
+    Retries transient failures from Amazon's OAuth endpoint itself
+    (connection errors, 5xx, occasional bare 401s) a few times with
+    backoff -- this call sits ahead of every SP-API request's own
+    retry loop, so without a retry here a single momentary hiccup on
+    api.amazon.com kills the whole Lambda invocation instead of just
+    this one token fetch."""
     global _token, _token_expires_at
     if not force_refresh and _token and time.time() < _token_expires_at:
         return _token
 
     lwa = get_lwa_credentials()
-    resp = requests.post(
-        constants.LWA_TOKEN_URL,
-        data={
-            "grant_type": "refresh_token",
-            "refresh_token": lwa.refresh_token,
-            "client_id": lwa.client_id,
-            "client_secret": lwa.client_secret,
-        },
-        timeout=15,
-    )
-    resp.raise_for_status()
-    body = resp.json()
-    _token = body["access_token"]
-    _token_expires_at = time.time() + max(60, int(body.get("expires_in", 3600)) - _LWA_BUFFER_SEC)
-    return _token
+    for attempt in range(_LWA_MAX_ATTEMPTS):
+        try:
+            resp = requests.post(
+                constants.LWA_TOKEN_URL,
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": lwa.refresh_token,
+                    "client_id": lwa.client_id,
+                    "client_secret": lwa.client_secret,
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.HTTPError) as exc:
+            if attempt == _LWA_MAX_ATTEMPTS - 1:
+                raise
+            wait = min(2**attempt, 8)
+            logger.warning(
+                "LWA token refresh failed, retry in %ss (attempt %s/%s): %s",
+                wait, attempt + 1, _LWA_MAX_ATTEMPTS, exc,
+            )
+            time.sleep(wait)
+            continue
+
+        body = resp.json()
+        _token = body["access_token"]
+        _token_expires_at = time.time() + max(60, int(body.get("expires_in", 3600)) - _LWA_BUFFER_SEC)
+        return _token
 
 
 def _headers() -> dict:
