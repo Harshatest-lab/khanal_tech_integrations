@@ -29,6 +29,14 @@ from amazon_us.state_codes import US_TERRITORY_COUNTRY_CODES, normalize_us_state
 
 AcctResolver = Callable[[str], str]
 
+# SAP stores Quantity at 3 decimals; our own draw-down math runs at 6. A
+# remainder below SAP's own precision floor is rounding dust, not a real
+# top-up amount -- posting it makes SAP reject the whole document with
+# "Quantity cannot be zero" (confirmed for real 2026-08-14, order
+# 113-3926758-2793850: computed 0.999267 against a stored 0.999, leaving
+# a dust remainder of 0.000267).
+_MIN_POSTABLE_QTY = 0.001
+
 
 def build_credit_note_payload(
     order: dict[str, Any],
@@ -97,7 +105,7 @@ def build_credit_note_payload(
             consume = min(qty, already)
             qty = round(qty - consume, 6)
             already_qty_by_item[item_code] = round(already - consume, 6)
-        if qty <= 0:
+        if qty < _MIN_POSTABLE_QTY:
             # Refund amount for this line rounds to zero units at the
             # order's unit price (e.g. a $0.00 principal adjustment, or one
             # far smaller than a single unit) — nothing to reverse on the
@@ -105,10 +113,20 @@ def build_credit_note_payload(
             # accumulated regardless. Log it instead of silently vanishing
             # (this is exactly what looked like an unexplained "no
             # postable lines: []" skip to Finance on 2026-08-11).
+            #
+            # The already_posted draw-down above can also leave pure
+            # rounding dust here rather than a true zero: SAP stores
+            # Quantity at 3 decimals, but qty is computed fresh at 6, so a
+            # remainder like 0.000267 (confirmed for real 2026-08-14, order
+            # 113-3926758-2793850) is the precision gap between "0.999267
+            # computed now" and "0.999 as SAP actually stored it", not a
+            # genuine top-up. SAP itself then rejects that as a zero
+            # quantity, so treat anything under SAP's own precision floor
+            # the same as an exact zero rather than let it reach SAP.
             skipped.append(
                 {
                     "seller_sku": adj.seller_sku,
-                    "reason": f"Refund amount ({adj.principal_amount}) rounds to zero qty at unit price {unit_price}",
+                    "reason": f"Refund amount ({adj.principal_amount}) rounds to <{_MIN_POSTABLE_QTY} qty at unit price {unit_price}",
                 }
             )
             continue
@@ -168,7 +186,7 @@ def build_credit_note_payload(
                     )
                     continue
                 child_qty = round(float(child_invoice_line.get("Quantity") or 0) * scale, 6)
-                if child_qty <= 0:
+                if child_qty < _MIN_POSTABLE_QTY:
                     continue
                 doc_lines.append(
                     {

@@ -128,7 +128,7 @@ def test_zero_qty_refund_is_skipped_with_a_reason_not_silently_dropped():
     assert payload is None
     assert len(skipped) == 1
     assert skipped[0]["seller_sku"] == "SKU-A"
-    assert "rounds to zero qty" in skipped[0]["reason"]
+    assert "rounds to <" in skipped[0]["reason"]
 
 
 def test_ship_to_code_matches_order_state():
@@ -258,6 +258,27 @@ def test_amendment_fully_covered_by_prior_cn_yields_no_payload():
         already_posted=already_posted,
     )
     assert payload is None
+
+
+def test_amendment_precision_dust_below_sap_storage_is_not_posted():
+    # Real 2026-08-14 bug (order 113-3926758-2793850): SAP stores Quantity
+    # at 3 decimals, so a prior CN's line comes back as 0.999, but our own
+    # draw-down math runs at 6 decimals -- 13.64 / 13.65 = 0.999267, not
+    # 0.999. Subtracting the "already posted" 0.999 leaves a 0.000267
+    # remainder that is pure rounding dust, not a real top-up. Before the
+    # fix this slipped past a bare `qty <= 0` check and SAP rejected the
+    # whole document with "Quantity cannot be zero".
+    already_posted = {"tax": 0.0, "shipping": 0.0, "qty_by_item": {"FGDC0001": 0.999}}
+    order = _order()
+    order["lines"] = [{"seller_sku": "SKU-A", "quantity": 1, "unit_price": 13.65}]
+    event = _event(principal_amount=-13.64, tax_amount=0, shipping_amount=0, shipping_tax_amount=0)
+    payload, skipped = build_credit_note_payload(
+        order, event, MAPPING, 4242, INVOICE_LINES, _resolve, _no_bom,
+        already_posted=already_posted,
+    )
+    assert payload is None
+    assert len(skipped) == 1
+    assert "rounds to <" in skipped[0]["reason"]
 
 
 def test_bom_partial_refund_scales_child_quantities():
