@@ -239,7 +239,27 @@ def _process_amendment(conn, event: finances_api.RefundEvent, mapping: dict[str,
         )
         return "skipped"
 
-    result = sap_client.post_credit_note(payload)
+    try:
+        result = sap_client.post_credit_note(payload)
+    except Exception as e:
+        # claim_cn above already moved amend_rid's own row to 'posting' --
+        # the caller's generic except block logs failures against
+        # event.refund_id (the BASE rid), a different row that's usually
+        # already 'posted', so it never touches this one. Left as-is,
+        # amend_rid stays stuck at 'posting' forever: nothing ever revisits
+        # it (a later retry recomputes the same amend_rid only while this
+        # top-up is still owed, but build_credit_note_payload may start
+        # returning None for it -- e.g. once a rounding-dust fix lands --
+        # which returns "skipped" above without ever reaching claim_cn
+        # again). Confirmed for real 2026-08-14: 3 rows orphaned this way,
+        # one from the exact dust-fix scenario just described. Record the
+        # failure against the row that's actually claimed.
+        store.upsert_cn_log(
+            conn, amend_rid, event.amazon_order_id, event.posted_date, "failed", error=str(e),
+        )
+        logger.error("FAIL top-up %s -> %s: %s", rid, amend_rid, e)
+        return "failed"
+
     store.upsert_cn_log(
         conn, amend_rid, event.amazon_order_id, event.posted_date, "posted",
         doc_entry=result["doc_entry"], doc_num=result["doc_num"],
