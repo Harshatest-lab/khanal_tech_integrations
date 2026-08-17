@@ -197,6 +197,20 @@ def post_invoices_handler(event, context):
 
     def _go():
         ev = event or {}
+        if ev.get("mode") == "purge_precutoff_unposted":
+            # {"mode": "purge_precutoff_unposted", "cutoff_date": "YYYY-MM-DD"?, "dry_run": true (default)}
+            # Deletes orders shipped before the posting cutoff that never
+            # posted (stage in fetched/ready/failed) -- list_ready_orders
+            # already refuses to ever post these (Finance booked them
+            # manually pre-pipeline), so they're permanently dead weight,
+            # not a backlog waiting to clear. dry_run defaults true; pass
+            # dry_run:false only after reviewing the count/sample.
+            cutoff = ev.get("cutoff_date") or constants.POSTING_CUTOFF_DATE
+            dry_run = ev.get("dry_run", True)
+            with store.connect() as conn:
+                if dry_run:
+                    return {"dry_run": True, "cutoff_date": cutoff, **store.count_precutoff_unposted(conn, cutoff)}
+                return {"dry_run": False, "cutoff_date": cutoff, **store.delete_precutoff_unposted(conn, cutoff)}
         if ev.get("mode") == "list_ship_to_codes":
             from amazon_us import sap_client
             return {"card_code": constants.SAP_CARD_CODE, "ship_to_codes": sap_client.list_ship_to_addresses(constants.SAP_CARD_CODE)}
