@@ -197,6 +197,70 @@ def post_invoices_handler(event, context):
 
     def _go():
         ev = event or {}
+        if ev.get("mode") == "debug_june_purchase_unposted_breakdown":
+            # Read-only: how many orders purchased in a given month are
+            # still unposted, broken down by whether their ship date makes
+            # them legitimately postable (>= cutoff, just pipeline lag) vs
+            # permanently dead (< cutoff or never shipped) -- purchase_date
+            # and actual_ship_date aren't the same axis as the cutoff rule
+            # (cutoff is ship-date based, matching SAP DocDate), so a
+            # purchase-month filter alone can catch live in-flight orders
+            # too. Ad hoc scoping check before deciding whether/how to purge.
+            month_start = ev.get("month_start", "2026-06-01")
+            month_end = ev.get("month_end", "2026-07-01")
+            cutoff = ev.get("cutoff_date") or constants.POSTING_CUTOFF_DATE
+            with store.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT
+                          COUNT(*) FILTER (WHERE actual_ship_date IS NULL) AS never_shipped,
+                          COUNT(*) FILTER (WHERE actual_ship_date < %s) AS shipped_precutoff,
+                          COUNT(*) FILTER (WHERE actual_ship_date >= %s) AS shipped_postcutoff_live,
+                          COUNT(*) AS total
+                        FROM amazon_us_orders
+                        WHERE purchase_date >= %s AND purchase_date < %s
+                          AND stage != 'posted'
+                        """,
+                        (cutoff, cutoff, month_start, month_end),
+                    )
+                    row = cur.fetchone()
+                    cur.execute(
+                        """
+                        SELECT amazon_order_id, stage, order_status, purchase_date, actual_ship_date
+                        FROM amazon_us_orders
+                        WHERE purchase_date >= %s AND purchase_date < %s
+                          AND stage != 'posted' AND actual_ship_date >= %s
+                        ORDER BY purchase_date DESC
+                        LIMIT 10
+                        """,
+                        (month_start, month_end, cutoff),
+                    )
+                    live_sample = [
+                        {"amazon_order_id": r[0], "stage": r[1], "order_status": r[2], "purchase_date": str(r[3]), "actual_ship_date": str(r[4])}
+                        for r in cur.fetchall()
+                    ]
+            return {
+                "month_start": month_start, "month_end": month_end, "cutoff_date": cutoff,
+                "never_shipped": row[0], "shipped_precutoff": row[1],
+                "shipped_postcutoff_live_candidate": row[2], "total_unposted_in_month": row[3],
+                "shipped_postcutoff_live_sample": live_sample,
+            }
+        if ev.get("mode") == "purge_unposted_by_purchase_month":
+            # {"mode": "purge_unposted_by_purchase_month", "month_start": "YYYY-MM-DD", "month_end": "YYYY-MM-DD", "dry_run": true (default)}
+            # For orders that never shipped at all (actual_ship_date NULL),
+            # which delete_precutoff_unposted's ship-date filter can't
+            # catch. Use debug_june_purchase_unposted_breakdown first to
+            # confirm nothing in range has actual_ship_date >= the posting
+            # cutoff (i.e. is still legitimately postable) before running
+            # this with dry_run:false.
+            month_start = ev["month_start"]
+            month_end = ev["month_end"]
+            dry_run = ev.get("dry_run", True)
+            with store.connect() as conn:
+                if dry_run:
+                    return {"dry_run": True, "month_start": month_start, "month_end": month_end, **store.count_unposted_by_purchase_month(conn, month_start, month_end)}
+                return {"dry_run": False, "month_start": month_start, "month_end": month_end, **store.delete_unposted_by_purchase_month(conn, month_start, month_end)}
         if ev.get("mode") == "purge_precutoff_unposted":
             # {"mode": "purge_precutoff_unposted", "cutoff_date": "YYYY-MM-DD"?, "dry_run": true (default)}
             # Deletes orders shipped before the posting cutoff that never
