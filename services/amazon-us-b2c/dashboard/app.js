@@ -691,6 +691,7 @@ let sortDir = "desc";
 
 const orderFilter = document.getElementById("order-filter");
 const stageFilter = document.getElementById("stage-filter");
+const statusFilter = document.getElementById("status-filter");
 const orderDateFrom = document.getElementById("order-date-from");
 const orderDateTo = document.getElementById("order-date-to");
 const pageSizeSelect = document.getElementById("page-size");
@@ -715,6 +716,7 @@ function buildOrdersQueryParams(limit, offset) {
   };
   add("amazon_order_id", orderFilter.value);
   add("stage", stageFilter.value);
+  add("status", statusFilter.value);
   add("order_date_from", orderDateFrom.value);
   add("order_date_to", orderDateTo.value);
   return params.toString();
@@ -805,11 +807,12 @@ document.getElementById("refresh-btn").addEventListener("click", () => {
 document.getElementById("clear-filters-btn").addEventListener("click", () => {
   orderFilter.value = "";
   stageFilter.value = "";
+  statusFilter.value = "";
   orderDateFrom.value = "";
   orderDateTo.value = "";
   loadOrders(true).catch((e) => showError(e.message));
 });
-[orderFilter, stageFilter, orderDateFrom, orderDateTo, pageSizeSelect].forEach((el) => {
+[orderFilter, stageFilter, statusFilter, orderDateFrom, orderDateTo, pageSizeSelect].forEach((el) => {
   el.addEventListener("change", () => loadOrders(true).catch((e) => showError(e.message)));
 });
 orderFilter.addEventListener("keydown", (e) => {

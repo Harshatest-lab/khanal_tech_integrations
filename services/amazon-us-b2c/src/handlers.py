@@ -1057,6 +1057,7 @@ def dashboard_handler(event, context):
                         limit=limit,
                         offset=offset,
                         stage=q.get("stage") or None,
+                        order_status=q.get("status") or None,
                         amazon_order_id=(q.get("amazon_order_id") or "").strip() or None,
                         order_date_from=q.get("order_date_from") or None,
                         order_date_to=q.get("order_date_to") or None,

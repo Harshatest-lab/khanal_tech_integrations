@@ -231,7 +231,7 @@ body {
 /* ── Filters ───────────────────────────────────────────────────────────── */
 
 .filter-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 1rem 1.15rem 0.9rem; box-shadow: var(--shadow-xs); }
-.filter-card-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.75rem 0.85rem; align-items: end; }
+.filter-card-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0.75rem 0.85rem; align-items: end; }
 .filter-field { display: flex; flex-direction: column; gap: 0.35rem; min-width: 0; }
 .filter-label { font-size: 0.66rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
 .filter-field input[type="search"], .filter-field input[type="date"], .filter-field input[type="text"], .filter-field select {
