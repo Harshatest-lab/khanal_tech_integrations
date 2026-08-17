@@ -1,11 +1,11 @@
-/** Amazon US B2C dashboard — dev stack, ap-south-1.
+/** Amazon US B2C dashboard — prod stack, ap-south-1.
  * Auth: Cognito User Pool JWT authorizer on the HTTP API directly (no
  * backend login proxy) — this file calls Cognito's IdP endpoint straight,
  * unlike the Walmart dashboard which proxies login through its own API.
  */
-const API_BASE = "https://ejkzzvmudi.execute-api.ap-south-1.amazonaws.com";
+const API_BASE = "https://0usjplzw16.execute-api.ap-south-1.amazonaws.com";
 const COGNITO_REGION = "ap-south-1";
-const COGNITO_CLIENT_ID = "201ikfk1cte8vt5e94c4v22u49";
+const COGNITO_CLIENT_ID = "48oo9jui9bog8nlrbsv2r9mk91";
 const COGNITO_IDP_URL = `https://cognito-idp.${COGNITO_REGION}.amazonaws.com/`;
 
 const AUTH_STORAGE_KEY = "amazon_us_b2c_dashboard_auth";
