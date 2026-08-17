@@ -880,13 +880,23 @@ function renderOrderDetail(detail) {
     )
     .join("");
 
+  const shipTo = [h.ship_city, h.ship_state, h.ship_postal_code, h.ship_country]
+    .filter(Boolean)
+    .join(", ") || "—";
+
   return `
     <div class="trace-cards">
       <div class="trace-card"><span class="trace-card-label">Stage</span><span class="trace-card-value">${stageBadge(h.stage)}</span></div>
       <div class="trace-card"><span class="trace-card-label">Status</span><span class="trace-card-value">${escapeHtml(h.order_status || "—")}</span></div>
       <div class="trace-card"><span class="trace-card-label">Channel</span><span class="trace-card-value">${escapeHtml(h.fulfillment_channel || "—")}</span></div>
+      <div class="trace-card"><span class="trace-card-label">Purchase date</span><span class="trace-card-value">${formatDate(h.purchase_date)}</span></div>
       <div class="trace-card"><span class="trace-card-label">Ship date</span><span class="trace-card-value">${formatDateOnly(h.actual_ship_date)}</span></div>
+      <div class="trace-card"><span class="trace-card-label">Order total</span><span class="trace-card-value">${formatMoney(h.order_total_amount)}</span></div>
+      <div class="trace-card"><span class="trace-card-label">Buyer</span><span class="trace-card-value">${escapeHtml(h.buyer_name || "—")}</span></div>
+      <div class="trace-card"><span class="trace-card-label">Ship to</span><span class="trace-card-value">${escapeHtml(shipTo)}</span></div>
       <div class="trace-card"><span class="trace-card-label">SAP DocEntry</span><span class="trace-card-value">${h.sap_doc_entry ?? "—"}</span></div>
+      <div class="trace-card"><span class="trace-card-label">SAP DocNum</span><span class="trace-card-value">${h.sap_doc_num ?? "—"}</span></div>
+      <div class="trace-card"><span class="trace-card-label">Posted at</span><span class="trace-card-value">${formatDate(h.posted_at)}</span></div>
       <div class="trace-card"><span class="trace-card-label">Attempts</span><span class="trace-card-value">${h.attempt_count ?? 0}</span></div>
     </div>
     ${h.last_error ? `<p class="sap-error-inline">${escapeHtml(h.last_error)}</p>` : ""}
@@ -914,6 +924,11 @@ function renderOrderDetail(detail) {
         <tbody>${cnRows || `<tr><td colspan="5" class="muted">No CN activity.</td></tr>`}</tbody>
       </table>
     </div>
+
+    <details class="raw-payload">
+      <summary>Raw stored payload (Amazon order + item API response)</summary>
+      <pre class="raw-payload-pre">${escapeHtml(JSON.stringify(h.raw_payload ?? {}, null, 2))}</pre>
+    </details>
   `;
 }
 

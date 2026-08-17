@@ -344,6 +344,12 @@ body {
 
 .sap-error-inline { margin: 0 0 1rem; padding: 0.75rem; background: var(--crit-bg); color: #7a2a2a; border: 1px solid var(--crit-border); border-radius: var(--radius-sm); font-size: 0.74rem; line-height: 1.45; white-space: pre-wrap; word-break: break-word; overflow: auto; max-height: 200px; font-family: var(--font-mono); }
 
+.raw-payload { margin-top: 1rem; border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; }
+.raw-payload summary { padding: 0.6rem 1rem; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); background: var(--surface-sunken); cursor: pointer; user-select: none; }
+.raw-payload summary:hover { color: var(--text); }
+.raw-payload[open] summary { border-bottom: 1px solid var(--border); }
+.raw-payload-pre { margin: 0; padding: 0.9rem 1rem; font-family: var(--font-mono); font-size: 0.72rem; line-height: 1.5; color: var(--text); background: var(--surface); overflow: auto; max-height: 320px; white-space: pre-wrap; word-break: break-word; }
+
 .muted { color: var(--muted); font-size: 0.85rem; }
 .trace-error { color: var(--crit); padding: 1rem; }
 
