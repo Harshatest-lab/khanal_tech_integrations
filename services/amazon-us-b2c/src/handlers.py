@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import sys
+import time
 import traceback
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -48,6 +49,19 @@ def _run(label: str, fn):
         raise
 
 
+_DEADLINE_MARGIN_SEC = 90  # left for final commits/promote/finish_sync_log after staging stops
+
+
+def _wall_clock_deadline(context) -> float | None:
+    """time.monotonic() cutoff _DEADLINE_MARGIN_SEC before Lambda's hard
+    kill, or None if context doesn't expose remaining time (e.g. a manual
+    debug invoke with a bare context object)."""
+    get_remaining = getattr(context, "get_remaining_time_in_millis", None)
+    if get_remaining is None:
+        return None
+    return time.monotonic() + max(get_remaining() / 1000 - _DEADLINE_MARGIN_SEC, 0)
+
+
 def fetch_handler(event, context):
     """modes: incremental (default) | report | backfill | seed_watermark.
     report/backfill events: {"mode": "report", "from_date": "YYYY-MM-DD",
@@ -55,14 +69,14 @@ def fetch_handler(event, context):
     seed_watermark event: {"mode": "seed_watermark", "when": "YYYY-MM-DD HH:MM:SS"?}
     -- sets the incremental watermark directly, defaulting to now. Run once
     before ever enabling the incremental schedule (a missing watermark makes
-    sync_incremental try a 30-day per-order catch-up that can exhaust the
-    900s Lambda timeout without finishing)."""
+    sync_incremental try a bounded per-order catch-up, AMZ_INCREMENTAL_COLD_START_HOURS
+    hours back, that can still chew through a chunk of the 900s Lambda timeout)."""
     mode = (event or {}).get("mode", "incremental")
 
     def _go():
         with store.connect() as conn:
             if mode == "incremental":
-                return fetch_sync.sync_incremental(conn)
+                return fetch_sync.sync_incremental(conn, deadline=_wall_clock_deadline(context))
             if mode in ("report", "backfill"):
                 from_date = event.get("from_date") or date.today().replace(day=1).isoformat()
                 to_date = event.get("to_date") or date.today().isoformat()

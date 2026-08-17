@@ -31,6 +31,34 @@ def connect() -> psycopg.Connection:
     return psycopg.connect(DATABASE_URL)
 
 
+# ── Single-flight locks ──────────────────────────────────────────────────
+# Postgres advisory locks, not Python-level -- have to hold across process
+# boundaries because the thing being guarded (SP-API quota) is external and
+# shared by more than one Lambda function. amazonFetch's report-mode sync
+# and amazonFbaShipSync's FBA report both draw from the *same* createReport
+# quota bucket, so REPORTS_API_LOCK has to stop them stepping on each other
+# too, not just guard within one function. Session-scoped: released
+# explicitly via release_lock(), or automatically by Postgres the moment the
+# connection drops -- a Lambda hard-timeout kills the connection, which
+# frees the lock with no explicit cleanup needed.
+ORDERS_API_LOCK = "amz:orders_api"
+REPORTS_API_LOCK = "amz:reports_api"
+
+
+def try_acquire_lock(conn: psycopg.Connection, name: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_try_advisory_lock(hashtext(%s))", (name,))
+        acquired = bool(cur.fetchone()[0])
+    conn.commit()
+    return acquired
+
+
+def release_lock(conn: psycopg.Connection, name: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_advisory_unlock(hashtext(%s))", (name,))
+    conn.commit()
+
+
 # ── Staging ──────────────────────────────────────────────────────────────
 
 _PROTECTED_STAGES = ("posting", "posted")
@@ -43,6 +71,15 @@ def get_order_stage(conn: psycopg.Connection, amazon_order_id: str) -> str | Non
         )
         row = cur.fetchone()
     return row[0] if row else None
+
+
+def get_order_stage_and_status(conn: psycopg.Connection, amazon_order_id: str) -> tuple[str, str] | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT stage, order_status FROM amazon_us_orders WHERE amazon_order_id = %s", (amazon_order_id,)
+        )
+        row = cur.fetchone()
+    return (row[0], row[1]) if row else None
 
 
 def upsert_order(conn: psycopg.Connection, fields: dict[str, Any], lines: list[dict[str, Any]]) -> str:

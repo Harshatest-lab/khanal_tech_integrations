@@ -13,6 +13,7 @@ import logging
 
 from amazon_us import constants, reports_api, store
 from amazon_us.dates import date_chunks, pacific_day_to_utc, utc_to_pacific_date
+from amazon_us.sp_api import SpApiThrottledError
 
 logger = logging.getLogger(__name__)
 
@@ -37,28 +38,42 @@ def parse_earliest_ship_dates(tsv_content: str) -> dict[str, str]:
 
 def sync_ship_dates(conn, from_date: str, to_date: str) -> dict:
     """Request + process the FBA shipments report for [from_date, to_date]
-    (Pacific 'YYYY-MM-DD')."""
-    run_id = store.start_sync_log(conn, "fba", from_date, to_date)
+    (Pacific 'YYYY-MM-DD').
+
+    Single-flight via REPORTS_API_LOCK -- shared with amazonFetch's
+    sync_via_report, a different Lambda function, because createReport has
+    one global quota across every report type."""
+    if not store.try_acquire_lock(conn, store.REPORTS_API_LOCK):
+        logger.info("sync_ship_dates skipped -- another Reports API sync is already running")
+        return {"status": "skipped", "reason": "locked"}
     try:
-        totals = {"parsed": 0, "updated": 0}
-        for chunk_from, chunk_to in date_chunks(from_date, to_date, max_days=30):
-            report_id = reports_api.create_report(
-                reports_api.FBA_SHIPMENTS_REPORT_TYPE,
-                constants.MARKETPLACE_ID,
-                pacific_day_to_utc(chunk_from),
-                pacific_day_to_utc(chunk_to, end_of_day=True),
-            )
-            logger.info("FBA report %s requested for %s..%s", report_id, chunk_from, chunk_to)
-            doc_id = reports_api.poll_report(report_id)
-            content = reports_api.download_report(doc_id)
+        run_id = store.start_sync_log(conn, "fba", from_date, to_date)
+        try:
+            totals = {"parsed": 0, "updated": 0}
+            for chunk_from, chunk_to in date_chunks(from_date, to_date, max_days=30):
+                report_id = reports_api.create_report(
+                    reports_api.FBA_SHIPMENTS_REPORT_TYPE,
+                    constants.MARKETPLACE_ID,
+                    pacific_day_to_utc(chunk_from),
+                    pacific_day_to_utc(chunk_to, end_of_day=True),
+                )
+                logger.info("FBA report %s requested for %s..%s", report_id, chunk_from, chunk_to)
+                doc_id = reports_api.poll_report(report_id)
+                content = reports_api.download_report(doc_id)
 
-            ship_dates = parse_earliest_ship_dates(content)
-            updated = store.set_actual_ship_dates(conn, ship_dates)
-            totals["parsed"] += len(ship_dates)
-            totals["updated"] += updated
+                ship_dates = parse_earliest_ship_dates(content)
+                updated = store.set_actual_ship_dates(conn, ship_dates)
+                totals["parsed"] += len(ship_dates)
+                totals["updated"] += updated
 
-        store.finish_sync_log(conn, run_id, "success", totals)
-        return {"status": "success", **totals}
-    except Exception as e:
-        store.finish_sync_log(conn, run_id, "error", error=str(e))
-        raise
+            store.finish_sync_log(conn, run_id, "success", totals)
+            return {"status": "success", **totals}
+        except SpApiThrottledError as e:
+            logger.warning("sync_ship_dates throttled: %s", e)
+            store.finish_sync_log(conn, run_id, "throttled", error=str(e))
+            return {"status": "throttled", "detail": str(e)}
+        except Exception as e:
+            store.finish_sync_log(conn, run_id, "error", error=str(e))
+            raise
+    finally:
+        store.release_lock(conn, store.REPORTS_API_LOCK)

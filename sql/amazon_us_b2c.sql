@@ -133,7 +133,7 @@ CREATE TABLE IF NOT EXISTS amazon_us_sync_log (
   mode             text        NOT NULL,   -- incremental | report | backfill | fba | post | cn | recon | sku_refresh
   started_at       timestamptz NOT NULL DEFAULT now(),
   finished_at      timestamptz,
-  status           text        NOT NULL DEFAULT 'running',   -- running | success | error
+  status           text        NOT NULL DEFAULT 'running',   -- running | success | error | throttled | partial
   window_from      text,
   window_to        text,
   counts           jsonb       NOT NULL DEFAULT '{}'::jsonb,
