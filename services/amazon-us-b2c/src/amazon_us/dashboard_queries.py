@@ -97,6 +97,7 @@ def fetch_orders(
     limit: int,
     offset: int,
     stage: str | None = None,
+    order_status: str | None = None,
     amazon_order_id: str | None = None,
     order_date_from: str | None = None,
     order_date_to: str | None = None,
@@ -109,6 +110,9 @@ def fetch_orders(
     if stage:
         where.append("stage = %s")
         params.append(stage)
+    if order_status:
+        where.append("order_status = %s")
+        params.append(order_status)
     if ship_country:
         where.append("ship_country = %s")
         params.append(ship_country)
