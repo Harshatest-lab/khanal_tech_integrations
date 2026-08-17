@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import sys
+import time
 import traceback
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -48,21 +49,64 @@ def _run(label: str, fn):
         raise
 
 
+_DEADLINE_MARGIN_SEC = 90  # left for final commits/promote/finish_sync_log after staging stops
+
+
+def _wall_clock_deadline(context) -> float | None:
+    """time.monotonic() cutoff _DEADLINE_MARGIN_SEC before Lambda's hard
+    kill, or None if context doesn't expose remaining time (e.g. a manual
+    debug invoke with a bare context object)."""
+    get_remaining = getattr(context, "get_remaining_time_in_millis", None)
+    if get_remaining is None:
+        return None
+    return time.monotonic() + max(get_remaining() / 1000 - _DEADLINE_MARGIN_SEC, 0)
+
+
 def fetch_handler(event, context):
-    """modes: incremental (default) | report | backfill | seed_watermark.
+    """modes: incremental (default) | report | backfill | seed_watermark | resume_reports.
     report/backfill events: {"mode": "report", "from_date": "YYYY-MM-DD",
     "to_date": "YYYY-MM-DD", "lookback_days": 30?}
     seed_watermark event: {"mode": "seed_watermark", "when": "YYYY-MM-DD HH:MM:SS"?}
     -- sets the incremental watermark directly, defaulting to now. Run once
     before ever enabling the incremental schedule (a missing watermark makes
-    sync_incremental try a 30-day per-order catch-up that can exhaust the
-    900s Lambda timeout without finishing)."""
+    sync_incremental try a bounded per-order catch-up, AMZ_INCREMENTAL_COLD_START_HOURS
+    hours back, that can still chew through a chunk of the 900s Lambda timeout).
+    resume_reports: checks both orders-report and FBA-report jobs a previous
+    sync_via_report/sync_ship_dates run deferred (Amazon's report queue
+    wasn't done within the bounded poll -- see fetch_sync._REPORT_POLL_BUDGET_SEC)
+    and finishes them if ready. Also runs automatically, bounded to a short
+    budget, at the start of every "incremental" invocation -- amazonFetch's
+    hourly schedule is the only one of the report-producing functions that
+    already fires often enough to matter for resume latency, and its
+    package bundle includes fba_ship_sync.py too (same deploy zip)."""
     mode = (event or {}).get("mode", "incremental")
 
     def _go():
         with store.connect() as conn:
             if mode == "incremental":
-                return fetch_sync.sync_incremental(conn)
+                from amazon_us import fba_ship_sync
+
+                # Resume checks first, each bounded to a short per-pending-
+                # report poll (normally instant -- the pending list is
+                # empty) -- then sync_incremental's own deadline is
+                # computed from whatever time is actually left, so the two
+                # can never together exceed the Lambda's real budget. Doing
+                # it the other way (incremental first, resume after) would
+                # let a slow resume pass blow straight through incremental's
+                # own 90s safety margin.
+                resume_orders = fetch_sync.resume_orders_reports(conn)
+                resume_fba = fba_ship_sync.resume_fba_reports(conn)
+                result = fetch_sync.sync_incremental(conn, deadline=_wall_clock_deadline(context))
+                result["resume_orders_reports"] = resume_orders
+                result["resume_fba_reports"] = resume_fba
+                return result
+            if mode == "resume_reports":
+                from amazon_us import fba_ship_sync
+
+                return {
+                    "orders_report": fetch_sync.resume_orders_reports(conn),
+                    "fba_report": fba_ship_sync.resume_fba_reports(conn),
+                }
             if mode in ("report", "backfill"):
                 from_date = event.get("from_date") or date.today().replace(day=1).isoformat()
                 to_date = event.get("to_date") or date.today().isoformat()
@@ -77,6 +121,12 @@ def fetch_handler(event, context):
 
 def fba_ship_sync_handler(event, context):
     """Default window: last 21 days (Pacific). Manual: {"from_date", "to_date"}.
+    resume_reports: finishes any FBA-report jobs sync_ship_dates deferred
+    because Amazon's queue wasn't done within the bounded poll -- the
+    automatic version of debug_resume_report below, callable on its own
+    (amazonFetch's hourly incremental run also does this automatically;
+    this is for triggering a check without waiting on that, or without
+    touching amazonFetch at all).
     debug_resume_report: {"mode": "debug_resume_report", "report_id": str} — Amazon's
     report queue can take much longer than one Lambda invoke's poll budget on a large
     window; this resumes polling an ALREADY-REQUESTED report_id (from a previous
@@ -84,6 +134,11 @@ def fba_ship_sync_handler(event, context):
 
     def _go():
         ev = event or {}
+        if ev.get("mode") == "resume_reports":
+            from amazon_us.fba_ship_sync import resume_fba_reports
+
+            with store.connect() as conn:
+                return resume_fba_reports(conn)
         if ev.get("mode") == "debug_resume_report":
             from amazon_us import reports_api
             from amazon_us.fba_ship_sync import parse_earliest_ship_dates

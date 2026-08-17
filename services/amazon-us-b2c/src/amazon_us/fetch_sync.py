@@ -17,6 +17,8 @@ gated separately by ship date + cutoff.
 from __future__ import annotations
 
 import logging
+import os
+import time
 from datetime import datetime, timedelta, timezone
 
 from amazon_us import constants, report_parser, reports_api, sp_api, store
@@ -27,11 +29,23 @@ from amazon_us.dates import (
     utc_to_pacific,
     utc_to_pacific_date,
 )
+from amazon_us.sp_api import SpApiThrottledError
 
 logger = logging.getLogger(__name__)
 
 _SHIPPED = "Shipped"
 _WATERMARK = "orders_last_updated_after"
+
+# A missing watermark used to fall back to a 30-day per-order catch-up --
+# confirmed live (2026-08-14 through -17) that this account's Orders API
+# throttling tier can't finish that within the 900s Lambda timeout, so the
+# watermark (written only after the fetch loop completes) never saves and
+# every subsequent hourly run repeats the exact same doomed 30-day pull
+# forever. Bounded to a small window instead: the daily report-mode sync
+# already does the real historical backfill via bulk flat-file (unaffected,
+# succeeded every day through this incident), so incremental only ever
+# needs to catch recent status transitions, never a month of backlog.
+_COLD_START_HOURS = int(os.environ.get("AMZ_INCREMENTAL_COLD_START_HOURS", "48"))
 
 
 _MFN_CHANNEL_VALUES = {"MFN", "Merchant"}  # Orders API says "MFN"; flat-file report says "Merchant"
@@ -74,13 +88,13 @@ def refresh_sku_map(conn) -> dict[str, str]:
 
 
 def seed_watermark(conn, when: str | None = None) -> str:
-    """Manually set the incremental watermark, skipping the expensive 30-day
-    cold-start catch-up a missing watermark triggers (sync_incremental does
-    per-order Orders API calls, sized for dozens/hour, not a month of
-    backlog — a cold start against this account's throttling tier can burn
-    the full 900s Lambda timeout without finishing even the first page of
-    /orders/v0/orders). Call once before enabling the incremental schedule,
-    and again after recovering from any stuck/aborted incremental run.
+    """Manually set the incremental watermark, skipping the bounded
+    cold-start catch-up (_COLD_START_HOURS) a missing watermark triggers.
+    Optional even after that bound was added — this account's throttling
+    tier can still chew through a chunk of the 900s Lambda timeout on a
+    cold start — but no longer risks an unrecoverable infinite loop.
+    Call once before enabling the incremental schedule, and again after
+    recovering from any stuck/aborted incremental run.
     `when` defaults to now; pass an explicit 'YYYY-MM-DD HH:MM:SS' UTC
     string to backdate it instead."""
     value = when or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -88,91 +102,219 @@ def seed_watermark(conn, when: str | None = None) -> str:
     return value
 
 
-def sync_incremental(conn) -> dict:
+def sync_incremental(conn, deadline: float | None = None) -> dict:
     """Orders API watermark sync. Slow per-order item calls are fine here:
-    hourly increments are dozens of orders, not thousands."""
-    run_id = store.start_sync_log(conn, "incremental")
+    hourly increments are dozens of orders, not thousands -- except under
+    sustained throttling, where each order can cost 15-20s fighting through
+    429s. `deadline` (time.monotonic() cutoff) stops staging further orders
+    with margin left in the Lambda's budget instead of grinding until the
+    hard 900s kill -- confirmed live 2026-08-17 that a supposedly-generous
+    endpoint (getOrderItems) can still burn a full invocation one order at
+    a time under an extended account-wide throttle.
+
+    Single-flight via ORDERS_API_LOCK: a second overlapping caller (auto-
+    retry, a manual invoke, a dashboard-triggered sync) exits immediately
+    with zero SP-API calls rather than piling onto an already-thin quota --
+    confirmed live 2026-08-17 that concurrent callers hammering the same
+    1-req/60s bucket is what turned a slow recovery into a two-hour outage."""
+    if not store.try_acquire_lock(conn, store.ORDERS_API_LOCK):
+        logger.info("sync_incremental skipped -- another Orders API sync is already running")
+        return {"status": "skipped", "reason": "locked"}
     try:
-        raw_watermark = store.get_watermark(conn, _WATERMARK)
-        if raw_watermark:
-            wm_dt = datetime.fromisoformat(raw_watermark.replace(" ", "T"))
-            if wm_dt.tzinfo is None:
-                wm_dt = wm_dt.replace(tzinfo=timezone.utc)
-        else:
-            wm_dt = datetime.now(timezone.utc) - timedelta(days=30)
-            logger.info("No watermark — 30-day initial catch-up")
+        run_id = store.start_sync_log(conn, "incremental")
+        try:
+            raw_watermark = store.get_watermark(conn, _WATERMARK)
+            if raw_watermark:
+                wm_dt = datetime.fromisoformat(raw_watermark.replace(" ", "T"))
+                if wm_dt.tzinfo is None:
+                    wm_dt = wm_dt.replace(tzinfo=timezone.utc)
+            else:
+                wm_dt = datetime.now(timezone.utc) - timedelta(hours=_COLD_START_HOURS)
+                logger.info("No watermark — %sh bounded catch-up", _COLD_START_HOURS)
 
-        # Re-read a little history every run; late item/status edits happen.
-        fetch_from = (wm_dt - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        new_watermark = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            # Re-read a little history every run; late item/status edits happen.
+            fetch_from = (wm_dt - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            new_watermark = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-        mapping = refresh_sku_map(conn)
-        raw_orders = sp_api.fetch_orders_by_update(fetch_from)
-        counts = _stage_from_orders_api(conn, raw_orders, mapping)
+            mapping = refresh_sku_map(conn)
+            raw_orders = sp_api.fetch_orders_by_update(fetch_from)
+            counts, complete = _stage_from_orders_api(conn, raw_orders, mapping, deadline)
 
-        store.set_watermark(conn, _WATERMARK, new_watermark)
-        promoted = store.promote_fetched_orders(conn, mapping)
-        counts["promoted"] = promoted
+            if complete:
+                store.set_watermark(conn, _WATERMARK, new_watermark)
+            else:
+                # Orders already staged are already committed (each upsert
+                # commits individually) -- only the watermark is held back,
+                # so nothing skipped here is lost, just picked up again
+                # (with the usual 2-day overlap) on the next scheduled run.
+                logger.warning(
+                    "sync_incremental stopped early on wall-clock budget -- watermark NOT advanced (%s/%s orders processed)",
+                    counts.get("processed", 0), counts.get("orders", 0),
+                )
+            promoted = store.promote_fetched_orders(conn, mapping)
+            counts["promoted"] = promoted
 
-        store.finish_sync_log(conn, run_id, "success", counts)
-        return {"status": "success", **counts}
-    except Exception as e:
-        store.finish_sync_log(conn, run_id, "error", error=str(e))
-        raise
+            status = "success" if complete else "partial"
+            store.finish_sync_log(conn, run_id, status, counts)
+            return {"status": status, **counts}
+        except SpApiThrottledError as e:
+            # Still throttled, not a bug -- no watermark write (nothing was
+            # actually synced), no alert email. The next scheduled run tries
+            # again from the same point instead of getting paged every hour.
+            logger.warning("sync_incremental throttled: %s", e)
+            store.finish_sync_log(conn, run_id, "throttled", error=str(e))
+            return {"status": "throttled", "detail": str(e)}
+        except Exception as e:
+            store.finish_sync_log(conn, run_id, "error", error=str(e))
+            raise
+    finally:
+        store.release_lock(conn, store.ORDERS_API_LOCK)
+
+
+# Bounded poll per report instead of blocking one Lambda invocation for
+# poll_report's full 840s default -- createReport shares one global quota
+# across every report type, so tying up a whole invocation waiting on
+# Amazon's queue is a bad trade. A report not ready within this budget is
+# deferred to resume_orders_reports() / resume_fba_reports() instead.
+_REPORT_POLL_BUDGET_SEC = 180
+_RESUME_POLL_BUDGET_SEC = 60  # shorter still -- resume checks piggyback on the hourly incremental run's own budget
+
+
+def _process_orders_report(conn, content: str, mapping: dict[str, str]) -> dict:
+    """Parse + stage one downloaded orders report. Returns the same totals
+    shape sync_via_report has always returned, so a resumed report merges
+    cleanly with whatever chunks a prior run already completed."""
+    totals = {"orders": 0, "created": 0, "updated": 0, "refreshed": 0, "ready": 0}
+    mfn_ship_dates: dict[str, str] = {}
+    orders = report_parser.parse_orders_report(content)
+    totals["orders"] += len(orders)
+    for header in orders.values():
+        ship_date = _mfn_ship_date(
+            header.get("fulfillment_channel", ""),
+            header.get("order_status", ""),
+            header.get("last_updated_date", ""),
+        )
+        if ship_date:
+            mfn_ship_dates[header["amazon_order_id"]] = ship_date
+        result = _stage_one(conn, header, mapping)
+        totals[result] = totals.get(result, 0) + 1
+        if result != "refreshed" and header.get("_staged_ready"):
+            totals["ready"] += 1
+    if mfn_ship_dates:
+        totals["mfn_ship_dates_set"] = store.set_actual_ship_dates(conn, mfn_ship_dates)
+    return totals
+
+
+def _merge_totals(base: dict, addition: dict) -> None:
+    for k, v in addition.items():
+        base[k] = base.get(k, 0) + v
 
 
 def sync_via_report(conn, from_date: str, to_date: str, lookback_days: int | None = None) -> dict:
     """Bulk fetch via the flat-file report ('YYYY-MM-DD' Pacific dates).
-    Applies the MTR lookback to from_date; chunks windows to <= 30 days."""
+    Applies the MTR lookback to from_date; chunks windows to <= 30 days.
+    A chunk whose report isn't ready within _REPORT_POLL_BUDGET_SEC is
+    deferred to resume_orders_reports() rather than blocking this
+    invocation for poll_report's full 840s default -- later chunks stop
+    too (processing them out of order with an unresolved earlier one
+    would make totals/promote misleading), so this run reports 'partial'
+    and the next resume pass picks the rest up.
+
+    Single-flight via REPORTS_API_LOCK: createReport has ONE global quota
+    shared across every report type (confirmed against SP-API docs), so
+    this has to lock out fba_ship_sync.sync_ship_dates too -- a different
+    Lambda function, guarded by the same Postgres advisory lock name."""
     lookback = constants.FETCH_LOOKBACK_DAYS if lookback_days is None else lookback_days
     fetch_from = (
         datetime.strptime(from_date, "%Y-%m-%d") - timedelta(days=lookback)
     ).strftime("%Y-%m-%d")
 
-    run_id = store.start_sync_log(conn, "report", fetch_from, to_date)
+    if not store.try_acquire_lock(conn, store.REPORTS_API_LOCK):
+        logger.info("sync_via_report skipped -- another Reports API sync is already running")
+        return {"status": "skipped", "reason": "locked"}
     try:
-        mapping = refresh_sku_map(conn)
-        totals = {"orders": 0, "created": 0, "updated": 0, "refreshed": 0, "ready": 0}
-        mfn_ship_dates: dict[str, str] = {}
+        run_id = store.start_sync_log(conn, "report", fetch_from, to_date)
+        try:
+            mapping = refresh_sku_map(conn)
+            totals = {"orders": 0, "created": 0, "updated": 0, "refreshed": 0, "ready": 0}
+            deferred = False
 
-        for chunk_from, chunk_to in date_chunks(fetch_from, to_date, max_days=30):
-            report_id = reports_api.create_report(
-                reports_api.ORDERS_REPORT_TYPE,
-                constants.MARKETPLACE_ID,
-                pacific_day_to_utc(chunk_from),
-                pacific_day_to_utc(chunk_to, end_of_day=True),
-            )
-            logger.info("Orders report %s requested for %s..%s", report_id, chunk_from, chunk_to)
-            doc_id = reports_api.poll_report(report_id)
-            content = reports_api.download_report(doc_id)
-
-            orders = report_parser.parse_orders_report(content)
-            totals["orders"] += len(orders)
-            for header in orders.values():
-                ship_date = _mfn_ship_date(
-                    header.get("fulfillment_channel", ""),
-                    header.get("order_status", ""),
-                    header.get("last_updated_date", ""),
+            for chunk_from, chunk_to in date_chunks(fetch_from, to_date, max_days=30):
+                report_id = reports_api.create_report(
+                    reports_api.ORDERS_REPORT_TYPE,
+                    constants.MARKETPLACE_ID,
+                    pacific_day_to_utc(chunk_from),
+                    pacific_day_to_utc(chunk_to, end_of_day=True),
                 )
-                if ship_date:
-                    mfn_ship_dates[header["amazon_order_id"]] = ship_date
+                logger.info("Orders report %s requested for %s..%s", report_id, chunk_from, chunk_to)
+                try:
+                    doc_id = reports_api.poll_report(report_id, max_wait=_REPORT_POLL_BUDGET_SEC)
+                except TimeoutError:
+                    store.create_pending_report(
+                        conn, "orders_report", report_id, {"chunk_from": chunk_from, "chunk_to": chunk_to}
+                    )
+                    logger.warning(
+                        "Orders report %s still processing after %ss -- deferred to resume pass",
+                        report_id, _REPORT_POLL_BUDGET_SEC,
+                    )
+                    deferred = True
+                    break
 
-                result = _stage_one(conn, header, mapping)
-                totals[result] = totals.get(result, 0) + 1
-                if result != "refreshed" and header.get("_staged_ready"):
-                    totals["ready"] += 1
+                content = reports_api.download_report(doc_id)
+                _merge_totals(totals, _process_orders_report(conn, content, mapping))
 
-        if mfn_ship_dates:
-            totals["mfn_ship_dates_set"] = store.set_actual_ship_dates(conn, mfn_ship_dates)
+            promoted = store.promote_fetched_orders(conn, mapping)
+            totals["promoted"] = promoted
 
-        promoted = store.promote_fetched_orders(conn, mapping)
-        totals["promoted"] = promoted
+            status = "partial" if deferred else "success"
+            store.finish_sync_log(conn, run_id, status, totals)
+            return {"status": status, **totals}
+        except SpApiThrottledError as e:
+            logger.warning("sync_via_report throttled: %s", e)
+            store.finish_sync_log(conn, run_id, "throttled", error=str(e))
+            return {"status": "throttled", "detail": str(e)}
+        except Exception as e:
+            store.finish_sync_log(conn, run_id, "error", error=str(e))
+            raise
+    finally:
+        store.release_lock(conn, store.REPORTS_API_LOCK)
 
-        store.finish_sync_log(conn, run_id, "success", totals)
-        return {"status": "success", **totals}
-    except Exception as e:
-        store.finish_sync_log(conn, run_id, "error", error=str(e))
-        raise
+
+def resume_orders_reports(conn, poll_budget: int = _RESUME_POLL_BUDGET_SEC) -> dict:
+    """Finish any orders-report jobs sync_via_report deferred because
+    Amazon's queue wasn't done within the poll budget -- the automatic
+    version of the old manual debug_resume_report tool. A report still
+    not ready within this (short) budget just stays pending for the next
+    check; it is never re-requested (that would waste the shared
+    createReport quota on a report Amazon is already generating)."""
+    if not store.try_acquire_lock(conn, store.REPORTS_API_LOCK):
+        return {"status": "skipped", "reason": "locked"}
+    try:
+        pending = store.list_pending_reports(conn, "orders_report")
+        if not pending:
+            return {"status": "success", "resumed": 0, "still_pending": 0}
+
+        mapping = refresh_sku_map(conn)
+        resumed, still_pending = 0, 0
+        for row in pending:
+            try:
+                doc_id = reports_api.poll_report(row["report_id"], max_wait=poll_budget)
+            except TimeoutError:
+                still_pending += 1
+                continue
+            content = reports_api.download_report(doc_id)
+            _process_orders_report(conn, content, mapping)
+            store.finish_pending_report(conn, row["id"], "done")
+            resumed += 1
+
+        if resumed:
+            store.promote_fetched_orders(conn, mapping)
+        return {"status": "success", "resumed": resumed, "still_pending": still_pending}
+    except SpApiThrottledError as e:
+        logger.warning("resume_orders_reports throttled: %s", e)
+        return {"status": "throttled", "detail": str(e)}
+    finally:
+        store.release_lock(conn, store.REPORTS_API_LOCK)
 
 
 def _stage_one(conn, header: dict, mapping: dict[str, str]) -> str:
@@ -193,15 +335,33 @@ def _stage_one(conn, header: dict, mapping: dict[str, str]) -> str:
     return store.upsert_order(conn, fields, lines)
 
 
-def _stage_from_orders_api(conn, raw_orders: list[dict], mapping: dict[str, str]) -> dict:
+def _stage_from_orders_api(
+    conn, raw_orders: list[dict], mapping: dict[str, str], deadline: float | None = None
+) -> tuple[dict, bool]:
+    """Returns (counts, complete) -- complete=False means the wall-clock
+    deadline hit before every order in raw_orders was processed. Orders
+    already staged before that point are already committed (upsert_order
+    commits per-order); the caller must not advance the watermark past an
+    incomplete pass or the un-staged remainder gets skipped forever."""
     counts = {"orders": len(raw_orders), "created": 0, "updated": 0, "refreshed": 0, "ready": 0}
     mfn_ship_dates: dict[str, str] = {}
+    processed = 0
     for raw in raw_orders:
+        if deadline is not None and time.monotonic() > deadline:
+            logger.warning(
+                "Stopping order staging early on wall-clock budget: %s/%s orders done",
+                processed, len(raw_orders),
+            )
+            break
+
         oid = raw.get("AmazonOrderId", "")
         if not oid:
             continue
 
-        if store.get_order_stage(conn, oid) in ("posting", "posted"):
+        existing = store.get_order_stage_and_status(conn, oid)
+        existing_stage, existing_status = existing if existing else (None, None)
+
+        if existing_stage in ("posting", "posted"):
             store.upsert_order(
                 conn,
                 {"amazon_order_id": oid, "order_status": raw.get("OrderStatus", ""), "stage": "posted",
@@ -209,9 +369,33 @@ def _stage_from_orders_api(conn, raw_orders: list[dict], mapping: dict[str, str]
                 [],
             )
             counts["refreshed"] += 1
+            processed += 1
             continue
 
-        items_raw = sp_api.fetch_order_items(oid)
+        if existing_stage in ("ready", "fetched") and existing_status == raw.get("OrderStatus", ""):
+            # Already staged, and Amazon's own OrderStatus hasn't moved
+            # since we last captured it -- a fresh getOrderItems call
+            # can't reveal anything new (same items, same status), and
+            # 'fetched' -> 'ready' promotion is handled by promote_
+            # fetched_orders re-checking the SKU map, not by re-fetching.
+            # Confirmed live 2026-08-17: without this, a large stuck
+            # window (watermark held back by an earlier partial run)
+            # re-fetched the SAME already-current orders every single
+            # pass, burning the whole budget with zero net progress
+            # instead of ever reaching the genuinely-new orders in it.
+            counts["unchanged_skip"] = counts.get("unchanged_skip", 0) + 1
+            processed += 1
+            continue
+
+        try:
+            items_raw = sp_api.fetch_order_items(oid)
+        except SpApiThrottledError as e:
+            # One stuck order shouldn't abort orders still ahead of it in
+            # the page -- skip it, leave it unstaged, pick it up next run
+            # (still inside the incremental window's 2-day overlap).
+            logger.warning("Skipping order %s (getOrderItems still throttled): %s", oid, e)
+            counts["throttled_skip"] = counts.get("throttled_skip", 0) + 1
+            continue
         lines = _lines_from_items(items_raw)
         skus = [line["seller_sku"] for line in lines]
         unmapped = sorted({s for s in skus if s not in mapping})
@@ -245,10 +429,13 @@ def _stage_from_orders_api(conn, raw_orders: list[dict], mapping: dict[str, str]
 
         result = store.upsert_order(conn, fields, lines)
         counts[result] = counts.get(result, 0) + 1
+        processed += 1
 
     if mfn_ship_dates:
         counts["mfn_ship_dates_set"] = store.set_actual_ship_dates(conn, mfn_ship_dates)
-    return counts
+    counts["processed"] = processed
+    complete = processed == len(raw_orders) and not counts.get("throttled_skip")
+    return counts, complete
 
 
 def _lines_from_items(items_raw: list[dict]) -> list[dict]:

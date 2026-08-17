@@ -218,6 +218,18 @@ functions:
   amazonFetch:
     handler: src.handlers.fetch_handler
     layers: [{ Ref: SharedLambdaLayer }]
+    # EventBridge invokes async, so a timeout counts as failure and Lambda
+    # auto-retries up to 2x by default -- confirmed live 2026-08-17 that a
+    # stuck run's own retries (plus manual invokes) can stack multiple
+    # concurrent callers onto the same thin SP-API quota and turn a slow
+    # recovery into a two-hour outage. A stuck run should wait for its next
+    # natural schedule, not get free concurrent shots at an API that's
+    # already struggling -- same reasoning on every scheduled function
+    # below. Applied manually via `aws lambda put-function-event-invoke-
+    # config` first (a full `serverless deploy` risks the env-var-wipe
+    # incident, see amazon_us_b2c_dashboard_triggers memory); declared
+    # here so a future clean deploy reproduces the same setting.
+    maximumRetryAttempts: 0
     events:
       # Hourly incremental (Orders API watermark). 15-20k orders/mo means
       # dozens of orders per run — the per-order item calls are fine.
@@ -235,6 +247,7 @@ functions:
   amazonFbaShipSync:
     handler: src.handlers.fba_ship_sync_handler
     layers: [{ Ref: SharedLambdaLayer }]
+    maximumRetryAttempts: 0  # see amazonFetch above
     events:
       # Daily, before invoice posting. 20:45 UTC = 02:15 IST.
       - schedule:
@@ -244,6 +257,7 @@ functions:
   amazonPostInvoices:
     handler: src.handlers.post_invoices_handler
     layers: [{ Ref: SharedLambdaLayer }]
+    maximumRetryAttempts: 0  # see amazonFetch above
     events:
       # Hourly during the working window; each run claims up to 200 ready
       # orders (~4 min at SAP's ~57 docs/min ceiling).
@@ -259,6 +273,7 @@ functions:
   amazonPostCreditNotes:
     handler: src.handlers.post_credit_notes_handler
     layers: [{ Ref: SharedLambdaLayer }]
+    maximumRetryAttempts: 0  # see amazonFetch above
     events:
       # Every 6h with a 45-day window: Finances PostedDate lags the MTR,
       # and the duplicate guards make re-processing free.
@@ -269,6 +284,7 @@ functions:
   amazonRecon:
     handler: src.handlers.recon_handler
     layers: [{ Ref: SharedLambdaLayer }]
+    maximumRetryAttempts: 0  # see amazonFetch above
     events:
       # Daily invariants after the posting window. 15:30 UTC = 21:00 IST.
       - schedule:

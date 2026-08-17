@@ -31,6 +31,34 @@ def connect() -> psycopg.Connection:
     return psycopg.connect(DATABASE_URL)
 
 
+# ── Single-flight locks ──────────────────────────────────────────────────
+# Postgres advisory locks, not Python-level -- have to hold across process
+# boundaries because the thing being guarded (SP-API quota) is external and
+# shared by more than one Lambda function. amazonFetch's report-mode sync
+# and amazonFbaShipSync's FBA report both draw from the *same* createReport
+# quota bucket, so REPORTS_API_LOCK has to stop them stepping on each other
+# too, not just guard within one function. Session-scoped: released
+# explicitly via release_lock(), or automatically by Postgres the moment the
+# connection drops -- a Lambda hard-timeout kills the connection, which
+# frees the lock with no explicit cleanup needed.
+ORDERS_API_LOCK = "amz:orders_api"
+REPORTS_API_LOCK = "amz:reports_api"
+
+
+def try_acquire_lock(conn: psycopg.Connection, name: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_try_advisory_lock(hashtext(%s))", (name,))
+        acquired = bool(cur.fetchone()[0])
+    conn.commit()
+    return acquired
+
+
+def release_lock(conn: psycopg.Connection, name: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_advisory_unlock(hashtext(%s))", (name,))
+    conn.commit()
+
+
 # ── Staging ──────────────────────────────────────────────────────────────
 
 _PROTECTED_STAGES = ("posting", "posted")
@@ -43,6 +71,15 @@ def get_order_stage(conn: psycopg.Connection, amazon_order_id: str) -> str | Non
         )
         row = cur.fetchone()
     return row[0] if row else None
+
+
+def get_order_stage_and_status(conn: psycopg.Connection, amazon_order_id: str) -> tuple[str, str] | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT stage, order_status FROM amazon_us_orders WHERE amazon_order_id = %s", (amazon_order_id,)
+        )
+        row = cur.fetchone()
+    return (row[0], row[1]) if row else None
 
 
 def upsert_order(conn: psycopg.Connection, fields: dict[str, Any], lines: list[dict[str, Any]]) -> str:
@@ -547,3 +584,69 @@ def finish_sync_log(
 
 def utcnow_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ── Pending Reports API jobs (resumable poll) ───────────────────────────
+# See sql/amazon_us_b2c.sql for amazon_us_pending_reports. Created here
+# defensively (CREATE TABLE IF NOT EXISTS) so picking this up doesn't
+# depend on a separate prod migration step -- same idempotent DDL either
+# way, just runnable from inside the Lambda that already has DATABASE_URL.
+
+_ENSURE_PENDING_REPORTS_SQL = """
+CREATE TABLE IF NOT EXISTS amazon_us_pending_reports (
+  id           bigserial   PRIMARY KEY,
+  purpose      text        NOT NULL,
+  report_id    text        NOT NULL,
+  requested_at timestamptz NOT NULL DEFAULT now(),
+  context      jsonb       NOT NULL DEFAULT '{}'::jsonb,
+  status       text        NOT NULL DEFAULT 'pending',
+  updated_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_amazon_us_pending_reports_purpose
+  ON amazon_us_pending_reports (purpose, status);
+"""
+
+
+def _ensure_pending_reports_table(conn: psycopg.Connection) -> None:
+    with conn.cursor() as cur:
+        cur.execute(_ENSURE_PENDING_REPORTS_SQL)
+    conn.commit()
+
+
+def create_pending_report(conn: psycopg.Connection, purpose: str, report_id: str, context: dict) -> int:
+    _ensure_pending_reports_table(conn)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO amazon_us_pending_reports (purpose, report_id, context)
+            VALUES (%s, %s, %s) RETURNING id
+            """,
+            (purpose, report_id, json.dumps(context, default=str)),
+        )
+        row_id = cur.fetchone()[0]
+    conn.commit()
+    return row_id
+
+
+def list_pending_reports(conn: psycopg.Connection, purpose: str) -> list[dict]:
+    _ensure_pending_reports_table(conn)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, report_id, context FROM amazon_us_pending_reports
+            WHERE purpose = %s AND status = 'pending'
+            ORDER BY requested_at ASC
+            """,
+            (purpose,),
+        )
+        rows = cur.fetchall()
+    return [{"id": r[0], "report_id": r[1], "context": r[2]} for r in rows]
+
+
+def finish_pending_report(conn: psycopg.Connection, row_id: int, status: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE amazon_us_pending_reports SET status = %s, updated_at = now() WHERE id = %s",
+            (status, row_id),
+        )
+    conn.commit()
