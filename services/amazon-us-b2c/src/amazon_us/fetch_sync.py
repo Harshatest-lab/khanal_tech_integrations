@@ -171,9 +171,54 @@ def sync_incremental(conn, deadline: float | None = None) -> dict:
         store.release_lock(conn, store.ORDERS_API_LOCK)
 
 
+# Bounded poll per report instead of blocking one Lambda invocation for
+# poll_report's full 840s default -- createReport shares one global quota
+# across every report type, so tying up a whole invocation waiting on
+# Amazon's queue is a bad trade. A report not ready within this budget is
+# deferred to resume_orders_reports() / resume_fba_reports() instead.
+_REPORT_POLL_BUDGET_SEC = 180
+_RESUME_POLL_BUDGET_SEC = 60  # shorter still -- resume checks piggyback on the hourly incremental run's own budget
+
+
+def _process_orders_report(conn, content: str, mapping: dict[str, str]) -> dict:
+    """Parse + stage one downloaded orders report. Returns the same totals
+    shape sync_via_report has always returned, so a resumed report merges
+    cleanly with whatever chunks a prior run already completed."""
+    totals = {"orders": 0, "created": 0, "updated": 0, "refreshed": 0, "ready": 0}
+    mfn_ship_dates: dict[str, str] = {}
+    orders = report_parser.parse_orders_report(content)
+    totals["orders"] += len(orders)
+    for header in orders.values():
+        ship_date = _mfn_ship_date(
+            header.get("fulfillment_channel", ""),
+            header.get("order_status", ""),
+            header.get("last_updated_date", ""),
+        )
+        if ship_date:
+            mfn_ship_dates[header["amazon_order_id"]] = ship_date
+        result = _stage_one(conn, header, mapping)
+        totals[result] = totals.get(result, 0) + 1
+        if result != "refreshed" and header.get("_staged_ready"):
+            totals["ready"] += 1
+    if mfn_ship_dates:
+        totals["mfn_ship_dates_set"] = store.set_actual_ship_dates(conn, mfn_ship_dates)
+    return totals
+
+
+def _merge_totals(base: dict, addition: dict) -> None:
+    for k, v in addition.items():
+        base[k] = base.get(k, 0) + v
+
+
 def sync_via_report(conn, from_date: str, to_date: str, lookback_days: int | None = None) -> dict:
     """Bulk fetch via the flat-file report ('YYYY-MM-DD' Pacific dates).
     Applies the MTR lookback to from_date; chunks windows to <= 30 days.
+    A chunk whose report isn't ready within _REPORT_POLL_BUDGET_SEC is
+    deferred to resume_orders_reports() rather than blocking this
+    invocation for poll_report's full 840s default -- later chunks stop
+    too (processing them out of order with an unresolved earlier one
+    would make totals/promote misleading), so this run reports 'partial'
+    and the next resume pass picks the rest up.
 
     Single-flight via REPORTS_API_LOCK: createReport has ONE global quota
     shared across every report type (confirmed against SP-API docs), so
@@ -192,7 +237,7 @@ def sync_via_report(conn, from_date: str, to_date: str, lookback_days: int | Non
         try:
             mapping = refresh_sku_map(conn)
             totals = {"orders": 0, "created": 0, "updated": 0, "refreshed": 0, "ready": 0}
-            mfn_ship_dates: dict[str, str] = {}
+            deferred = False
 
             for chunk_from, chunk_to in date_chunks(fetch_from, to_date, max_days=30):
                 report_id = reports_api.create_report(
@@ -202,33 +247,28 @@ def sync_via_report(conn, from_date: str, to_date: str, lookback_days: int | Non
                     pacific_day_to_utc(chunk_to, end_of_day=True),
                 )
                 logger.info("Orders report %s requested for %s..%s", report_id, chunk_from, chunk_to)
-                doc_id = reports_api.poll_report(report_id)
-                content = reports_api.download_report(doc_id)
-
-                orders = report_parser.parse_orders_report(content)
-                totals["orders"] += len(orders)
-                for header in orders.values():
-                    ship_date = _mfn_ship_date(
-                        header.get("fulfillment_channel", ""),
-                        header.get("order_status", ""),
-                        header.get("last_updated_date", ""),
+                try:
+                    doc_id = reports_api.poll_report(report_id, max_wait=_REPORT_POLL_BUDGET_SEC)
+                except TimeoutError:
+                    store.create_pending_report(
+                        conn, "orders_report", report_id, {"chunk_from": chunk_from, "chunk_to": chunk_to}
                     )
-                    if ship_date:
-                        mfn_ship_dates[header["amazon_order_id"]] = ship_date
+                    logger.warning(
+                        "Orders report %s still processing after %ss -- deferred to resume pass",
+                        report_id, _REPORT_POLL_BUDGET_SEC,
+                    )
+                    deferred = True
+                    break
 
-                    result = _stage_one(conn, header, mapping)
-                    totals[result] = totals.get(result, 0) + 1
-                    if result != "refreshed" and header.get("_staged_ready"):
-                        totals["ready"] += 1
-
-            if mfn_ship_dates:
-                totals["mfn_ship_dates_set"] = store.set_actual_ship_dates(conn, mfn_ship_dates)
+                content = reports_api.download_report(doc_id)
+                _merge_totals(totals, _process_orders_report(conn, content, mapping))
 
             promoted = store.promote_fetched_orders(conn, mapping)
             totals["promoted"] = promoted
 
-            store.finish_sync_log(conn, run_id, "success", totals)
-            return {"status": "success", **totals}
+            status = "partial" if deferred else "success"
+            store.finish_sync_log(conn, run_id, status, totals)
+            return {"status": status, **totals}
         except SpApiThrottledError as e:
             logger.warning("sync_via_report throttled: %s", e)
             store.finish_sync_log(conn, run_id, "throttled", error=str(e))
@@ -236,6 +276,43 @@ def sync_via_report(conn, from_date: str, to_date: str, lookback_days: int | Non
         except Exception as e:
             store.finish_sync_log(conn, run_id, "error", error=str(e))
             raise
+    finally:
+        store.release_lock(conn, store.REPORTS_API_LOCK)
+
+
+def resume_orders_reports(conn, poll_budget: int = _RESUME_POLL_BUDGET_SEC) -> dict:
+    """Finish any orders-report jobs sync_via_report deferred because
+    Amazon's queue wasn't done within the poll budget -- the automatic
+    version of the old manual debug_resume_report tool. A report still
+    not ready within this (short) budget just stays pending for the next
+    check; it is never re-requested (that would waste the shared
+    createReport quota on a report Amazon is already generating)."""
+    if not store.try_acquire_lock(conn, store.REPORTS_API_LOCK):
+        return {"status": "skipped", "reason": "locked"}
+    try:
+        pending = store.list_pending_reports(conn, "orders_report")
+        if not pending:
+            return {"status": "success", "resumed": 0, "still_pending": 0}
+
+        mapping = refresh_sku_map(conn)
+        resumed, still_pending = 0, 0
+        for row in pending:
+            try:
+                doc_id = reports_api.poll_report(row["report_id"], max_wait=poll_budget)
+            except TimeoutError:
+                still_pending += 1
+                continue
+            content = reports_api.download_report(doc_id)
+            _process_orders_report(conn, content, mapping)
+            store.finish_pending_report(conn, row["id"], "done")
+            resumed += 1
+
+        if resumed:
+            store.promote_fetched_orders(conn, mapping)
+        return {"status": "success", "resumed": resumed, "still_pending": still_pending}
+    except SpApiThrottledError as e:
+        logger.warning("resume_orders_reports throttled: %s", e)
+        return {"status": "throttled", "detail": str(e)}
     finally:
         store.release_lock(conn, store.REPORTS_API_LOCK)
 

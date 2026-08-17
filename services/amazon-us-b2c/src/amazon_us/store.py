@@ -584,3 +584,69 @@ def finish_sync_log(
 
 def utcnow_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ── Pending Reports API jobs (resumable poll) ───────────────────────────
+# See sql/amazon_us_b2c.sql for amazon_us_pending_reports. Created here
+# defensively (CREATE TABLE IF NOT EXISTS) so picking this up doesn't
+# depend on a separate prod migration step -- same idempotent DDL either
+# way, just runnable from inside the Lambda that already has DATABASE_URL.
+
+_ENSURE_PENDING_REPORTS_SQL = """
+CREATE TABLE IF NOT EXISTS amazon_us_pending_reports (
+  id           bigserial   PRIMARY KEY,
+  purpose      text        NOT NULL,
+  report_id    text        NOT NULL,
+  requested_at timestamptz NOT NULL DEFAULT now(),
+  context      jsonb       NOT NULL DEFAULT '{}'::jsonb,
+  status       text        NOT NULL DEFAULT 'pending',
+  updated_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_amazon_us_pending_reports_purpose
+  ON amazon_us_pending_reports (purpose, status);
+"""
+
+
+def _ensure_pending_reports_table(conn: psycopg.Connection) -> None:
+    with conn.cursor() as cur:
+        cur.execute(_ENSURE_PENDING_REPORTS_SQL)
+    conn.commit()
+
+
+def create_pending_report(conn: psycopg.Connection, purpose: str, report_id: str, context: dict) -> int:
+    _ensure_pending_reports_table(conn)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO amazon_us_pending_reports (purpose, report_id, context)
+            VALUES (%s, %s, %s) RETURNING id
+            """,
+            (purpose, report_id, json.dumps(context, default=str)),
+        )
+        row_id = cur.fetchone()[0]
+    conn.commit()
+    return row_id
+
+
+def list_pending_reports(conn: psycopg.Connection, purpose: str) -> list[dict]:
+    _ensure_pending_reports_table(conn)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, report_id, context FROM amazon_us_pending_reports
+            WHERE purpose = %s AND status = 'pending'
+            ORDER BY requested_at ASC
+            """,
+            (purpose,),
+        )
+        rows = cur.fetchall()
+    return [{"id": r[0], "report_id": r[1], "context": r[2]} for r in rows]
+
+
+def finish_pending_report(conn: psycopg.Connection, row_id: int, status: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE amazon_us_pending_reports SET status = %s, updated_at = now() WHERE id = %s",
+            (status, row_id),
+        )
+    conn.commit()
