@@ -260,9 +260,23 @@ const STAGE_BADGE = {
   failed: "badge-failed",
 };
 
+// fetched -> ready -> posting -> posted: the rail makes this literal.
+// failed always follows an attempted post, so it renders as the rail
+// breaking after "ready" rather than a 5th step of its own.
+const STAGE_ORDER = ["fetched", "ready", "posting", "posted"];
+
+function stageRail(stage) {
+  const failed = stage === "failed";
+  const filled = failed ? 2 : STAGE_ORDER.indexOf(stage) + 1;
+  const dots = STAGE_ORDER.map((_, i) =>
+    `<span class="stage-rail-dot${i < filled ? " is-filled" : ""}"></span>`
+  ).join("");
+  return `<span class="stage-rail${failed ? " is-failed" : ""}" title="${escapeHtml(STAGE_ORDER.join(" → "))}">${dots}</span>`;
+}
+
 function stageBadge(stage) {
   const cls = STAGE_BADGE[stage] || "badge-default";
-  return `<span class="badge ${cls}">${escapeHtml(stage || "—")}</span>`;
+  return `<span class="stage-badge">${stageRail(stage)}<span class="badge ${cls}">${escapeHtml(stage || "—")}</span></span>`;
 }
 
 function cnStatusBadge(status) {
@@ -424,6 +438,27 @@ document.querySelectorAll(".nav-item[data-panel]").forEach((a) => {
 
 let lastStats = null;
 
+const KPI_ICON = {
+  package: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>',
+  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>',
+  send: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>',
+  download: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>',
+  alert: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>',
+  refund: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 14 4 9 9 4"></polyline><path d="M20 20v-7a4 4 0 0 0-4-4H4"></path></svg>',
+};
+
+function kpiCard(icon, value, label, variant) {
+  return `
+    <span class="kpi-card${variant ? ` kpi-card--${variant}` : ""}">
+      <span class="kpi-icon">${KPI_ICON[icon]}</span>
+      <span class="kpi-text">
+        <span class="kpi-value">${escapeHtml(String(value))}</span>
+        <span class="kpi-label">${escapeHtml(label)}</span>
+      </span>
+    </span>
+  `;
+}
+
 async function loadStats() {
   const stats = await apiGet("/v1/amazon/stats");
   lastStats = stats;
@@ -435,15 +470,15 @@ async function loadStats() {
   const fetched = byStage.fetched || 0;
   const cnPosted = stats.cn_by_status?.posted || 0;
   const cnFailed = (stats.cn_by_status?.failed || 0) + (stats.cn_by_status?.failed_permanent || 0);
-  chips.innerHTML = `
-    <span class="stat-chip">${escapeHtml(String(stats.total_orders ?? 0))} orders</span>
-    <span class="stat-chip stat-chip--success">${escapeHtml(String(posted))} posted</span>
-    <span class="stat-chip">${escapeHtml(String(ready))} ready</span>
-    <span class="stat-chip">${escapeHtml(String(fetched))} fetched</span>
-    <span class="stat-chip ${failed > 0 ? "stat-chip--danger" : "stat-chip--muted"}">${escapeHtml(String(failed))} failed</span>
-    <span class="stat-chip stat-chip--success">${escapeHtml(String(cnPosted))} CN posted</span>
-    <span class="stat-chip ${cnFailed > 0 ? "stat-chip--danger" : "stat-chip--muted"}">${escapeHtml(String(cnFailed))} CN failed</span>
-  `;
+  chips.innerHTML = [
+    kpiCard("package", stats.total_orders ?? 0, "orders"),
+    kpiCard("check", posted, "posted", "good"),
+    kpiCard("send", ready, "ready"),
+    kpiCard("download", fetched, "fetched"),
+    kpiCard("alert", failed, "failed", failed > 0 ? "crit" : undefined),
+    kpiCard("refund", cnPosted, "CN posted", "good"),
+    kpiCard("refund", cnFailed, "CN failed", cnFailed > 0 ? "crit" : undefined),
+  ].join("");
 }
 
 // ── Pipeline health panel ────────────────────────────────────────────────
