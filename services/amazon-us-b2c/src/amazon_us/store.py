@@ -650,3 +650,139 @@ def finish_pending_report(conn: psycopg.Connection, row_id: int, status: str) ->
             (status, row_id),
         )
     conn.commit()
+
+
+# ── Pre-cutoff cleanup ───────────────────────────────────────────────────
+# Orders shipped before AMZ_POSTING_CUTOFF_DATE were manually booked by
+# Finance from the MTR pre-pipeline (see constants.POSTING_CUTOFF_DATE) --
+# the posting query (list_ready_orders) already refuses to ever post them,
+# so any such order sitting in stage != 'posted' is permanently dead, not
+# a bug waiting to be retried. 'posting' is deliberately excluded even
+# though it should never occur pre-cutoff (the cutoff guard blocks the
+# transition) -- a belt-and-suspenders skip of anything that might be
+# mid-flight rather than assuming the guard always held.
+_PRECUTOFF_UNPOSTED_STAGES = ("fetched", "ready", "failed")
+
+
+def count_precutoff_unposted(conn: psycopg.Connection, cutoff_date: str) -> dict:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT COUNT(*), MIN(actual_ship_date), MAX(actual_ship_date)
+            FROM amazon_us_orders
+            WHERE stage = ANY(%s) AND actual_ship_date < %s
+            """,
+            (list(_PRECUTOFF_UNPOSTED_STAGES), cutoff_date),
+        )
+        count, min_date, max_date = cur.fetchone()
+        cur.execute(
+            """
+            SELECT amazon_order_id, stage, actual_ship_date, order_total_amount
+            FROM amazon_us_orders
+            WHERE stage = ANY(%s) AND actual_ship_date < %s
+            ORDER BY actual_ship_date DESC
+            LIMIT 10
+            """,
+            (list(_PRECUTOFF_UNPOSTED_STAGES), cutoff_date),
+        )
+        sample = [
+            {"amazon_order_id": r[0], "stage": r[1], "actual_ship_date": str(r[2]), "order_total_amount": float(r[3])}
+            for r in cur.fetchall()
+        ]
+    return {
+        "count": int(count or 0),
+        "min_ship_date": str(min_date) if min_date else None,
+        "max_ship_date": str(max_date) if max_date else None,
+        "sample": sample,
+    }
+
+
+def count_unposted_by_purchase_month(conn: psycopg.Connection, month_start: str, month_end: str) -> dict:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT COUNT(*)
+            FROM amazon_us_orders
+            WHERE stage = ANY(%s) AND purchase_date >= %s AND purchase_date < %s
+            """,
+            (list(_PRECUTOFF_UNPOSTED_STAGES), month_start, month_end),
+        )
+        count = cur.fetchone()[0]
+        cur.execute(
+            """
+            SELECT amazon_order_id, stage, order_status, purchase_date, actual_ship_date
+            FROM amazon_us_orders
+            WHERE stage = ANY(%s) AND purchase_date >= %s AND purchase_date < %s
+            ORDER BY purchase_date DESC
+            LIMIT 10
+            """,
+            (list(_PRECUTOFF_UNPOSTED_STAGES), month_start, month_end),
+        )
+        sample = [
+            {"amazon_order_id": r[0], "stage": r[1], "order_status": r[2], "purchase_date": str(r[3]), "actual_ship_date": str(r[4]) if r[4] else None}
+            for r in cur.fetchall()
+        ]
+    return {"count": int(count or 0), "sample": sample}
+
+
+def delete_unposted_by_purchase_month(conn: psycopg.Connection, month_start: str, month_end: str) -> dict:
+    """Same shape as delete_precutoff_unposted, scoped by purchase_date
+    instead of actual_ship_date -- for orders that never shipped at all
+    (actual_ship_date IS NULL) so the ship-date-based purge can't catch
+    them, but are old enough purchase-date-wise to be dead, not
+    in-flight. Caller is responsible for confirming (e.g. via
+    debug_june_purchase_unposted_breakdown) that nothing in scope has
+    actual_ship_date >= the posting cutoff, i.e. is still legitimately
+    postable -- this function does not re-check that itself."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM amazon_us_invoice_log
+            WHERE amazon_order_id IN (
+              SELECT amazon_order_id FROM amazon_us_orders
+              WHERE stage = ANY(%s) AND purchase_date >= %s AND purchase_date < %s
+            )
+            """,
+            (list(_PRECUTOFF_UNPOSTED_STAGES), month_start, month_end),
+        )
+        invoice_log_deleted = cur.rowcount
+        cur.execute(
+            """
+            DELETE FROM amazon_us_orders
+            WHERE stage = ANY(%s) AND purchase_date >= %s AND purchase_date < %s
+            """,
+            (list(_PRECUTOFF_UNPOSTED_STAGES), month_start, month_end),
+        )
+        orders_deleted = cur.rowcount
+    conn.commit()
+    return {"orders_deleted": orders_deleted, "invoice_log_deleted": invoice_log_deleted}
+
+
+def delete_precutoff_unposted(conn: psycopg.Connection, cutoff_date: str) -> dict:
+    """Deletes matching amazon_us_orders rows (amazon_us_order_lines cascade
+    automatically) plus any amazon_us_invoice_log rows referencing them --
+    that table has no FK, so a plain orders delete would leave orphaned
+    failed-attempt log rows pointing at an amazon_order_id that no longer
+    exists."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM amazon_us_invoice_log
+            WHERE amazon_order_id IN (
+              SELECT amazon_order_id FROM amazon_us_orders
+              WHERE stage = ANY(%s) AND actual_ship_date < %s
+            )
+            """,
+            (list(_PRECUTOFF_UNPOSTED_STAGES), cutoff_date),
+        )
+        invoice_log_deleted = cur.rowcount
+        cur.execute(
+            """
+            DELETE FROM amazon_us_orders
+            WHERE stage = ANY(%s) AND actual_ship_date < %s
+            """,
+            (list(_PRECUTOFF_UNPOSTED_STAGES), cutoff_date),
+        )
+        orders_deleted = cur.rowcount
+    conn.commit()
+    return {"orders_deleted": orders_deleted, "invoice_log_deleted": invoice_log_deleted}
