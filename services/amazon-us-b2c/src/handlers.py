@@ -311,6 +311,15 @@ def post_invoices_handler(event, context):
             return {"payload": payload, "skipped": skipped}
         if ev.get("mode") == "export_recon":
             return _export_recon(ev["period_from"], ev["period_to"], ev.get("s3_bucket") or constants.RECON_BUCKET)
+        if ev.get("mode") == "export_inventory_consumption":
+            # {"mode": "export_inventory_consumption", "date_from": "YYYY-MM-DD", "date_to": "YYYY-MM-DD"?, "s3_bucket": ?}
+            # Inventory-team ask: units consumed per SKU from posted (SAP-invoiced)
+            # orders. Windowed on actual_ship_date, not purchase_date -- that's the
+            # SAP DocDate/inventory-movement date (see _export_recon), so an order
+            # purchased in July but shipped in August consumes August inventory.
+            date_from = ev["date_from"]
+            date_to = ev.get("date_to") or date.today().isoformat()
+            return _export_inventory_consumption(date_from, date_to, ev.get("s3_bucket") or constants.RECON_BUCKET)
         if ev.get("mode") == "export_finance_revenue_report":
             return _export_finance_revenue_report(ev["period_from"], ev["period_to"], ev.get("s3_bucket") or constants.RECON_BUCKET)
         if ev.get("mode") == "debug_bom_check":
@@ -1233,6 +1242,75 @@ def _export_recon(period_from: str, period_to: str, s3_bucket: str) -> dict:
     return {
         "invoices_key": inv_key, "credit_notes_key": cn_key,
         "invoice_rows": len(order_rows), "cn_rows": len(events),
+    }
+
+
+def _export_inventory_consumption(date_from: str, date_to: str, s3_bucket: str) -> dict:
+    """Line-level detail + per-SKU summary of units consumed by posted
+    (SAP-invoiced) orders whose actual_ship_date falls in [date_from, date_to].
+    Two CSVs to S3, same layout as _export_recon."""
+    import csv
+    import io
+
+    import boto3
+
+    with store.connect() as conn:
+        mapping = store.get_sku_mapping(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT o.amazon_order_id, o.purchase_date, o.actual_ship_date, o.fulfillment_channel,
+                       o.sap_doc_entry, o.sap_doc_num, o.posted_at,
+                       l.seller_sku, l.asin, l.title, l.quantity
+                FROM amazon_us_orders o
+                JOIN amazon_us_order_lines l ON l.amazon_order_id = o.amazon_order_id
+                WHERE o.stage = 'posted'
+                  AND o.actual_ship_date >= %s::date AND o.actual_ship_date <= %s::date
+                ORDER BY o.actual_ship_date, o.amazon_order_id
+                """,
+                [date_from, date_to],
+            )
+            rows = cur.fetchall()
+
+    detail_buf = io.StringIO()
+    w = csv.writer(detail_buf)
+    w.writerow([
+        "amazon_order_id", "purchase_date", "actual_ship_date", "fulfillment_channel",
+        "amazon_sku", "asin", "title", "quantity", "sap_sku",
+        "sap_doc_entry", "sap_doc_num", "posted_at",
+    ])
+    summary: dict[str, dict[str, Any]] = {}
+    unmapped_skus: set[str] = set()
+    for (oid, purchase_date, ship_date, channel, doc_entry, doc_num, posted_at,
+         seller_sku, asin, title, quantity) in rows:
+        sap_sku = mapping.get(seller_sku, "")
+        if not sap_sku:
+            unmapped_skus.add(seller_sku)
+        w.writerow([
+            oid, purchase_date, ship_date, channel,
+            seller_sku, asin, title, quantity, sap_sku,
+            doc_entry or "", doc_num or "", posted_at or "",
+        ])
+        entry = summary.setdefault(seller_sku, {"sap_sku": sap_sku, "quantity": 0, "orders": set()})
+        entry["quantity"] += float(quantity)
+        entry["orders"].add(oid)
+
+    summary_buf = io.StringIO()
+    w2 = csv.writer(summary_buf)
+    w2.writerow(["amazon_sku", "sap_sku", "total_quantity_consumed", "order_count"])
+    for seller_sku, entry in sorted(summary.items(), key=lambda kv: -kv[1]["quantity"]):
+        w2.writerow([seller_sku, entry["sap_sku"], entry["quantity"], len(entry["orders"])])
+
+    s3 = boto3.client("s3")
+    detail_key = f"inventory-export/detail_{date_from}_{date_to}.csv"
+    summary_key = f"inventory-export/summary_{date_from}_{date_to}.csv"
+    s3.put_object(Bucket=s3_bucket, Key=detail_key, Body=detail_buf.getvalue().encode("utf-8"))
+    s3.put_object(Bucket=s3_bucket, Key=summary_key, Body=summary_buf.getvalue().encode("utf-8"))
+    return {
+        "detail_key": detail_key, "summary_key": summary_key,
+        "detail_rows": len(rows), "sku_count": len(summary),
+        "total_quantity": sum(e["quantity"] for e in summary.values()),
+        "unmapped_skus": sorted(unmapped_skus),
     }
 
 
