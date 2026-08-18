@@ -94,7 +94,7 @@ provider:
   environment:
     STAGE: ${self:provider.stage}
     LOG_LEVEL: ${env:LOG_LEVEL, 'INFO'}
-    DATABASE_URL: ${env:DATABASE_URL, ''}
+    DATABASE_URL: ${env:DATABASE_URL, ''}${self:custom.currentDbSearchPathSuffix}
     UC_API_PARAM_NAME: ${self:custom.ucApiParamName}
     UC_SETTINGS_PARAM_NAME: ${self:custom.ucSettingsParamName}
     UC_ALERT_ADMIN_EMAIL: ${env:UC_ALERT_ADMIN_EMAIL, ''}
@@ -135,19 +135,32 @@ custom:
     dev: /sap/india_test
     prod: /sap/unicommerce
   currentSapPrefix: ${self:custom.sapPrefixByStage.${self:provider.stage}, '/sap/india_test'}
-  # Fetch/PostInvoices/PostCreditNotes crons must only ever run in prod:
-  # dev and prod share the one physical RDS instance and the same
-  # unstaged unicommerce_orders table (no logical isolation, see
-  # 2026-08-17 incident where dev's dashboard rendered identical rows to
-  # prod's). A dev cron claiming a 'ready' row races prod for it and, on
-  # winning, marks that shared row 'posted' with a DocEntry from dev's
-  # india_test SAP company instead of prod's real KFL_LIVE posting --
-  # silent data corruption, not just a wasted dev run. Any stage not
-  # listed here falls back to false, the safe default.
+  # Fetch/PostInvoices/PostCreditNotes crons must only ever run in prod.
+  # Kept disabled in dev even after the schema split below as
+  # defense-in-depth -- there is still no reason for dev to write
+  # anything unattended. Any stage not listed here falls back to false,
+  # the safe default.
   schedulesEnabledByStage:
     dev: false
     prod: true
   currentSchedulesEnabled: ${self:custom.schedulesEnabledByStage.${self:provider.stage}, false}
+  # dev and prod share the one physical RDS instance/database
+  # (khanal_serverless) -- there's no separate dev DB to point at. Real
+  # isolation instead comes from a Postgres search_path: dev's connection
+  # is pinned to the unicommerce_dev schema (tables built from
+  # sql/unicommerce_b2c.sql, see 2026-08-18 fix), so unqualified table
+  # names in dashboard_queries.py/store.py resolve to dev's own empty
+  # copies instead of prod's public-schema rows. Prod gets an empty
+  # suffix -- its DATABASE_URL is byte-identical to before this existed,
+  # so this cannot change prod's connection. Fixes the 2026-08-17
+  # incident where dev's dashboard rendered identical rows to prod's,
+  # and the win-condition where a dev cron claiming a shared 'ready' row
+  # would mark it 'posted' with a DocEntry from dev's india_test SAP
+  # company instead of prod's real KFL_LIVE posting.
+  dbSearchPathSuffixByStage:
+    dev: "?options=-c%20search_path%3Dunicommerce_dev"
+    prod: ""
+  currentDbSearchPathSuffix: ${self:custom.dbSearchPathSuffixByStage.${self:provider.stage}, ''}
 
 layers:
   shared:
