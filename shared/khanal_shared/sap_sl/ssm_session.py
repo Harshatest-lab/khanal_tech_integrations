@@ -4,7 +4,7 @@ Parameters (SecureString, Standard tier)::
 
     /sap/sl_config     — JSON: ``sap_b1_url``, ``companydb``
     /sap/credentials   — JSON: ``username``, ``password``
-    /sap/b1_session    — JSON: ``b1session``, ``routeid``, ``expires_on``, ``is_locked``
+    /sap/b1_session    — JSON: ``b1session``, ``routeid``, ``expires_on``, ``is_locked``, ``locked_at``
 
 Set env ``SAP_SL_USE_SSM`` to ``1`` / ``true`` / ``yes`` to use SSM + SAP Login in-process on each
 caller that imports this package. Otherwise callers can use ``SAP_SL_*`` environment variables only
@@ -34,6 +34,16 @@ logger = logging.getLogger(__name__)
 
 _LOCK_WAIT_SEC = 2.0
 _MAX_LOCK_WAITS = 30
+# A lock holder that dies mid-renewal (Lambda hard timeout, OOM kill) never
+# reaches the except-block cleanup that flips is_locked back to False --
+# there's nothing tying this SSM flag to the holder's process lifetime, so
+# without a TTL it stays locked forever. sap_sl_request_json's own timeout
+# is 90s, so 150s gives a real in-flight renewal room to finish before a
+# waiter decides the lock is abandoned and steals it. Confirmed live
+# 2026-08-18: a timed-out amazonPostInvoices run left is_locked=True for
+# 20+ minutes, wedging every subsequent SAP call behind "exceeded max
+# waits" until manually cleared.
+_STALE_LOCK_SEC = 150
 
 
 def sap_sl_ssm_prefix() -> str:
@@ -226,14 +236,26 @@ def _resolve_session_tokens() -> tuple[str, str, str]:
         expires_on_str = session_data.get("expires_on") or ""
 
         if is_locked:
-            log_json(
-                logger,
-                logging.DEBUG,
-                "sap_sl_ssm_wait_lock",
-                wait_sec=_LOCK_WAIT_SEC,
-            )
-            time.sleep(_LOCK_WAIT_SEC)
-            continue
+            locked_at = _parse_expires(str(session_data.get("locked_at") or ""))
+            lock_age = (datetime.now(timezone.utc) - locked_at).total_seconds() if locked_at else None
+            if lock_age is not None and lock_age > _STALE_LOCK_SEC:
+                log_json(
+                    logger,
+                    logging.WARNING,
+                    "sap_sl_ssm_stale_lock_stolen",
+                    lock_age_sec=lock_age,
+                )
+                # Fall through and steal it -- the holder that set this is
+                # presumed dead (hard timeout/OOM), not just slow.
+            else:
+                log_json(
+                    logger,
+                    logging.DEBUG,
+                    "sap_sl_ssm_wait_lock",
+                    wait_sec=_LOCK_WAIT_SEC,
+                )
+                time.sleep(_LOCK_WAIT_SEC)
+                continue
 
         now = datetime.now(timezone.utc)
         exp = _parse_expires(str(expires_on_str))
@@ -246,6 +268,7 @@ def _resolve_session_tokens() -> tuple[str, str, str]:
 
         try:
             session_data["is_locked"] = True
+            session_data["locked_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             _put_param_json(param_b1_session(), session_data)
         except Exception:
             log_json(
@@ -274,6 +297,7 @@ def _resolve_session_tokens() -> tuple[str, str, str]:
             try:
                 cur = _get_param_json(param_b1_session())
                 cur["is_locked"] = False
+                cur["locked_at"] = ""
                 _put_param_json(param_b1_session(), cur)
             except Exception:
                 log_json(
