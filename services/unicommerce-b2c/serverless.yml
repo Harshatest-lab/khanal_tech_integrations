@@ -135,6 +135,19 @@ custom:
     dev: /sap/india_test
     prod: /sap/unicommerce
   currentSapPrefix: ${self:custom.sapPrefixByStage.${self:provider.stage}, '/sap/india_test'}
+  # Fetch/PostInvoices/PostCreditNotes crons must only ever run in prod:
+  # dev and prod share the one physical RDS instance and the same
+  # unstaged unicommerce_orders table (no logical isolation, see
+  # 2026-08-17 incident where dev's dashboard rendered identical rows to
+  # prod's). A dev cron claiming a 'ready' row races prod for it and, on
+  # winning, marks that shared row 'posted' with a DocEntry from dev's
+  # india_test SAP company instead of prod's real KFL_LIVE posting --
+  # silent data corruption, not just a wasted dev run. Any stage not
+  # listed here falls back to false, the safe default.
+  schedulesEnabledByStage:
+    dev: false
+    prod: true
+  currentSchedulesEnabled: ${self:custom.schedulesEnabledByStage.${self:provider.stage}, false}
 
 layers:
   shared:
@@ -168,7 +181,7 @@ functions:
       # UC, writes to separate DBs), this is the documented dual-run step.
       - schedule:
           rate: cron(2,32 * * * ? *)
-          enabled: true
+          enabled: ${self:custom.currentSchedulesEnabled}
 
   unicommercePostInvoices:
     handler: src.handlers.post_invoices_handler
@@ -180,7 +193,7 @@ functions:
       # double-posting risk, this is now the only system posting invoices.
       - schedule:
           rate: cron(7,37 * * * ? *)
-          enabled: true
+          enabled: ${self:custom.currentSchedulesEnabled}
 
   unicommercePostCreditNotes:
     handler: src.handlers.post_credit_notes_handler
@@ -193,7 +206,7 @@ functions:
       # back-to-back discipline as every other cutover here.
       - schedule:
           rate: cron(17,47 * * * ? *)
-          enabled: true
+          enabled: ${self:custom.currentSchedulesEnabled}
 
   unicommercePoGrn:
     handler: src.handlers.pogrn_handler
@@ -303,10 +316,12 @@ resources:
         SupportedIdentityProviders:
           - COGNITO
 
-    # Static hosting for services/unicommerce-b2c/dashboard/ — private bucket,
-    # read only via CloudFront's Origin Access Control (no public bucket
-    # policy, no website-hosting endpoint). Content is pushed with
-    # `aws s3 sync` after deploy, not managed by this stack.
+    # Static hosting for services/unicommerce-b2c/dashboard/ (React/Vite app,
+    # built to dashboard/dist/) — private bucket, read only via CloudFront's
+    # Origin Access Control (no public bucket policy, no website-hosting
+    # endpoint). Build with `npm run build` in dashboard/, then push
+    # dashboard/dist/ with `aws s3 sync` after deploy — not managed by this
+    # stack.
     DashboardSiteBucket:
       Type: AWS::S3::Bucket
       Properties:
