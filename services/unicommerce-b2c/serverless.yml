@@ -94,7 +94,20 @@ provider:
   environment:
     STAGE: ${self:provider.stage}
     LOG_LEVEL: ${env:LOG_LEVEL, 'INFO'}
-    DATABASE_URL: ${env:DATABASE_URL, ''}${self:custom.currentDbSearchPathSuffix}
+    # Stage-keyed DATABASE_URL (see custom.currentDatabaseUrl below):
+    # DATABASE_URL is a single repo-wide secret shared by every service and
+    # every stage -- "dev" keeps reading it unchanged (into its own
+    # unicommerce_dev schema, via the search_path suffix below). "prod" gets
+    # its own dedicated database (unicommerce_b2c_prod, created 2026-08-18,
+    # same RDS instance, same pattern as amazon-us-b2c's AMZ_PROD_DATABASE_URL
+    # split) via UC_PROD_DATABASE_URL, so unicommerce prod stops sharing a
+    # database with amazon-us-b2c dev, delivery-api, and Walmart. Data
+    # migrated via \copy with explicit column lists (NOT pg_dump -- the live
+    # table's physical column order had drifted from sql/unicommerce_b2c.sql
+    # after a later ALTER TABLE, which silently corrupts positional COPY);
+    # verified with a full-table MD5 checksum on both sides post-migration.
+    # Any stage not listed falls back to the shared DATABASE_URL.
+    DATABASE_URL: ${self:custom.currentDatabaseUrl}${self:custom.currentDbSearchPathSuffix}
     UC_API_PARAM_NAME: ${self:custom.ucApiParamName}
     UC_SETTINGS_PARAM_NAME: ${self:custom.ucSettingsParamName}
     UC_ALERT_ADMIN_EMAIL: ${env:UC_ALERT_ADMIN_EMAIL, ''}
@@ -119,6 +132,19 @@ provider:
 custom:
   ucApiParamName: ${env:UC_API_PARAM_NAME, '/unicommerce/api_credentials'}
   ucSettingsParamName: ${env:UC_SETTINGS_PARAM_NAME, '/unicommerce/settings'}
+  # Stage-keyed database URL -- only "prod" gets its own dedicated database
+  # (UC_PROD_DATABASE_URL); every other stage keeps reading the shared
+  # DATABASE_URL secret unchanged, same as every other service in this repo.
+  # dev also gets its own least-privilege credential (UC_DEV_DATABASE_URL,
+  # 2026-08-18): a role scoped to only the unicommerce_dev schema below, no
+  # grants on public or any other service's tables in this shared database
+  # -- replaces the previous shared superuser credential, which could read
+  # every other service's data by virtue of being a superuser, not because
+  # anything relied on it doing so.
+  databaseUrlByStage:
+    dev: ${env:UC_DEV_DATABASE_URL, env:DATABASE_URL, ''}
+    prod: ${env:UC_PROD_DATABASE_URL, env:DATABASE_URL, ''}
+  currentDatabaseUrl: ${self:custom.databaseUrlByStage.${self:provider.stage}, env:DATABASE_URL, ''}
   # Stage-keyed SAP/HANA profile -- "dev" stays isolated on the TEST
   # company DB forever; "prod" resolves to "unicommerce", its own
   # dedicated profile/company (KFL_LIVE) -- NOT the bare default /sap/*
@@ -150,13 +176,16 @@ custom:
   # is pinned to the unicommerce_dev schema (tables built from
   # sql/unicommerce_b2c.sql, see 2026-08-18 fix), so unqualified table
   # names in dashboard_queries.py/store.py resolve to dev's own empty
-  # copies instead of prod's public-schema rows. Prod gets an empty
-  # suffix -- its DATABASE_URL is byte-identical to before this existed,
-  # so this cannot change prod's connection. Fixes the 2026-08-17
-  # incident where dev's dashboard rendered identical rows to prod's,
-  # and the win-condition where a dev cron claiming a shared 'ready' row
-  # would mark it 'posted' with a DocEntry from dev's india_test SAP
-  # company instead of prod's real KFL_LIVE posting.
+  # copies instead of the shared database's rows. Prod gets an empty
+  # suffix -- since the same 2026-08-18 change, prod's DATABASE_URL points
+  # at its own dedicated database (unicommerce_b2c_prod) via
+  # UC_PROD_DATABASE_URL above, so it never touches this shared database at
+  # all; the suffix stays empty because prod's own database only has a
+  # public schema, same as before. Fixes the 2026-08-17 incident where
+  # dev's dashboard rendered identical rows to prod's, and the win-condition
+  # where a dev cron claiming a shared 'ready' row would mark it 'posted'
+  # with a DocEntry from dev's india_test SAP company instead of prod's
+  # real KFL_LIVE posting.
   dbSearchPathSuffixByStage:
     dev: "?options=-c%20search_path%3Dunicommerce_dev"
     prod: ""

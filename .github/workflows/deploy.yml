@@ -110,6 +110,13 @@ jobs:
           AMZ_ALERT_FROM_EMAIL: ${{ secrets.AMZ_ALERT_FROM_EMAIL }}
           AMZ_SES_REGION: ${{ secrets.AMZ_SES_REGION }}
           # unicommerce-b2c only — falls back to serverless.yml defaults if unset.
+          # UC_PROD_DATABASE_URL: unicommerce-b2c prod's own dedicated database
+          # (unicommerce_b2c_prod), separate from the shared DATABASE_URL every
+          # other service/stage still reads. Only used when stage=prod.
+          UC_PROD_DATABASE_URL: ${{ secrets.UC_PROD_DATABASE_URL }}
+          # UC_DEV_DATABASE_URL: least-privilege role scoped to the
+          # unicommerce_dev schema only. Only used when stage=dev.
+          UC_DEV_DATABASE_URL: ${{ secrets.UC_DEV_DATABASE_URL }}
           UC_API_PARAM_NAME: ${{ secrets.UC_API_PARAM_NAME }}
           UC_ALERT_ADMIN_EMAIL: ${{ secrets.UC_ALERT_ADMIN_EMAIL }}
           UC_ALERT_FROM_EMAIL: ${{ secrets.UC_ALERT_FROM_EMAIL }}
