@@ -32,7 +32,7 @@ _SRC = Path(__file__).resolve().parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unicommerce import credit_notes, dashboard_queries, fetch_sync, pogrn, post_invoices, recon, store
+from unicommerce import constants, credit_notes, dashboard_queries, fetch_sync, pogrn, post_invoices, recon, store
 from unicommerce.alerts import send_alert
 
 # boto3 isn't a declared dev/CI dependency (only present in the real Lambda
@@ -175,7 +175,7 @@ def admin_purge_pre_cutoff_unposted_handler(event, context):
     {"confirm": "yes-delete"} to actually execute the DELETE."""
     ev = event or {}
     confirm = ev.get("confirm") == "yes-delete"
-    cutoff = os.environ.get("UC_POSTING_CUTOFF_DATE", "2026-08-01")
+    cutoff = constants.POSTING_CUTOFF_DATE
 
     def _go():
         with store.connect() as conn:
