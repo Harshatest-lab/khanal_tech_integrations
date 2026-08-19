@@ -175,8 +175,10 @@ def admin_debug_sap_invoice_handler(event, context):
     profile = ev.get("profile") or "unicommerce"
     inspect_only = bool(ev.get("inspect"))
     find_uc_order_id = ev.get("find_uc_order_id")
+    check_headers = bool(ev.get("check_headers"))
 
     def _go():
+        from khanal_shared.sap_sl import build_opener_and_base_via_ssm
         from khanal_shared.sap_sl.ssm_session import _get_param_json, param_b1_session, param_sl_config
 
         prior = os.environ.get("SAP_SL_PROFILE")
@@ -194,6 +196,19 @@ def admin_debug_sap_invoice_handler(event, context):
                 # (HANA primary, OData Comments-contains fallback).
                 return sap_client.find_invoice_by_uc_order_id(find_uc_order_id)
             doc_entry = int(ev["doc_entry"])
+            if check_headers:
+                # Raw request bypassing sap_sl_request_json (which drops
+                # headers) -- checking for a caching proxy/gateway between
+                # us and SAP that could return a stale/wrong response to a
+                # request instead of hitting the backend fresh (would
+                # explain a POST /Invoices returning an existing unrelated
+                # document instead of creating + returning a new one).
+                import urllib.request
+
+                opener, base = build_opener_and_base_via_ssm()
+                req = urllib.request.Request(f"{base}/Invoices({doc_entry})", method="GET")
+                with opener.open(req, timeout=90) as resp:
+                    return {"status": resp.status, "headers": dict(resp.headers.items())}
             return sap_client.get_invoice_by_doc_entry(doc_entry)
         finally:
             if prior is None:
