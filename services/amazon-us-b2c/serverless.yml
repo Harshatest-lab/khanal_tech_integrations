@@ -277,8 +277,17 @@ functions:
     events:
       # Every 6h with a 45-day window: Finances PostedDate lags the MTR,
       # and the duplicate guards make re-processing free.
+      #
+      # Fixed at :55 rather than plain rate(6 hours): PostInvoices runs
+      # hourly at :30 during 21-14 UTC and both share the SAP SL session
+      # lock in SSM. rate(6 hours) drifted to firing ~7min after PostInvoices
+      # started, landing inside its ~4min run -- confirmed live 2026-08-19,
+      # every single 6h cycle failing "exceeded max waits while is_locked".
+      # :55 gives 25min clearance from the nearest :30 run on both sides,
+      # and the 18:55 slot falls inside PostInvoices' quiet window (15-20
+      # UTC has no hourly run at all).
       - schedule:
-          rate: rate(6 hours)
+          rate: cron(55 */6 * * ? *)
           enabled: ${self:custom.currentScheduleEnabled}
 
   amazonRecon:
