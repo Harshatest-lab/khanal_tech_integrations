@@ -32,7 +32,7 @@ _SRC = Path(__file__).resolve().parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unicommerce import constants, credit_notes, dashboard_queries, fetch_sync, pogrn, post_invoices, recon, store
+from unicommerce import credit_notes, dashboard_queries, fetch_sync, pogrn, post_invoices, recon, store
 from unicommerce.alerts import send_alert
 
 # boto3 isn't a declared dev/CI dependency (only present in the real Lambda
@@ -160,44 +160,6 @@ def post_credit_notes_handler(event, context):
             )
 
     return _run("post_credit_notes", _go)
-
-
-def admin_purge_pre_cutoff_unposted_handler(event, context):
-    """One-off admin op, invoked manually (no schedule/httpApi trigger).
-
-    Hard-deletes unicommerce_orders rows with order_date before
-    UC_POSTING_CUTOFF_DATE and pipeline_status != 'posted' -- these can
-    never post (get_ready_orders' cutoff filter permanently excludes
-    them by design), confirmed as pre-migration historical backlog
-    safe to remove. Cascades to unicommerce_order_lines via its FK.
-
-    Defaults to a dry-run (counts only, no delete). Pass
-    {"confirm": "yes-delete"} to actually execute the DELETE."""
-    ev = event or {}
-    confirm = ev.get("confirm") == "yes-delete"
-    cutoff = constants.POSTING_CUTOFF_DATE
-
-    def _go():
-        with store.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT pipeline_status, count(*) FROM unicommerce_orders "
-                    "WHERE order_date < %s AND pipeline_status != 'posted' "
-                    "GROUP BY pipeline_status",
-                    (cutoff,),
-                )
-                breakdown = {row[0]: row[1] for row in cur.fetchall()}
-                if not confirm:
-                    return {"dry_run": True, "cutoff": cutoff, "would_delete_by_status": breakdown}
-                cur.execute(
-                    "DELETE FROM unicommerce_orders WHERE order_date < %s AND pipeline_status != 'posted'",
-                    (cutoff,),
-                )
-                deleted = cur.rowcount
-            conn.commit()
-        return {"dry_run": False, "cutoff": cutoff, "deleted_total": deleted, "deleted_by_status": breakdown}
-
-    return _run("admin_purge_pre_cutoff_unposted", _go)
 
 
 def pogrn_handler(event, context):

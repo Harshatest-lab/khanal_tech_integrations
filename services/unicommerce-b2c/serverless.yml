@@ -268,14 +268,6 @@ functions:
           rate: cron(17,47 * * * ? *)
           enabled: ${self:custom.currentSchedulesEnabled}
 
-  # TEMPORARY -- one-off admin op, invoke-only (no schedule/httpApi
-  # trigger). Remove this function + handlers.py's
-  # admin_purge_pre_cutoff_unposted_handler once the pre-cutoff backlog
-  # purge (2026-08-19) has run; not meant to stay in the stack.
-  unicommerceAdminPurgePreCutoff:
-    handler: src.handlers.admin_purge_pre_cutoff_unposted_handler
-    layers: [{ Ref: SharedLambdaLayer }]
-
   unicommercePoGrn:
     handler: src.handlers.pogrn_handler
     layers: [{ Ref: SharedLambdaLayer }]
