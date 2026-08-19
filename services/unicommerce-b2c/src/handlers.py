@@ -172,13 +172,21 @@ def admin_debug_sap_invoice_handler(event, context):
     (KFL_LIVE) -- DocEntry is scoped per SAP company, so the same number
     means two unrelated documents in two different companies."""
     ev = event or {}
-    doc_entry = int(ev["doc_entry"])
     profile = ev.get("profile") or "unicommerce"
+    inspect_only = bool(ev.get("inspect"))
 
     def _go():
+        from khanal_shared.sap_sl.ssm_session import _get_param_json, param_b1_session, param_sl_config
+
         prior = os.environ.get("SAP_SL_PROFILE")
         try:
             os.environ["SAP_SL_PROFILE"] = "" if profile == "default" else "unicommerce"
+            if inspect_only:
+                return {
+                    "sl_config_companydb": _get_param_json(param_sl_config()).get("companydb"),
+                    "b1_session_expires_on": _get_param_json(param_b1_session()).get("expires_on"),
+                }
+            doc_entry = int(ev["doc_entry"])
             return sap_client.get_invoice_by_doc_entry(doc_entry)
         finally:
             if prior is None:
