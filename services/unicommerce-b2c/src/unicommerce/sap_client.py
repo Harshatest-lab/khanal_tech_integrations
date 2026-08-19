@@ -117,18 +117,27 @@ def find_invoice_by_uc_order_id(uc_order_id: str) -> dict | None:
     escaped = key.replace("'", "''")
     last_exc: Exception | None = None
 
+    # Comments is selected on both fallback queries (not just filtered on)
+    # so the match can be verified below -- the $filter clauses alone
+    # aren't trustworthy proof of a real match: U_UCOrderID is documented
+    # above as not working on this install (unclear what it actually
+    # matches when "rejected outright" doesn't happen), and a permissive
+    # OData server could in principle ignore/mishandle a filter it
+    # doesn't like rather than erroring. Found via a real corruption
+    # incident (2026-08-19): 62% of a sample of 'posted' orders had a
+    # sap_ar_invoice_docentry belonging to a provably unrelated order.
     try:
         status, body = _request(
             "GET",
             quote(
                 f"Invoices?$filter=U_UCOrderID eq '{escaped}'"
-                "&$select=DocEntry,DocNum,DocTaxAmount,DocTotal&$orderby=DocEntry desc&$top=5",
+                "&$select=DocEntry,DocNum,DocTaxAmount,DocTotal,Comments&$orderby=DocEntry desc&$top=5",
                 safe="/?$&=',",
             ),
         )
         if status == 200 and isinstance(body, dict):
             rows = body.get("value", [])
-            if rows:
+            if rows and key in str(rows[0].get("Comments") or ""):
                 return _row_to_result(rows[0])
     except Exception as exc:
         last_exc = exc
@@ -138,13 +147,16 @@ def find_invoice_by_uc_order_id(uc_order_id: str) -> dict | None:
             "GET",
             quote(
                 f"Invoices?$filter=contains(Comments,'{escaped}')"
-                "&$select=DocEntry,DocNum,DocTaxAmount,DocTotal&$orderby=DocEntry desc&$top=20",
+                "&$select=DocEntry,DocNum,DocTaxAmount,DocTotal,Comments&$orderby=DocEntry desc&$top=20",
                 safe="/?$&=',",
             ),
         )
         if status == 200 and isinstance(body, dict):
             rows = body.get("value", [])
-            return _row_to_result(rows[0]) if rows else None
+            for row in rows:
+                if key in str(row.get("Comments") or ""):
+                    return _row_to_result(row)
+            return None
         last_exc = last_exc or RuntimeError(f"HTTP {status}")
     except Exception as exc:
         last_exc = exc
@@ -157,6 +169,7 @@ def _row_to_result(row: dict) -> dict:
         "doc_entry": int(row["DocEntry"]),
         "doc_num": int(row.get("DocNum") or 0),
         "doc_tax_amount": float(row.get("DocTaxAmount") or 0),
+        "comments": str(row.get("Comments") or ""),
     }
 
 
@@ -220,18 +233,21 @@ def find_credit_note_by_return_id(uc_return_id: str, base_doc_entry: int | str |
     escaped = key.replace("'", "''")
     last_exc: Exception | None = None
 
+    # Comments selected (not just filtered on) so the match can be
+    # verified -- same defense-in-depth as find_invoice_by_uc_order_id,
+    # see its comment for why the $filter clause alone isn't trusted.
     try:
         status, body = _request(
             "GET",
             quote(
                 f"CreditNotes?$filter=U_UCReturnID eq '{escaped}'"
-                "&$select=DocEntry,DocNum,DocTaxAmount,DocTotal&$orderby=DocEntry desc&$top=5",
+                "&$select=DocEntry,DocNum,DocTaxAmount,DocTotal,Comments&$orderby=DocEntry desc&$top=5",
                 safe="/?$&=',",
             ),
         )
         if status == 200 and isinstance(body, dict):
             rows = body.get("value", [])
-            if rows:
+            if rows and key in str(rows[0].get("Comments") or ""):
                 return _row_to_result(rows[0])
     except Exception as exc:
         last_exc = exc
@@ -241,13 +257,16 @@ def find_credit_note_by_return_id(uc_return_id: str, base_doc_entry: int | str |
             "GET",
             quote(
                 f"CreditNotes?$filter=contains(Comments,'{escaped}')"
-                "&$select=DocEntry,DocNum,DocTaxAmount,DocTotal&$orderby=DocEntry desc&$top=20",
+                "&$select=DocEntry,DocNum,DocTaxAmount,DocTotal,Comments&$orderby=DocEntry desc&$top=20",
                 safe="/?$&=',",
             ),
         )
         if status == 200 and isinstance(body, dict):
             rows = body.get("value", [])
-            return _row_to_result(rows[0]) if rows else None
+            for row in rows:
+                if key in str(row.get("Comments") or ""):
+                    return _row_to_result(row)
+            return None
         last_exc = last_exc or RuntimeError(f"HTTP {status}")
     except Exception as exc:
         last_exc = exc

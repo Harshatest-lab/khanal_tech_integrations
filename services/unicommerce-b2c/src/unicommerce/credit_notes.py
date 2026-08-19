@@ -180,6 +180,26 @@ def _post_credit_note(conn, uc_return_id: str, settings) -> None:
 
     doc_entry = str(result.get("doc_entry") or "")
     doc_num = str(result.get("doc_num") or "")
+    response_body = result.get("response") or {}
+
+    # Verify the POST response actually describes THIS return before
+    # trusting/recording its DocEntry -- same defense as post_invoices.py's
+    # _post_order, see its comment for the incident this is guarding
+    # against. credit_note_payload always sets U_UCReturnID to this
+    # return's own id, so an exact match confirms the response is ours.
+    if str(response_body.get("U_UCReturnID") or "") != uc_return_id:
+        store.mark_cn_failed(
+            conn, uc_return_id,
+            f"Post response did not describe this return (DocEntry={doc_entry}, "
+            f"U_UCReturnID={response_body.get('U_UCReturnID')!r}) -- not trusting it",
+            settings.max_retry_attempts,
+        )
+        logger.error(
+            "_post_credit_note(%s): POST response mismatch, DocEntry=%s U_UCReturnID=%r -- treating as failed, not recording",
+            uc_return_id, doc_entry, response_body.get("U_UCReturnID"),
+        )
+        return
+
     store.mark_cn_posted(conn, uc_return_id, doc_entry, doc_num, cn.get("uc_order_id") if cn else None)
 
     try:
