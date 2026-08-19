@@ -258,16 +258,36 @@ def list_ready_orders(
 
 
 def claim(conn: psycopg.Connection, amazon_order_id: str, from_stage: str, to_stage: str) -> bool:
-    """Atomically move an order between stages. False = someone else won."""
+    """Atomically move an order between stages. False = someone else won.
+
+    Claiming into 'posting' also reclaims a stale 'posting' claim (crashed
+    worker) after 30 minutes -- same threshold as claim_cn's and recon.py's
+    stuck-posting invariant (both already had this; plain order claims
+    didn't). Confirmed live 2026-08-19: 16 orders left in 'posting' by
+    invocations that crashed/timed out mid-post, with no automatic path
+    back to 'ready' -- required a manual SQL fix to recover.
+    """
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE amazon_us_orders
-            SET stage = %s, updated_at = now()
-            WHERE amazon_order_id = %s AND stage = %s
-            """,
-            (to_stage, amazon_order_id, from_stage),
-        )
+        if to_stage == "posting":
+            cur.execute(
+                """
+                UPDATE amazon_us_orders
+                SET stage = %s, updated_at = now()
+                WHERE amazon_order_id = %s
+                  AND (stage = %s
+                       OR (stage = 'posting' AND updated_at < now() - interval '30 minutes'))
+                """,
+                (to_stage, amazon_order_id, from_stage),
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE amazon_us_orders
+                SET stage = %s, updated_at = now()
+                WHERE amazon_order_id = %s AND stage = %s
+                """,
+                (to_stage, amazon_order_id, from_stage),
+            )
         claimed = cur.rowcount == 1
     conn.commit()
     return claimed
