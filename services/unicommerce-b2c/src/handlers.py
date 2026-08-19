@@ -32,7 +32,7 @@ _SRC = Path(__file__).resolve().parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unicommerce import credit_notes, dashboard_queries, fetch_sync, pogrn, post_invoices, recon, store
+from unicommerce import credit_notes, dashboard_queries, fetch_sync, pogrn, post_invoices, recon, sap_client, store
 from unicommerce.alerts import send_alert
 
 # boto3 isn't a declared dev/CI dependency (only present in the real Lambda
@@ -160,6 +160,16 @@ def post_credit_notes_handler(event, context):
             )
 
     return _run("post_credit_notes", _go)
+
+
+def admin_debug_sap_invoice_handler(event, context):
+    """TEMPORARY, invoke-only, read-only. {"doc_entry": int} -- GETs the
+    live AR Invoice from SAP by DocEntry to compare its actual CardCode/
+    DocumentLines against our locally stored payload_json, for debugging
+    the credit-note CardCode/ItemCode mismatch errors."""
+    ev = event or {}
+    doc_entry = int(ev["doc_entry"])
+    return _run("admin_debug_sap_invoice", lambda: sap_client.get_invoice_by_doc_entry(doc_entry))
 
 
 def pogrn_handler(event, context):

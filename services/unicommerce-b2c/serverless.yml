@@ -268,6 +268,12 @@ functions:
           rate: cron(17,47 * * * ? *)
           enabled: ${self:custom.currentSchedulesEnabled}
 
+  # TEMPORARY, invoke-only, read-only -- debugging the credit-note
+  # CardCode/ItemCode mismatch. Remove once done.
+  unicommerceAdminDebugSapInvoice:
+    handler: src.handlers.admin_debug_sap_invoice_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+
   unicommercePoGrn:
     handler: src.handlers.pogrn_handler
     layers: [{ Ref: SharedLambdaLayer }]
