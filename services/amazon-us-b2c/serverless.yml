@@ -249,9 +249,19 @@ functions:
     layers: [{ Ref: SharedLambdaLayer }]
     maximumRetryAttempts: 0  # see amazonFetch above
     events:
-      # Daily, before invoice posting. 20:45 UTC = 02:15 IST.
+      # Hourly, not daily: list_ready_orders requires actual_ship_date
+      # IS NOT NULL, and this FBA report is the ONLY source for it (see
+      # fba_ship_sync.py docstring) -- amazonFetch's hourly incremental
+      # only *resumes* an already-in-flight report request, it never
+      # requests a new one, so a plain daily schedule here means an order
+      # fetched right after the daily run sits un-postable for up to ~24h.
+      # Amazon's own docs (GET_AMAZON_FULFILLED_SHIPMENTS_DATA_GENERAL)
+      # say the report is regenerated "no more than once every 30
+      # minutes" with ~1-3h ship-to-report latency, so hourly is well
+      # within Amazon's own refresh cadence, not wasted requests.
+      # :50 to land after amazonFetch's :10 and amazonPostInvoices' :30.
       - schedule:
-          rate: cron(45 20 * * ? *)
+          rate: cron(50 * * * ? *)
           enabled: ${self:custom.currentScheduleEnabled}
 
   amazonPostInvoices:
