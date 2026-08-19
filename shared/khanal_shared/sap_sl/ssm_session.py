@@ -33,7 +33,6 @@ from khanal_shared.sap_sl.http import (
 logger = logging.getLogger(__name__)
 
 _LOCK_WAIT_SEC = 2.0
-_MAX_LOCK_WAITS = 30
 # A lock holder that dies mid-renewal (Lambda hard timeout, OOM kill) never
 # reaches the except-block cleanup that flips is_locked back to False --
 # there's nothing tying this SSM flag to the holder's process lifetime, so
@@ -44,6 +43,17 @@ _MAX_LOCK_WAITS = 30
 # 20+ minutes, wedging every subsequent SAP call behind "exceeded max
 # waits" until manually cleared.
 _STALE_LOCK_SEC = 150
+# _MAX_LOCK_WAITS * _LOCK_WAIT_SEC must clear _STALE_LOCK_SEC with margin --
+# a waiter that gives up before a locked-but-abandoned session crosses the
+# staleness threshold can NEVER reach the steal branch above, no matter how
+# old the lock gets. At the old value (30 -> 60s total) every waiter timed
+# out at 60s while the steal check only fires past 150s, so the TTL logic
+# was unreachable dead code. Confirmed live 2026-08-19: is_locked stuck for
+# 3+ hours, every amazonPostInvoices/amazonPostCreditNotes call failing
+# "exceeded max waits" without a single renew attempt ever being logged --
+# no waiter's budget ever lasted long enough to see the lock as stale.
+# 90 -> 180s total gives 30s/15 checks of margin past the 150s mark.
+_MAX_LOCK_WAITS = 90
 
 
 def sap_sl_ssm_prefix() -> str:
