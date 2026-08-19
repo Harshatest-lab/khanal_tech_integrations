@@ -272,7 +272,33 @@ def _post_order(conn, row: dict, settings, batch_managed_cache: dict, fefo_cache
 
     doc_entry = result.get("doc_entry")
     doc_num = result.get("doc_num")
-    tax_actual = float(result.get("response", {}).get("DocTaxAmount") or 0)
+    response_body = result.get("response") or {}
+    tax_actual = float(response_body.get("DocTaxAmount") or 0)
+
+    # Verify the POST response actually describes THIS order before ever
+    # trusting/recording its DocEntry. Found via a real incident
+    # (2026-08-19): something below our application layer (SAP Service
+    # Layer itself, or a proxy in front of it -- confirmed cross-wiring
+    # even with an unrelated SAP document series we never touch) can
+    # return a response that doesn't match the request that was sent.
+    # 20% of a full audit of 'posted' orders had a DocEntry belonging to
+    # a provably different, unrelated document. The payload we send
+    # always sets Comments to "Unicommerce Order: {uniware_id} | ..."
+    # (sap_payload.ar_invoice_payload), so any genuine response for our
+    # own POST will always contain our own uniware_id there.
+    if uniware_id not in str(response_body.get("Comments") or ""):
+        _release_for_order(reservation_ctx, uniware_id)
+        store.mark_failed(
+            conn, uniware_id,
+            f"Post response did not describe this order (DocEntry={doc_entry}, "
+            f"Comments={response_body.get('Comments')!r}) -- not trusting it",
+            settings.max_retry_attempts,
+        )
+        logger.error(
+            "_post_order(%s): POST response mismatch, DocEntry=%s Comments=%r -- treating as failed, not recording",
+            uniware_id, doc_entry, response_body.get("Comments"),
+        )
+        return "failed", []
 
     invoice_detail = None
     if doc_entry:

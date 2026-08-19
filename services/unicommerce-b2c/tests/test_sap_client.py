@@ -116,11 +116,11 @@ def test_find_invoice_falls_back_to_sl_when_hana_fails(monkeypatch):
 
     def fake_request(method, path, body=None):
         assert "U_UCOrderID" in path
-        return 200, {"value": [{"DocEntry": 9, "DocNum": 8, "DocTaxAmount": 1.5}]}
+        return 200, {"value": [{"DocEntry": 9, "DocNum": 8, "DocTaxAmount": 1.5, "Comments": "Unicommerce Order: ORDER1 | Channel: TEST"}]}
 
     monkeypatch.setattr(sap_client, "_request", fake_request)
     result = sap_client.find_invoice_by_uc_order_id("ORDER1")
-    assert result == {"doc_entry": 9, "doc_num": 8, "doc_tax_amount": 1.5}
+    assert result == {"doc_entry": 9, "doc_num": 8, "doc_tax_amount": 1.5, "comments": "Unicommerce Order: ORDER1 | Channel: TEST"}
 
 
 def test_find_invoice_raises_when_every_path_fails(monkeypatch):
