@@ -113,7 +113,17 @@ def _check_batches(
     fefo_cache: dict,
     reservation_ctx: dict,
 ) -> dict:
-    """Validate all batch-tracked lines have sufficient quantity.
+    """Validate all batch-tracked lines have sufficient quantity via FEFO
+    allocation across whatever batches are currently available. UC's own
+    recorded batchNumber (if any, on item.get("batchNumber")) is not a
+    hard requirement here -- it's informational only, same as the payload
+    builder (sap_payload._append_sales_line) treats it. A batch UC picked
+    at fulfillment time can be fully consumed by later orders before this
+    invoice ever posts (confirmed live, 2026-08-19: re-posting week-old
+    orders hit "have 0.0" on UC's exact batch while other batches of the
+    same item were available) -- hard-locking to it just fails instead of
+    substituting, which FEFO exists to prevent.
+
     Returns {"ok": bool, "missing": [...]}. Reuses the same fefo_cache the
     caller must also pass into sap_payload.ar_invoice_payload() -- both
     call fefo_allocate_from_rows() against identical, immutable rows for
@@ -124,7 +134,6 @@ def _check_batches(
     shortages: list[dict] = []
 
     for item in items:
-        batch_num = item.get("batchNumber")
         item_code = item.get("itemSku")
         qty_needed = float(item.get("quantity", 0) or 0)
         if not item_code or qty_needed <= 0:
@@ -132,41 +141,34 @@ def _check_batches(
         uc_wh = item.get("warehouseCode", "")
         sap_wh = sap_payload._resolve_sap_warehouse(settings, channel_name, uc_wh)
 
-        if not batch_num:
-            managed = batch_managed_cache.get(item_code)
-            if managed is None or not managed:
-                # None -> SAP lookup failed for this item, skip allocation
-                # (payload builder does the same via the same cache, so
-                # both layers agree). False -> genuinely not batch-managed.
-                continue
-
-            fefo_rows = fefo_cache.get((item_code, sap_wh), [])
-            allocations = sap_payload.fefo_allocate_from_rows(fefo_rows, qty_needed)
-            if allocations:
-                for alloc in allocations:
-                    key = (item_code, alloc["BatchNumber"], sap_wh)
-                    aggregated.setdefault(
-                        key, {"item_code": item_code, "batch_number": alloc["BatchNumber"], "warehouse_code": sap_wh, "qty_needed": 0.0}
-                    )
-                    aggregated[key]["qty_needed"] += float(alloc["Quantity"])
-                continue
-
-            sap_avail = round(sum(float(r.get("quantity") or 0) for r in fefo_rows), 3)
-            shortages.append(
-                {
-                    "item_code": item_code, "batch_number": "", "warehouse_code": sap_wh,
-                    "qty_needed": round(qty_needed, 3), "qty_available": sap_avail,
-                    "shortage": round(max(0.0, qty_needed - sap_avail), 3),
-                    "reason": "insufficient_sap_batch_qty" if fefo_rows else "no_sap_batch_available",
-                }
-            )
+        managed = batch_managed_cache.get(item_code)
+        if managed is None or not managed:
+            # None -> SAP lookup failed for this item, skip allocation
+            # (payload builder does the same via the same cache, so
+            # both layers agree). False -> genuinely not batch-managed.
             continue
 
-        key = (item_code, batch_num, sap_wh)
-        aggregated.setdefault(key, {"item_code": item_code, "batch_number": batch_num, "warehouse_code": sap_wh, "qty_needed": 0.0})
-        aggregated[key]["qty_needed"] += qty_needed
+        fefo_rows = fefo_cache.get((item_code, sap_wh), [])
+        allocations = sap_payload.fefo_allocate_from_rows(fefo_rows, qty_needed)
+        if allocations:
+            for alloc in allocations:
+                key = (item_code, alloc["BatchNumber"], sap_wh)
+                aggregated.setdefault(
+                    key, {"item_code": item_code, "batch_number": alloc["BatchNumber"], "warehouse_code": sap_wh, "qty_needed": 0.0}
+                )
+                aggregated[key]["qty_needed"] += float(alloc["Quantity"])
+            continue
 
-    fefo_overrides: dict = {}
+        sap_avail = round(sum(float(r.get("quantity") or 0) for r in fefo_rows), 3)
+        shortages.append(
+            {
+                "item_code": item_code, "batch_number": "", "warehouse_code": sap_wh,
+                "qty_needed": round(qty_needed, 3), "qty_available": sap_avail,
+                "shortage": round(max(0.0, qty_needed - sap_avail), 3),
+                "reason": "insufficient_sap_batch_qty" if fefo_rows else "no_sap_batch_available",
+            }
+        )
+
     for requirement in aggregated.values():
         cache_key = (requirement["item_code"], requirement["batch_number"], requirement["warehouse_code"])
         rows_for_item = fefo_cache.get((requirement["item_code"], requirement["warehouse_code"]), [])

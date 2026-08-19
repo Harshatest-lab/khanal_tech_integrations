@@ -102,6 +102,38 @@ def test_ar_invoice_payload_batch_numbers_empty_without_fefo_cache():
     assert payload["DocumentLines"][0]["BatchNumbers"] == []
 
 
+def test_ar_invoice_payload_ignores_ucs_batch_number_uses_fefo_instead():
+    """UC's own recorded batchNumber is informational, not a hard
+    requirement -- confirmed real incident 2026-08-19: re-posting
+    week-old orders hit "have 0.0" on UC's exact recorded batch while a
+    different batch of the same item was genuinely available, because
+    that batch had been fully consumed by later orders in the meantime.
+    The invoice must use whatever FEFO currently has available, not fail
+    just because UC's specific batch is gone."""
+    settings = UnicommerceSettings(
+        channel_customer_map={"default": "C-DEFAULT"}, ar_invoice_series=10, tax_code_map={"0_intra": "GST0"}
+    )
+    uc_data = {
+        "code": "SO-1",
+        "items": [
+            {
+                "itemSku": "SKU-A", "quantity": 5, "unitPrice": 100, "taxPercent": 0, "warehouseCode": "EC-FG",
+                "batchNumber": "OLD-BATCH-NOW-DEPLETED",
+            }
+        ],
+    }
+    payload, _tax = ar_invoice_payload(
+        uniware_id="SO-1", channel="FLIPKART", order_json="{}", uc_data=uc_data, order_date="2026-07-20",
+        settings=settings,
+        batch_managed_cache={"SKU-A": True},
+        # Note: no "OLD-BATCH-NOW-DEPLETED" row here at all -- only a
+        # different, currently-available batch.
+        fefo_rows_cache={("SKU-A", "EC-FG"): [{"batch_number": "CURRENTLY-AVAILABLE", "quantity": 10}]},
+    )
+    line = payload["DocumentLines"][0]
+    assert line["BatchNumbers"] == [{"BatchNumber": "CURRENTLY-AVAILABLE", "Quantity": 5.0, "ItemCode": "SKU-A"}]
+
+
 def test_resolve_sap_warehouse_fba_channel_always_wins():
     settings = UnicommerceSettings(warehouse_map={"some-uc-code": "OTHER-WH"})
     assert _resolve_sap_warehouse(settings, "amazon_fba_in_bom5", "some-uc-code") == "AMZ-BOM5"

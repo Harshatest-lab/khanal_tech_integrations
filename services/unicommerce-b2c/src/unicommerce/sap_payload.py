@@ -367,7 +367,6 @@ def _append_sales_line(
     line_udfs: dict | None = None,
     batch_managed_cache: dict | None = None,
     fefo_rows_cache: dict | None = None,
-    fefo_overrides: dict | None = None,
 ) -> float:
     item_code = normalize_text(item.get("itemSku"))
     qty = float(item.get("quantity", 0) or 0)
@@ -376,7 +375,6 @@ def _append_sales_line(
     if discount_total > 0 and qty > 0:
         unit_price = max(0.0, unit_price - (discount_total / qty))
     tax_percent = float(item.get("taxPercent", 0) or 0)
-    batch_num = normalize_text(item.get("batchNumber"))
     uc_wh_code = normalize_text(item.get("warehouseCode"))
     sap_wh_code = _resolve_sap_warehouse(settings, channel, uc_wh_code)
 
@@ -385,34 +383,24 @@ def _append_sales_line(
     if qty <= 0:
         raise ValueError(f"Invalid quantity for item {item_code}")
 
+    # UC's own recorded batchNumber (if any, on item.get("batchNumber")) is
+    # informational only, not a hard requirement -- the batch actually
+    # invoiced is always whichever FEFO (first-expired-first-out) selects
+    # from what's currently available, same as _check_batches validates.
+    # A batch UC picked at fulfillment time can be fully consumed by later
+    # orders before this invoice ever posts (confirmed live, 2026-08-19:
+    # re-posting week-old orders hit "have 0.0" on UC's exact batch while
+    # other batches of the same item were available) -- hard-locking to it
+    # just fails instead of substituting, which FEFO exists to prevent.
     batch_numbers: list[dict] = []
-    if batch_num:
-        if fefo_overrides and (item_code, batch_num) in fefo_overrides:
-            override_allocs = fefo_overrides[(item_code, batch_num)]
-            total_override_qty = sum(float(b.get("Quantity", 0)) for b in override_allocs)
-            if total_override_qty > 0:
-                scale = float(qty) / total_override_qty
-                scaled = [
-                    {"BatchNumber": b["BatchNumber"], "Quantity": round(float(b["Quantity"]) * scale, 3)}
-                    for b in override_allocs
-                ]
-                drift = round(float(qty) - sum(s["Quantity"] for s in scaled), 3)
-                if drift and scaled:
-                    scaled[-1]["Quantity"] = round(scaled[-1]["Quantity"] + drift, 3)
-                batch_numbers = scaled
-            else:
-                batch_numbers = list(override_allocs)
-        else:
-            batch_numbers = [{"BatchNumber": batch_num, "Quantity": round(float(qty), 3)}]
+    cache_entry = None
+    if batch_managed_cache is not None:
+        cache_entry = batch_managed_cache.get(item_code)
+    if cache_entry is None and batch_managed_cache is not None and item_code in batch_managed_cache:
+        batch_numbers = []
     else:
-        cache_entry = None
-        if batch_managed_cache is not None:
-            cache_entry = batch_managed_cache.get(item_code)
-        if cache_entry is None and batch_managed_cache is not None and item_code in batch_managed_cache:
-            batch_numbers = []
-        else:
-            rows = (fefo_rows_cache or {}).get((item_code, sap_wh_code), [])
-            batch_numbers = fefo_allocate_from_rows(rows, qty)
+        rows = (fefo_rows_cache or {}).get((item_code, sap_wh_code), [])
+        batch_numbers = fefo_allocate_from_rows(rows, qty)
     batch_numbers = _with_batch_item_code(batch_numbers, item_code)
 
     tax_code = get_tax_code(tax_percent, ship_state, origin_state_code, settings)
@@ -469,7 +457,6 @@ def ar_invoice_payload(
     settings: UnicommerceSettings,
     batch_managed_cache: dict | None = None,
     fefo_rows_cache: dict | None = None,
-    fefo_overrides: dict | None = None,
 ) -> tuple[dict, float]:
     """Build the SAP AR Invoice payload from a staged UC order.
 
@@ -559,7 +546,6 @@ def ar_invoice_payload(
                     line_udfs=line_udfs,
                     batch_managed_cache=batch_managed_cache,
                     fefo_rows_cache=fefo_rows_cache,
-                    fefo_overrides=fefo_overrides,
                 )
             continue
 
@@ -576,7 +562,6 @@ def ar_invoice_payload(
             line_udfs=line_udfs,
             batch_managed_cache=batch_managed_cache,
             fefo_rows_cache=fefo_rows_cache,
-            fefo_overrides=fefo_overrides,
         )
 
     for bucket in sorted(

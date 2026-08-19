@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from unicommerce import constants, post_invoices, sap_client  # noqa: E402
+from unicommerce.settings import UnicommerceSettings  # noqa: E402
 
 
 def test_post_order_defers_to_verify_when_duplicate_check_fails(monkeypatch):
@@ -70,3 +71,34 @@ def test_post_ready_orders_passes_posting_cutoff_to_get_ready_orders(monkeypatch
     post_invoices.post_ready_orders(conn=None, limit=10)
 
     assert calls["cutoff_date"] == constants.POSTING_CUTOFF_DATE
+
+
+def test_check_batches_ignores_ucs_batch_number_uses_fefo_instead():
+    """UC's own recorded batchNumber on a line item is informational, not
+    a hard requirement -- confirmed real incident 2026-08-19: re-posting
+    week-old orders hit "have 0.0" on UC's exact recorded batch while a
+    different batch of the same item was genuinely available (consumed
+    by later orders in the meantime). The validator must find and use
+    whatever's currently available via FEFO, not hard-fail on UC's
+    specific (now possibly gone) batch."""
+    uc_data = {
+        "items": [
+            {
+                "itemSku": "SKU-A", "quantity": 5, "warehouseCode": "EC-FG",
+                "batchNumber": "OLD-BATCH-NOW-DEPLETED",
+            }
+        ]
+    }
+    result = post_invoices._check_batches(
+        uniware_id="SO-1",
+        channel_name="FLIPKART",
+        uc_data=uc_data,
+        settings=UnicommerceSettings(),
+        batch_managed_cache={"SKU-A": True},
+        # No "OLD-BATCH-NOW-DEPLETED" row at all -- only a different,
+        # currently-available batch.
+        fefo_cache={("SKU-A", "EC-FG"): [{"batch_number": "CURRENTLY-AVAILABLE", "quantity": 10}]},
+        reservation_ctx=post_invoices.new_reservation_context(),
+    )
+    assert result["ok"] is True
+    assert result["missing"] == []
