@@ -10,6 +10,7 @@ directly since our settings dataclass already holds parsed dicts.
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from typing import Any
 
@@ -672,6 +673,17 @@ def _allocate_return_batches(source_batches: list[dict], return_qty: float) -> l
     return allocations
 
 
+def _safe_json_loads(raw_value: Any) -> dict:
+    if isinstance(raw_value, dict):
+        return raw_value
+    if not raw_value:
+        return {}
+    try:
+        return json.loads(raw_value)
+    except Exception:
+        return {}
+
+
 def credit_note_payload(cn: dict, parent_order: dict, settings: UnicommerceSettings) -> dict:
     """Build the SAP B1 Credit Note payload for one staged return.
 
@@ -702,7 +714,13 @@ def credit_note_payload(cn: dict, parent_order: dict, settings: UnicommerceSetti
 
     lines = []
     for item in items:
-        item_code = normalize_text(item.get("itemSku") or item.get("sapItemCode"))
+        # sapItemCode (resolved by returns.prepare_credit_note_items against
+        # the base invoice's own DocumentLines) must win over itemSku (the
+        # raw UC seller SKU) -- they can legitimately differ (bundle SKUs,
+        # channel-specific SKU codes), and SAP requires the credit note's
+        # ItemCode to match the base invoice line's ItemCode exactly or
+        # rejects with "Target item number does not match base item number".
+        item_code = normalize_text(item.get("sapItemCode") or item.get("itemSku"))
         qty = float(item.get("quantity", 0) or 0)
         source_batches = item.get("sapBatchNumbers") or []
         source_account_code = normalize_text(item.get("sapAccountCode"))
@@ -748,8 +766,17 @@ def credit_note_payload(cn: dict, parent_order: dict, settings: UnicommerceSetti
         lines.append(line)
 
     cn_doc_date = str(cn.get("return_date") or date.today())
+    # CardCode must match the base AR Invoice's own CardCode, not whatever
+    # settings.channel_customer_map currently maps this channel to -- the
+    # mapping can change after the invoice posted (channel reassigned to a
+    # different SAP customer), and SAP requires an exact match or rejects
+    # with "Base document card and target document card do not match".
+    # The invoice's payload_json is the same source-of-truth pattern
+    # returns.prepare_credit_note_items already uses for item codes/lines.
+    invoice_doc = _safe_json_loads((parent_order or {}).get("payload_json"))
+    card_code = normalize_text(invoice_doc.get("CardCode")) or resolve_customer_code(settings, parent_channel)
     return {
-        "CardCode": resolve_customer_code(settings, parent_channel),
+        "CardCode": card_code,
         "DocDate": cn_doc_date,
         "Series": int(settings.credit_note_series),
         "U_UCReturnID": cn.get("uc_return_id"),
