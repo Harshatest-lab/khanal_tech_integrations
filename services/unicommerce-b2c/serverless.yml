@@ -126,7 +126,16 @@ provider:
     SAP_SL_PROFILE: ${self:custom.currentSapProfile}
     HANA_PROFILE: ${self:custom.currentSapProfile}
     SAP_SL_USE_SSM: ${env:SAP_SL_USE_SSM, 'true'}
-    SAP_SL_VERIFY_SSL: ${env:SAP_SL_VERIFY_SSL, 'true'}
+    # Stage-keyed, NOT the shared secrets.SAP_SL_VERIFY_SSL -- that same repo
+    # secret also feeds amazon-us-b2c/B2C_Invoice, whose SAP hosts hold valid
+    # CA certs. unicommerce prod's on-prem SAP B1 Service Layer box
+    # (103.69.202.108:50000, /sap/unicommerce/sl_config) serves a self-signed
+    # cert -- verify=true against it fails every login, silently, since the
+    # 2026-08-18 13:07 IST /sap/unicommerce cutover (every scheduled
+    # Fetch/PostInvoices/PostCreditNotes run since posted zero orders to SAP,
+    # with no CloudWatch error because the handler swallows the exception
+    # before it reaches the Lambda runtime). See custom.sapVerifySslByStage.
+    SAP_SL_VERIFY_SSL: ${self:custom.currentSapVerifySsl}
     HANA_USE_SSM: ${env:HANA_USE_SSM, '1'}
 
 custom:
@@ -161,6 +170,15 @@ custom:
     dev: /sap/india_test
     prod: /sap/unicommerce
   currentSapPrefix: ${self:custom.sapPrefixByStage.${self:provider.stage}, '/sap/india_test'}
+  # Scoped to unicommerce prod only -- do NOT flip the shared
+  # secrets.SAP_SL_VERIFY_SSL repo secret for this, it also gates
+  # amazon-us-b2c/B2C_Invoice's SAP hosts, which have valid CA certs and
+  # must stay verified. dev keeps deferring to that shared secret (falls
+  # back to 'true' if unset), matching every other env var in this file.
+  sapVerifySslByStage:
+    dev: ${env:SAP_SL_VERIFY_SSL, 'true'}
+    prod: 'false'
+  currentSapVerifySsl: ${self:custom.sapVerifySslByStage.${self:provider.stage}, 'true'}
   # Fetch/PostInvoices/PostCreditNotes crons must only ever run in prod.
   # Kept disabled in dev even after the schema split below as
   # defense-in-depth -- there is still no reason for dev to write
