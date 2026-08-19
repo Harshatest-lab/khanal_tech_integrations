@@ -229,9 +229,26 @@ def admin_audit_posted_docentries_handler(event, context):
     ev = event or {}
     limit = int(ev.get("limit") or 50)
     offset = int(ev.get("offset") or 0)
+    list_db_inventory = bool(ev.get("list_db_inventory"))
 
     def _go():
         with store.connect() as conn:
+            if list_db_inventory:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT current_database()")
+                    current_db = cur.fetchone()[0]
+                    cur.execute("SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname")
+                    all_databases = [r[0] for r in cur.fetchall()]
+                    cur.execute(
+                        "SELECT schemaname, tablename FROM pg_tables "
+                        "WHERE tablename LIKE 'unicommerce%' ORDER BY schemaname, tablename"
+                    )
+                    tables_in_current_db = [{"schema": r[0], "table": r[1]} for r in cur.fetchall()]
+                return {
+                    "current_database": current_db,
+                    "all_databases_on_instance": all_databases,
+                    "unicommerce_tables_in_current_database": tables_in_current_db,
+                }
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT uniware_id, channel_name, sap_ar_invoice_docentry "
