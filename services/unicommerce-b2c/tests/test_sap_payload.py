@@ -212,6 +212,45 @@ def test_credit_note_payload_missing_batches_raises():
         credit_note_payload(cn, {"channel_name": "FLIPKART"}, _SETTINGS_WITH_CN)
 
 
+def test_credit_note_payload_card_code_uses_base_invoice_not_current_settings():
+    # settings.channel_customer_map now maps FLIPKART -> C-FLIPKART, but the
+    # base invoice was posted back when it mapped to a different customer
+    # (channel reassigned since) -- SAP rejects a credit note whose CardCode
+    # doesn't match the base document's, so the invoice's own stored
+    # CardCode must win over re-resolving from current settings.
+    parent = {"channel_name": "FLIPKART", "state": "KA", "payload_json": {"CardCode": "C-OLD-FLIPKART"}}
+    payload = credit_note_payload(_cn(), parent, _SETTINGS_WITH_CN)
+    assert payload["CardCode"] == "C-OLD-FLIPKART"
+
+
+def test_credit_note_payload_card_code_falls_back_to_settings_without_payload_json():
+    payload = credit_note_payload(_cn(), {"channel_name": "FLIPKART", "state": "KA"}, _SETTINGS_WITH_CN)
+    assert payload["CardCode"] == "C-FLIPKART"
+
+
+def test_credit_note_payload_item_code_prefers_resolved_sap_code_over_raw_sku():
+    # sapItemCode is resolved by returns.prepare_credit_note_items against
+    # the base invoice's own DocumentLines -- itemSku is just the raw UC
+    # seller SKU and can legitimately differ (bundle SKUs, channel-specific
+    # SKU codes). SAP rejects a credit note line whose ItemCode doesn't
+    # match the base invoice line's ItemCode exactly.
+    cn = _cn(
+        items=[
+            {
+                "itemSku": "SELLER-SKU-123",
+                "sapItemCode": "SAP-ITEM-A",
+                "quantity": 2,
+                "sapBaseLine": 0,
+                "sapAccountCode": "4001",
+                "sapBatchNumbers": [{"BatchNumber": "B1", "Quantity": 5}],
+                "warehouseCode": "",
+            }
+        ]
+    )
+    payload = credit_note_payload(cn, {"channel_name": "FLIPKART", "state": "KA"}, _SETTINGS_WITH_CN)
+    assert payload["DocumentLines"][0]["ItemCode"] == "SAP-ITEM-A"
+
+
 # ── sum_unit_price_total / sum_tax_total (shared by post_invoices.py and recon.py) ──
 
 def test_sum_unit_price_total_sums_quantity_times_unit_price():
