@@ -274,6 +274,13 @@ functions:
     handler: src.handlers.admin_debug_sap_invoice_handler
     layers: [{ Ref: SharedLambdaLayer }]
 
+  # TEMPORARY, invoke-only, read-only -- auditing scope of the DocEntry
+  # cross-attribution corruption across the 'posted' bucket. Remove once
+  # done.
+  unicommerceAdminAuditPostedDocentries:
+    handler: src.handlers.admin_audit_posted_docentries_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+
   unicommercePoGrn:
     handler: src.handlers.pogrn_handler
     layers: [{ Ref: SharedLambdaLayer }]
