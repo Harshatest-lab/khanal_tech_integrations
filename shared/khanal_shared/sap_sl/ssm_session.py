@@ -248,7 +248,17 @@ def _resolve_session_tokens() -> tuple[str, str, str]:
         if is_locked:
             locked_at = _parse_expires(str(session_data.get("locked_at") or ""))
             lock_age = (datetime.now(timezone.utc) - locked_at).total_seconds() if locked_at else None
-            if lock_age is not None and lock_age > _STALE_LOCK_SEC:
+            # A missing/unparseable locked_at is NOT evidence the lock is
+            # recent -- it means we have no liveness signal at all, most
+            # commonly a lock left over from before this field existed (or
+            # any other write that set is_locked without it). Treating that
+            # as "never provably stale, so wait forever" is exactly the
+            # deadlock this whole mechanism exists to prevent. Confirmed
+            # live 2026-08-19: a pre-locked_at zombie lock from the original
+            # 2026-08-18 incident survived both the TTL fix and a wait-
+            # budget fix untouched, because lock_age was always None and
+            # `lock_age is not None and ...` can never be true for it.
+            if lock_age is None or lock_age > _STALE_LOCK_SEC:
                 log_json(
                     logger,
                     logging.WARNING,
