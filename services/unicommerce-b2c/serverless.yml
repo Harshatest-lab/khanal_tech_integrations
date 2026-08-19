@@ -273,6 +273,25 @@ functions:
   unicommerceAdminDebugSapInvoice:
     handler: src.handlers.admin_debug_sap_invoice_handler
     layers: [{ Ref: SharedLambdaLayer }]
+    # TEMPORARY extra grant -- this function alone also needs to read the
+    # default /sap/* profile (not just its own /sap/unicommerce/*) to
+    # test whether DocEntry values were assigned under the old
+    # pre-2026-08-12 default-profile company (TEST_KFL_11072026) rather
+    # than the current unicommerce profile (KFL_LIVE). Remove alongside
+    # the handler.
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - ssm:GetParameter
+        Resource:
+          - arn:aws:ssm:${self:provider.region}:*:parameter/sap/sl_config
+          - arn:aws:ssm:${self:provider.region}:*:parameter/sap/credentials
+      - Effect: Allow
+        Action:
+          - ssm:GetParameter
+          - ssm:PutParameter
+        Resource:
+          - arn:aws:ssm:${self:provider.region}:*:parameter/sap/b1_session
 
   # TEMPORARY, invoke-only, read-only -- auditing scope of the DocEntry
   # cross-attribution corruption across the 'posted' bucket. Remove once

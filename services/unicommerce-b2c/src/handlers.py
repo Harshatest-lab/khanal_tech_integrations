@@ -163,13 +163,30 @@ def post_credit_notes_handler(event, context):
 
 
 def admin_debug_sap_invoice_handler(event, context):
-    """TEMPORARY, invoke-only, read-only. {"doc_entry": int} -- GETs the
-    live AR Invoice from SAP by DocEntry to compare its actual CardCode/
-    DocumentLines against our locally stored payload_json, for debugging
-    the credit-note CardCode/ItemCode mismatch errors."""
+    """TEMPORARY, invoke-only, read-only. {"doc_entry": int, "profile":
+    "unicommerce" (default) | "default"} -- GETs the live AR Invoice from
+    SAP by DocEntry, optionally overriding SAP_SL_PROFILE for this one
+    call (testing whether DocEntry values were assigned under the old
+    default-profile company (TEST_KFL_11072026, same host, pre-2026-08-12
+    company mismatch) rather than the current unicommerce profile
+    (KFL_LIVE) -- DocEntry is scoped per SAP company, so the same number
+    means two unrelated documents in two different companies."""
     ev = event or {}
     doc_entry = int(ev["doc_entry"])
-    return _run("admin_debug_sap_invoice", lambda: sap_client.get_invoice_by_doc_entry(doc_entry))
+    profile = ev.get("profile") or "unicommerce"
+
+    def _go():
+        prior = os.environ.get("SAP_SL_PROFILE")
+        try:
+            os.environ["SAP_SL_PROFILE"] = "" if profile == "default" else "unicommerce"
+            return sap_client.get_invoice_by_doc_entry(doc_entry)
+        finally:
+            if prior is None:
+                os.environ.pop("SAP_SL_PROFILE", None)
+            else:
+                os.environ["SAP_SL_PROFILE"] = prior
+
+    return _run("admin_debug_sap_invoice", _go)
 
 
 def admin_audit_posted_docentries_handler(event, context):
