@@ -174,6 +174,7 @@ def admin_debug_sap_invoice_handler(event, context):
     ev = event or {}
     profile = ev.get("profile") or "unicommerce"
     inspect_only = bool(ev.get("inspect"))
+    find_uc_order_id = ev.get("find_uc_order_id")
 
     def _go():
         from khanal_shared.sap_sl.ssm_session import _get_param_json, param_b1_session, param_sl_config
@@ -186,6 +187,12 @@ def admin_debug_sap_invoice_handler(event, context):
                     "sl_config_companydb": _get_param_json(param_sl_config()).get("companydb"),
                     "b1_session_expires_on": _get_param_json(param_b1_session()).get("expires_on"),
                 }
+            if find_uc_order_id:
+                # Does this order's REAL invoice exist somewhere in SAP
+                # under a different DocEntry than what's stored locally?
+                # Same lookup path _post_order's idempotency guard uses
+                # (HANA primary, OData Comments-contains fallback).
+                return sap_client.find_invoice_by_uc_order_id(find_uc_order_id)
             doc_entry = int(ev["doc_entry"])
             return sap_client.get_invoice_by_doc_entry(doc_entry)
         finally:
