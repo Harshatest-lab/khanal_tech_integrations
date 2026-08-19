@@ -172,6 +172,53 @@ def admin_debug_sap_invoice_handler(event, context):
     return _run("admin_debug_sap_invoice", lambda: sap_client.get_invoice_by_doc_entry(doc_entry))
 
 
+def admin_audit_posted_docentries_handler(event, context):
+    """TEMPORARY, invoke-only, read-only. {"limit": int, "offset": int?}
+    -- for each 'posted' order (most recently updated first), GETs its
+    live SAP invoice by sap_ar_invoice_docentry and checks whether the
+    invoice's Comments actually reference this order's uniware_id --
+    auditing for the DocEntry cross-attribution corruption found via
+    credit-note posting failures (2026-08-19)."""
+    ev = event or {}
+    limit = int(ev.get("limit") or 50)
+    offset = int(ev.get("offset") or 0)
+
+    def _go():
+        with store.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT uniware_id, channel_name, sap_ar_invoice_docentry "
+                    "FROM unicommerce_orders WHERE pipeline_status = 'posted' "
+                    "AND sap_ar_invoice_docentry IS NOT NULL AND sap_ar_invoice_docentry != '' "
+                    "ORDER BY updated_at DESC LIMIT %s OFFSET %s",
+                    (limit, offset),
+                )
+                rows = [{"uniware_id": r[0], "channel_name": r[1], "doc_entry": r[2]} for r in cur.fetchall()]
+
+        checked = 0
+        mismatched = []
+        errors = []
+        for row in rows:
+            checked += 1
+            try:
+                inv = sap_client.get_invoice_by_doc_entry(int(row["doc_entry"]))
+                comments = str(inv.get("Comments") or "")
+                if row["uniware_id"] not in comments:
+                    mismatched.append({
+                        "uniware_id": row["uniware_id"],
+                        "channel_name": row["channel_name"],
+                        "stored_doc_entry": row["doc_entry"],
+                        "live_comments": comments,
+                        "live_card_code": inv.get("CardCode"),
+                    })
+            except Exception as e:
+                errors.append({"uniware_id": row["uniware_id"], "doc_entry": row["doc_entry"], "error": str(e)[:300]})
+
+        return {"checked": checked, "mismatched_count": len(mismatched), "mismatched": mismatched, "errors": errors}
+
+    return _run("admin_audit_posted_docentries", _go)
+
+
 def pogrn_handler(event, context):
     """{"limit": 20?, "dry_run": bool?} — bulk run (poll SAP transfers ->
     stage -> claim -> create UC PO+GRN). {"sap_doc_entry": int, "dry_run":
