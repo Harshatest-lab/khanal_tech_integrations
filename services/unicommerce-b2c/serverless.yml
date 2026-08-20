@@ -319,11 +319,13 @@ functions:
     events:
       # Same 30-min offset pattern as the other flows. Read-only against
       # SAP (only writes to our own Postgres), so unlike pogrn there's
-      # no real-write risk gating this -- still deployed disabled until
-      # verified live against dev, matching every other cutover here.
+      # no real-write risk gating this. Enabled 2026-08-20: manually
+      # invoked against prod first (limit=5, 0 failures, 2 CN rows
+      # refreshed cleanly) -- same "verify against the real source
+      # system" discipline as every other cutover here.
       - schedule:
           rate: cron(27,57 * * * ? *)
-          enabled: false
+          enabled: ${self:custom.currentSchedulesEnabled}
 
   unicommerceDashboardApi:
     handler: src.handlers.dashboard_handler
