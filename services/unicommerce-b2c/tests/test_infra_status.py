@@ -17,8 +17,15 @@ def test_function_type_scheduled():
     assert infra_status._function_type("unicommerceRecon") == "scheduled"
 
 
-def test_function_type_debug():
-    assert infra_status._function_type("unicommerceAdminDebugSapInvoice") == "debug"
+def test_function_type_debug_when_listed():
+    # No debug functions currently deployed (DEBUG_FUNCTIONS is empty) --
+    # exercise the classification branch directly instead.
+    assert "somefn" not in infra_status.DEBUG_FUNCTIONS
+    infra_status.DEBUG_FUNCTIONS.append("somefn")
+    try:
+        assert infra_status._function_type("somefn") == "debug"
+    finally:
+        infra_status.DEBUG_FUNCTIONS.remove("somefn")
 
 
 def test_function_type_defaults_to_http():

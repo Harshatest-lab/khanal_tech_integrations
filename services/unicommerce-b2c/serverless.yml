@@ -75,25 +75,6 @@ provider:
             - ssm:PutParameter
           Resource:
             - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.currentSapPrefix}/b1_session
-        # TEMPORARY -- unicommerceAdminDebugSapInvoice alone needs to read
-        # the default /sap/* profile (TEST_KFL_11072026, pre-2026-08-12)
-        # to test whether corrupted DocEntry values actually belong there
-        # instead of /sap/unicommerce's KFL_LIVE. Function-level
-        # iamRoleStatements didn't merge into this service's one shared
-        # Lambda role (tested, came back empty) -- provider-level is the
-        # only place this reliably lands. Remove alongside the handler.
-        - Effect: Allow
-          Action:
-            - ssm:GetParameter
-          Resource:
-            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/sl_config
-            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/credentials
-        - Effect: Allow
-          Action:
-            - ssm:GetParameter
-            - ssm:PutParameter
-          Resource:
-            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/b1_session
         # Unicommerce posting settings (channel/customer/tax/warehouse maps —
         # replaces the Frappe "Unicommerce Settings" doctype).
         - Effect: Allow
@@ -318,19 +299,6 @@ functions:
       - schedule:
           rate: cron(17,47 * * * ? *)
           enabled: ${self:custom.currentSchedulesEnabled}
-
-  # TEMPORARY, invoke-only, read-only -- debugging the credit-note
-  # CardCode/ItemCode mismatch. Remove once done.
-  unicommerceAdminDebugSapInvoice:
-    handler: src.handlers.admin_debug_sap_invoice_handler
-    layers: [{ Ref: SharedLambdaLayer }]
-
-  # TEMPORARY, invoke-only, read-only -- auditing scope of the DocEntry
-  # cross-attribution corruption across the 'posted' bucket. Remove once
-  # done.
-  unicommerceAdminAuditPostedDocentries:
-    handler: src.handlers.admin_audit_posted_docentries_handler
-    layers: [{ Ref: SharedLambdaLayer }]
 
   unicommercePoGrn:
     handler: src.handlers.pogrn_handler

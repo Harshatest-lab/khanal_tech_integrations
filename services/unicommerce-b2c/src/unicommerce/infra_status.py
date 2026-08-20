@@ -31,7 +31,10 @@ SCHEDULED_FUNCTIONS = [
     "unicommerceRecon",
 ]
 HTTP_FUNCTIONS = ["unicommerceDashboardApi"]
-DEBUG_FUNCTIONS = ["unicommerceAdminDebugSapInvoice", "unicommerceAdminAuditPostedDocentries"]
+# No debug/manual functions currently deployed -- kept as an empty list
+# (not removed) so _function_type's "debug" classification still applies
+# if one's ever added back.
+DEBUG_FUNCTIONS: list[str] = []
 
 
 def _function_type(key: str) -> str:

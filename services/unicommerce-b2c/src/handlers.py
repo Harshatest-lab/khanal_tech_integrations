@@ -32,7 +32,7 @@ _SRC = Path(__file__).resolve().parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unicommerce import credit_notes, dashboard_queries, fetch_sync, infra_status, pogrn, post_invoices, recon, sap_client, store
+from unicommerce import credit_notes, dashboard_queries, fetch_sync, infra_status, pogrn, post_invoices, recon, store
 from unicommerce.alerts import send_alert
 
 # boto3 isn't a declared dev/CI dependency (only present in the real Lambda
@@ -160,127 +160,6 @@ def post_credit_notes_handler(event, context):
             )
 
     return _run("post_credit_notes", _go)
-
-
-def admin_debug_sap_invoice_handler(event, context):
-    """TEMPORARY, invoke-only, read-only. {"doc_entry": int, "profile":
-    "unicommerce" (default) | "default"} -- GETs the live AR Invoice from
-    SAP by DocEntry, optionally overriding SAP_SL_PROFILE for this one
-    call (testing whether DocEntry values were assigned under the old
-    default-profile company (TEST_KFL_11072026, same host, pre-2026-08-12
-    company mismatch) rather than the current unicommerce profile
-    (KFL_LIVE) -- DocEntry is scoped per SAP company, so the same number
-    means two unrelated documents in two different companies."""
-    ev = event or {}
-    profile = ev.get("profile") or "unicommerce"
-    inspect_only = bool(ev.get("inspect"))
-    find_uc_order_id = ev.get("find_uc_order_id")
-    check_headers = bool(ev.get("check_headers"))
-
-    def _go():
-        from khanal_shared.sap_sl import build_opener_and_base_via_ssm
-        from khanal_shared.sap_sl.ssm_session import _get_param_json, param_b1_session, param_sl_config
-
-        prior = os.environ.get("SAP_SL_PROFILE")
-        try:
-            os.environ["SAP_SL_PROFILE"] = "" if profile == "default" else "unicommerce"
-            if inspect_only:
-                return {
-                    "sl_config_companydb": _get_param_json(param_sl_config()).get("companydb"),
-                    "b1_session_expires_on": _get_param_json(param_b1_session()).get("expires_on"),
-                }
-            if find_uc_order_id:
-                # Does this order's REAL invoice exist somewhere in SAP
-                # under a different DocEntry than what's stored locally?
-                # Same lookup path _post_order's idempotency guard uses
-                # (HANA primary, OData Comments-contains fallback).
-                return sap_client.find_invoice_by_uc_order_id(find_uc_order_id)
-            doc_entry = int(ev["doc_entry"])
-            if check_headers:
-                # Raw request bypassing sap_sl_request_json (which drops
-                # headers) -- checking for a caching proxy/gateway between
-                # us and SAP that could return a stale/wrong response to a
-                # request instead of hitting the backend fresh (would
-                # explain a POST /Invoices returning an existing unrelated
-                # document instead of creating + returning a new one).
-                import urllib.request
-
-                opener, base = build_opener_and_base_via_ssm()
-                req = urllib.request.Request(f"{base}/Invoices({doc_entry})", method="GET")
-                with opener.open(req, timeout=90) as resp:
-                    return {"status": resp.status, "headers": dict(resp.headers.items())}
-            return sap_client.get_invoice_by_doc_entry(doc_entry)
-        finally:
-            if prior is None:
-                os.environ.pop("SAP_SL_PROFILE", None)
-            else:
-                os.environ["SAP_SL_PROFILE"] = prior
-
-    return _run("admin_debug_sap_invoice", _go)
-
-
-def admin_audit_posted_docentries_handler(event, context):
-    """TEMPORARY, invoke-only, read-only. {"limit": int, "offset": int?}
-    -- for each 'posted' order (most recently updated first), GETs its
-    live SAP invoice by sap_ar_invoice_docentry and checks whether the
-    invoice's Comments actually reference this order's uniware_id --
-    auditing for the DocEntry cross-attribution corruption found via
-    credit-note posting failures (2026-08-19)."""
-    ev = event or {}
-    limit = int(ev.get("limit") or 50)
-    offset = int(ev.get("offset") or 0)
-    list_db_inventory = bool(ev.get("list_db_inventory"))
-
-    def _go():
-        with store.connect() as conn:
-            if list_db_inventory:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT current_database()")
-                    current_db = cur.fetchone()[0]
-                    cur.execute("SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname")
-                    all_databases = [r[0] for r in cur.fetchall()]
-                    cur.execute(
-                        "SELECT schemaname, tablename FROM pg_tables "
-                        "WHERE tablename LIKE 'unicommerce%' ORDER BY schemaname, tablename"
-                    )
-                    tables_in_current_db = [{"schema": r[0], "table": r[1]} for r in cur.fetchall()]
-                return {
-                    "current_database": current_db,
-                    "all_databases_on_instance": all_databases,
-                    "unicommerce_tables_in_current_database": tables_in_current_db,
-                }
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT uniware_id, channel_name, sap_ar_invoice_docentry "
-                    "FROM unicommerce_orders WHERE pipeline_status = 'posted' "
-                    "AND sap_ar_invoice_docentry IS NOT NULL AND sap_ar_invoice_docentry != '' "
-                    "ORDER BY updated_at DESC LIMIT %s OFFSET %s",
-                    (limit, offset),
-                )
-                rows = [{"uniware_id": r[0], "channel_name": r[1], "doc_entry": r[2]} for r in cur.fetchall()]
-
-        checked = 0
-        mismatched = []
-        errors = []
-        for row in rows:
-            checked += 1
-            try:
-                inv = sap_client.get_invoice_by_doc_entry(int(row["doc_entry"]))
-                comments = str(inv.get("Comments") or "")
-                if row["uniware_id"] not in comments:
-                    mismatched.append({
-                        "uniware_id": row["uniware_id"],
-                        "channel_name": row["channel_name"],
-                        "stored_doc_entry": row["doc_entry"],
-                        "live_comments": comments,
-                        "live_card_code": inv.get("CardCode"),
-                    })
-            except Exception as e:
-                errors.append({"uniware_id": row["uniware_id"], "doc_entry": row["doc_entry"], "error": str(e)[:300]})
-
-        return {"checked": checked, "mismatched_count": len(mismatched), "mismatched": mismatched, "errors": errors}
-
-    return _run("admin_audit_posted_docentries", _go)
 
 
 def pogrn_handler(event, context):
