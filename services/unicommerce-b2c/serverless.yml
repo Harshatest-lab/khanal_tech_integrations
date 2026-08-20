@@ -184,6 +184,17 @@ custom:
   ucApiParamName: ${env:UC_API_PARAM_NAME, '/unicommerce/api_credentials'}
   ucSettingsParamName: ${env:UC_SETTINGS_PARAM_NAME, '/unicommerce/settings'}
   flexLwaParamName: ${env:FLEX_LWA_PARAM_NAME, '/amazon-flex/lwa'}
+  # Stage-keyed, deliberately NOT following the same source-wide enabled:
+  # false convention every other function's schedule uses -- prod's
+  # unicommercePostInvoices cron is already ENABLED and channel-agnostic
+  # (post_ready_orders has no default channel filter), so enabling
+  # flexFetch on prod before SAP TEST posting is verified would let real
+  # PRCJ orders get swept into prod's next posting cycle within ~30-60min.
+  # dev only until that verification is done; add `prod: true` here
+  # explicitly (not by flipping a shared flag) once it is.
+  flexFetchEnabledByStage:
+    dev: true
+  flexFetchScheduleEnabled: ${self:custom.flexFetchEnabledByStage.${self:provider.stage}, false}
   # Stage-keyed database URL -- only "prod" gets its own dedicated database
   # (UC_PROD_DATABASE_URL); every other stage keeps reading the shared
   # DATABASE_URL secret unchanged, same as every other service in this repo.
@@ -305,13 +316,13 @@ functions:
       # 136 rows / 7 days), a single daily report-mode pull is plenty per
       # the design doc; no need for amazon-us-b2c's hourly-incremental +
       # daily-report dual mode, which exists for ~500-1000x higher volume.
-      # Deployed disabled until dry-run verified live, same convention as
-      # every other function here -- and until SAP TEST posting has been
-      # verified end-to-end (see docs/superpowers/specs/
-      # 2026-08-20-amazon-flex-sap-pipeline-design.md's phased build order).
+      # Stage-keyed enable (custom.flexFetchScheduleEnabled) -- dev only
+      # until SAP TEST posting has been verified end-to-end (see
+      # docs/superpowers/specs/2026-08-20-amazon-flex-sap-pipeline-design.md's
+      # phased build order and custom.flexFetchEnabledByStage above).
       - schedule:
           rate: cron(15 4 * * ? *)
-          enabled: false
+          enabled: ${self:custom.flexFetchScheduleEnabled}
 
   unicommercePostInvoices:
     handler: src.handlers.post_invoices_handler

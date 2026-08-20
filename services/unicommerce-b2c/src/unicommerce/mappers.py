@@ -13,6 +13,15 @@ from unicommerce.dates import extract_order_date, format_cursor, parse_source_da
 
 _DATA_MAX = 140
 
+# AMAZON_FLEX-only posting cutoff: PRCJ is a brand-new integration (first
+# real fetch 2026-08-20) with no manual-MTR-overlap concern amazon-us-b2c's
+# POSTING_CUTOFF_DATE guards against -- this exists purely so a wide-window
+# fetch (e.g. a manual backfill run someone kicks off later) can never
+# promote an order dated before the agreed go-live floor to postable,
+# regardless of how order_ready_for_invoice gets invoked (scheduled or
+# manual, with or without an explicit start_date filter).
+FLEX_POSTING_CUTOFF_DATE = "2026-08-01"
+
 
 def normalize_text(value: Any) -> str:
     return str(value).strip() if value is not None else ""
@@ -77,6 +86,10 @@ def order_ready_for_invoice(order: dict) -> tuple[bool, str]:
     order_status = str(order.get("status") or "").strip().upper()
     if order_status not in {"COMPLETE", "COMPLETED"}:
         return False, f"Order status is {order_status or 'unknown'} (requires COMPLETE)"
+    if extract_channel(order) == "AMAZON_FLEX":
+        order_date = extract_order_date(order)
+        if order_date < FLEX_POSTING_CUTOFF_DATE:
+            return False, f"AMAZON_FLEX order_date {order_date} is before posting cutoff {FLEX_POSTING_CUTOFF_DATE}"
     if not eligible_line_items(order):
         return False, "Order has no invoice-eligible line items"
     return True, ""
