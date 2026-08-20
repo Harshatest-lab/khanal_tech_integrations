@@ -12,8 +12,11 @@ code stays thin and is verified live, not mocked.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 SERVICE_PREFIX = "unicommerce-b2c"
 
@@ -81,8 +84,8 @@ def fetch_infra_status(stage: str) -> dict[str, Any]:
                     rule = events_client.describe_rule(Name=rule_names[0])
                     row["schedule"] = rule.get("ScheduleExpression")
                     row["enabled"] = rule.get("State") == "ENABLED"
-            except Exception:  # noqa: BLE001 -- non-fatal, row still useful without it
-                pass
+            except Exception as exc:  # noqa: BLE001 -- non-fatal, row still useful without it
+                logger.warning("infra_status: schedule lookup failed for %s: %s", fn_name, exc)
 
         for metric_name, target_key in (("Invocations", "invocations24h"), ("Errors", "errors24h")):
             try:
@@ -96,8 +99,8 @@ def fetch_infra_status(stage: str) -> dict[str, Any]:
                     Statistics=["Sum"],
                 )
                 row[target_key] = _sum_datapoints(resp.get("Datapoints") or [])
-            except Exception:  # noqa: BLE001 -- non-fatal, row still useful without it
-                pass
+            except Exception as exc:  # noqa: BLE001 -- non-fatal, row still useful without it
+                logger.warning("infra_status: %s lookup failed for %s: %s", metric_name, fn_name, exc)
 
         rows.append(row)
 
