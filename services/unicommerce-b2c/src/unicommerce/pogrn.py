@@ -33,6 +33,18 @@ MAX_GRN_ROUNDS = 200
 MAX_ATTEMPTS = 8
 MAX_HOURS = 48
 
+# TEMPORARY, 2026-08-20: EC-FG only. Phase B live-write verification against
+# AMAZON_FBA_IN_BLR7 (an AMZ-* facility) failed with a real UC error --
+# "Vendor [EC-B2C] is not configured for the facility [AMAZON_FBA_IN_BLR7]"
+# -- a UC admin-panel vendor-facility link that's missing for the AMZ-*
+# facilities (EC-FG's kfl_ecom_warehouse already has it, confirmed by
+# fetch/postInvoices/postCreditNotes running clean against it for weeks).
+# Staging (fetch_new_transfers/watched_warehouses) still watches every AMZ-*
+# warehouse same as always -- only claiming or writing is held back here, so
+# nothing is lost, it just waits. Widen ENABLED_TO_WAREHOUSES back to
+# watched_warehouses() once the UC-side vendor link is fixed and verified.
+ENABLED_TO_WAREHOUSES = {DEFAULT_WAREHOUSE}
+
 
 def watched_warehouses() -> set[str]:
     """EC-FG + every AMZ-* warehouse -- sap_payload.py's existing
@@ -243,7 +255,7 @@ def process_ready_transfers(conn, limit: int = 20, dry_run: bool = False) -> dic
     staged = fetch_new_transfers(conn, limit=limit)
     recovery = store.recover_failed_pogrn(conn, limit=limit, max_attempts=MAX_ATTEMPTS, max_hours=MAX_HOURS)
 
-    doc_entries = store.get_claimable_pogrn_doc_entries(conn, limit)
+    doc_entries = store.get_claimable_pogrn_doc_entries(conn, limit, to_warehouses=ENABLED_TO_WAREHOUSES)
     processed = done = failed = 0
 
     if dry_run:

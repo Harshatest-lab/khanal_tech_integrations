@@ -966,12 +966,23 @@ def claim_pogrn(conn: psycopg.Connection, sap_doc_entry: int) -> dict | None:
     return dict(zip(cols, row))
 
 
-def get_claimable_pogrn_doc_entries(conn: psycopg.Connection, limit: int) -> list[int]:
+def get_claimable_pogrn_doc_entries(conn: psycopg.Connection, limit: int, to_warehouses: set[str] | None = None) -> list[int]:
+    """to_warehouses, if given, restricts to rows whose staged destination
+    warehouse is in that set -- rows outside it are left untouched (not
+    claimed, not failed), same as pogrn.ENABLED_TO_WAREHOUSES's temporary
+    EC-FG-only gate."""
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT sap_doc_entry FROM unicommerce_pogrn_staging WHERE status IN ('pending', 'po_created') ORDER BY sap_doc_entry ASC LIMIT %s",
-            (limit,),
-        )
+        if to_warehouses:
+            cur.execute(
+                "SELECT sap_doc_entry FROM unicommerce_pogrn_staging WHERE status IN ('pending', 'po_created') "
+                "AND to_warehouse = ANY(%s) ORDER BY sap_doc_entry ASC LIMIT %s",
+                (list(to_warehouses), limit),
+            )
+        else:
+            cur.execute(
+                "SELECT sap_doc_entry FROM unicommerce_pogrn_staging WHERE status IN ('pending', 'po_created') ORDER BY sap_doc_entry ASC LIMIT %s",
+                (limit,),
+            )
         return [r[0] for r in cur.fetchall()]
 
 
