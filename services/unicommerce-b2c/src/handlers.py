@@ -32,7 +32,7 @@ _SRC = Path(__file__).resolve().parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unicommerce import credit_notes, dashboard_queries, fetch_sync, pogrn, post_invoices, recon, sap_client, store
+from unicommerce import credit_notes, dashboard_queries, fetch_sync, infra_status, pogrn, post_invoices, recon, sap_client, store
 from unicommerce.alerts import send_alert
 
 # boto3 isn't a declared dev/CI dependency (only present in the real Lambda
@@ -399,6 +399,9 @@ def dashboard_handler(event, context):
 
         if path.endswith("/v1/unicommerce/order-detail") and not (q.get("uniware_id") or "").strip():
             return _json_response(400, {"error": "uniware_id is required"})
+
+        if path.endswith("/v1/unicommerce/infra"):
+            return _json_response(200, infra_status.fetch_infra_status(os.environ.get("STAGE") or "dev"))
 
         # ── read-only queries ──
         with store.connect() as conn:

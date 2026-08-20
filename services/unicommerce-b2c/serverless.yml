@@ -101,6 +101,27 @@ provider:
             - ssm:GetParameter
           Resource:
             - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.ucSettingsParamName}
+        # Infra dashboard page: read-only introspection of this service's
+        # own Lambdas/schedules/metrics -- no write actions, no other
+        # service's resources. CloudWatch actions don't support
+        # resource-level ARN scoping (AWS requires "*" for these), so
+        # that one's left unscoped by necessity; Lambda/EventBridge are
+        # scoped to this service+stage's own function/rule name prefix.
+        - Effect: Allow
+          Action:
+            - lambda:GetFunctionConfiguration
+          Resource:
+            - arn:aws:lambda:${self:provider.region}:*:function:${self:service}-${self:provider.stage}-*
+        - Effect: Allow
+          Action:
+            - events:ListRuleNamesByTarget
+            - events:DescribeRule
+          Resource:
+            - arn:aws:events:${self:provider.region}:*:rule/${self:service}-${self:provider.stage}-*
+        - Effect: Allow
+          Action:
+            - cloudwatch:GetMetricStatistics
+          Resource: "*"
         # dashboard_handler's retry-invoices/retry-cn batch path hands off
         # to these two scheduled Lambdas (900s budget) instead of running
         # inline behind httpApi's 30s cap -- see handlers.py's
@@ -348,6 +369,7 @@ functions:
       - httpApi: { path: /v1/unicommerce/recon-gaps, method: get, authorizer: { name: dashboardCognitoJwt } }
       - httpApi: { path: /v1/unicommerce/retry-invoices, method: post, authorizer: { name: dashboardCognitoJwt } }
       - httpApi: { path: /v1/unicommerce/retry-cn, method: post, authorizer: { name: dashboardCognitoJwt } }
+      - httpApi: { path: /v1/unicommerce/infra, method: get, authorizer: { name: dashboardCognitoJwt } }
 
 resources:
   Resources:
