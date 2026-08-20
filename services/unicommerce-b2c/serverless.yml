@@ -336,14 +336,19 @@ functions:
     handler: src.handlers.pogrn_handler
     layers: [{ Ref: SharedLambdaLayer }]
     events:
-      # Same 30-min offset pattern as the other flows. Deployed disabled
-      # until dry_run-verified against real SAP transfer data, then a
-      # single tiny real UC write is reviewed before this ever runs
-      # unattended -- there is no UC sandbox, see
-      # docs/superpowers/specs/2026-07-27-pogrn-inventorysync-design.md.
+      # Same 30-min offset pattern as the other flows. Enabled 2026-08-20,
+      # EC-FG only (see pogrn.ENABLED_TO_WAREHOUSES) -- Phase A dry-run and
+      # a real Phase B write both ran against real SAP/UC data before this
+      # flip. Phase B (DocEntry 23) was correctly rejected by UC on an
+      # already-past batch expiry -- confirmed against khanal_tech_integrations'
+      # legacy Frappe worker that this is real UC business-rule behavior,
+      # not a bug (it never hit this either, only because it ran
+      # continuously and never let a queued transfer's batch go stale).
+      # AMZ-* facilities stay blocked (see ENABLED_TO_WAREHOUSES's
+      # docstring) until their UC vendor-facility link is fixed.
       - schedule:
           rate: cron(22,52 * * * ? *)
-          enabled: false
+          enabled: ${self:custom.currentSchedulesEnabled}
 
   unicommerceRecon:
     handler: src.handlers.recon_handler
