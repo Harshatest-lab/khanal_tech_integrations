@@ -153,7 +153,7 @@ def _build_synthetic_order(shipment_rows: list[dict], sku_map: dict, settings) -
             continue
 
         remaining_value = item_price
-        for child in children:
+        for child_idx, child in enumerate(children, start=1):
             child_qty = qty * float(child["quantity"])
             if child_qty <= 0:
                 continue
@@ -173,7 +173,19 @@ def _build_synthetic_order(shipment_rows: list[dict], sku_map: dict, settings) -
                     "cancellationReason": "",
                     "onHold": False,
                     "bundleSkuCode": item_code,
-                    "code": item_code_field,
+                    # Indexed, not the bare order-item-id: a SAP ProductTree
+                    # can list the same child item code as more than one
+                    # separate line (e.g. CFGHN0006 -> 2x FGHN0058 as two
+                    # distinct ProductTreeLines, not one line qty=2) --
+                    # every child of one bundle line shares the same
+                    # amazon-order-item-id, and unicommerce_order_lines has
+                    # a UNIQUE(uniware_id, code) constraint, so reusing the
+                    # bare id for every child collides and silently fails
+                    # to ever write (confirmed live 2026-08-21 on a real
+                    # order: the shipment was fetched every cycle but never
+                    # actually persisted, leaving stale pre-fix data
+                    # in place indefinitely).
+                    "code": f"{item_code_field}-{child_idx}",
                     "facilityCode": "",
                     "created": line_timestamp,
                     "updated": line_timestamp,
