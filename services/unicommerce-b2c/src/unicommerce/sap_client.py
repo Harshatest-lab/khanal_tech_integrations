@@ -177,9 +177,14 @@ def find_invoice_by_num_at_card(num_at_card: str) -> dict | None:
     if not key:
         return None
     escaped = key.replace("'", "''")
+    # DocTaxAmount deliberately NOT in $select -- confirmed 2026-08-20 the
+    # SAP TEST company rejects it outright ("Property 'DocTaxAmount' of
+    # 'Document' is invalid", HTTP 400), unlike prod's schema. It's only
+    # used for reconciliation bookkeeping downstream, not correctness --
+    # _row_to_result already treats a missing value as 0.
     path = quote(
         f"Invoices?$filter=NumAtCard eq '{escaped}' and CancelStatus eq 'csNo'"
-        "&$select=DocEntry,DocNum,DocTaxAmount&$top=1",
+        "&$select=DocEntry,DocNum&$top=1",
         safe="/?$&=',",
     )
     try:
@@ -187,7 +192,7 @@ def find_invoice_by_num_at_card(num_at_card: str) -> dict | None:
     except Exception as e:
         raise SapLookupError(f"NumAtCard duplicate check failed for {key}: {e}") from e
     if status != 200 or not isinstance(body, dict):
-        raise SapLookupError(f"NumAtCard duplicate check failed for {key}: HTTP {status}")
+        raise SapLookupError(f"NumAtCard duplicate check failed for {key}: HTTP {status}: {str(body)[:500]}")
     rows = body.get("value", [])
     return _row_to_result(rows[0]) if rows else None
 
