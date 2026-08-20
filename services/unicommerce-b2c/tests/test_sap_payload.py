@@ -139,6 +139,11 @@ def test_resolve_sap_warehouse_fba_channel_always_wins():
     assert _resolve_sap_warehouse(settings, "amazon_fba_in_bom5", "some-uc-code") == "AMZ-BOM5"
 
 
+def test_resolve_sap_warehouse_routes_blr4_fba_channel():
+    settings = UnicommerceSettings(warehouse_map={"some-uc-code": "OTHER-WH"})
+    assert _resolve_sap_warehouse(settings, "amazon_fba_in_blr4", "some-uc-code") == "AMZ-BLR4"
+
+
 def test_resolve_sap_warehouse_settings_map_before_default():
     settings = UnicommerceSettings(warehouse_map={"UC-WH-1": "SAP-WH-1"})
     assert _resolve_sap_warehouse(settings, "FLIPKART", "UC-WH-1") == "SAP-WH-1"
