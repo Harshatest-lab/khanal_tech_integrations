@@ -221,6 +221,64 @@ def set_invoice_num_at_card(doc_entry: int, value: str) -> None:
         raise SapPostError(f"NumAtCard patch failed for DocEntry={doc_entry}: HTTP {status}: {str(body)[:500]}")
 
 
+_product_tree_cache: dict[str, list[dict]] = {}
+
+
+def get_product_tree_children(parent_item_code: str) -> list[dict]:
+    """[{"item_code": str, "quantity": float}, ...] for a CFG (Sales BOM)
+    parent's child items. Ported from khanal_tech_integrations MTR
+    script's _get_product_tree_children -- tries 3 ProductTrees endpoint
+    shapes because SAP Service Layer versions differ in whether
+    ProductTreeLines comes back inline, via $expand, or needs a separate
+    sub-resource fetch. Cached per Lambda container (bundle composition
+    doesn't change mid-run). Raises ValueError if every variant fails or
+    returns no children -- never guesses at bundle contents."""
+    parent = (parent_item_code or "").strip()
+    if not parent:
+        return []
+    if parent in _product_tree_cache:
+        return _product_tree_cache[parent]
+
+    escaped = parent.replace("'", "''")
+    last_error: str | None = None
+
+    for endpoint in (
+        f"ProductTrees('{escaped}')",
+        f"ProductTrees('{escaped}')?$expand=ProductTreeLines",
+        f"ProductTrees?$filter=TreeCode eq '{escaped}'&$expand=ProductTreeLines",
+    ):
+        try:
+            status, body = _request("GET", quote(endpoint, safe="/?$&=',()"))
+            if status != 200 or not isinstance(body, dict):
+                last_error = f"HTTP {status}: {str(body)[:200]}"
+                continue
+            data = body
+            if "value" in data:
+                trees = data.get("value") or []
+                data = trees[0] if trees else {}
+            lines = data.get("ProductTreeLines") or []
+            if isinstance(lines, dict):
+                lines = lines.get("value") or []
+            if not lines:
+                lines_status, lines_body = _request("GET", f"ProductTrees('{quote(escaped, safe='')}')/ProductTreeLines")
+                if lines_status == 200 and isinstance(lines_body, dict):
+                    lines = lines_body.get("value") or (lines_body if isinstance(lines_body, list) else [])
+
+            children = [
+                {"item_code": str(line.get("ItemCode") or "").strip(), "quantity": float(line.get("Quantity") or 0)}
+                for line in lines
+                if str(line.get("ItemCode") or "").strip() and float(line.get("Quantity") or 0)
+            ]
+            if children:
+                _product_tree_cache[parent] = children
+                return children
+            last_error = f"ProductTree {parent} has no child lines"
+        except Exception as e:
+            last_error = str(e)
+
+    raise ValueError(f"Unable to resolve Sales BOM children for CFG parent {parent}. Last error: {last_error}")
+
+
 def get_invoice_by_doc_entry(doc_entry: int) -> dict:
     try:
         status, body = _request("GET", f"Invoices({int(doc_entry)})")

@@ -90,13 +90,9 @@ def _build_synthetic_order(shipment_rows: list[dict], sku_map: dict, settings) -
         except flex_items.SkuUnresolved:
             logger.warning("flex_fetch(%s): unresolved seller SKU %r, skipping line", uniware_id, seller_sku)
             continue
-        except flex_items.CfgExpansionNotImplemented as e:
-            logger.error("flex_fetch(%s): %s -- skipping line, needs manual handling", uniware_id, e)
-            continue
 
         item_price = _to_float(row.get("item-price"))
         item_tax = _to_float(row.get("item-tax"))
-        unit_price = round(item_price / qty, 4) if qty else 0.0
         raw_tax_percent = (item_tax / item_price) * 100 if item_price > 0 else 0.0
         # GST only has fixed slabs -- settings.tax_code_map has no entry
         # for anything else, so a raw item-tax/item-price ratio (rounding
@@ -115,26 +111,74 @@ def _build_synthetic_order(shipment_rows: list[dict], sku_map: dict, settings) -
         # created/updated; shipment-date is the closest equivalent Amazon's
         # report actually has.
         line_timestamp = row.get("shipment-date") or row.get("purchase-date") or ""
-        items.append(
-            {
-                "itemSku": item_code,
-                "sellerSkuCode": seller_sku,
-                "channelProductId": (row.get("asin") or "").strip(),
-                "quantity": qty,
-                "totalPrice": item_price,
-                "sellingPrice": item_price,
-                "sellingPriceWithoutTaxesAndDiscount": unit_price,
-                "taxPercentage": tax_percent,
-                "statusCode": "DISPATCHED",
-                "cancellationReason": "",
-                "onHold": False,
-                "bundleSkuCode": "",
-                "code": (row.get("amazon-order-item-id") or "").strip(),
-                "facilityCode": "",
-                "created": line_timestamp,
-                "updated": line_timestamp,
-            }
-        )
+        item_code_field = (row.get("amazon-order-item-id") or "").strip()
+        channel_product_id = (row.get("asin") or "").strip()
+
+        if not flex_items.is_cfg_parent(item_code):
+            items.append(
+                {
+                    "itemSku": item_code,
+                    "sellerSkuCode": seller_sku,
+                    "channelProductId": channel_product_id,
+                    "quantity": qty,
+                    "totalPrice": item_price,
+                    "sellingPrice": item_price,
+                    "sellingPriceWithoutTaxesAndDiscount": round(item_price / qty, 4) if qty else 0.0,
+                    "taxPercentage": tax_percent,
+                    "statusCode": "DISPATCHED",
+                    "cancellationReason": "",
+                    "onHold": False,
+                    "bundleSkuCode": "",
+                    "code": item_code_field,
+                    "facilityCode": "",
+                    "created": line_timestamp,
+                    "updated": line_timestamp,
+                }
+            )
+            continue
+
+        # CFG (Sales BOM) parent: expand into child rows tagged with
+        # bundleSkuCode -- sap_payload.py's existing bundle-grouping picks
+        # these up and auto-generates the iSalesTree parent line itself
+        # (do not add that line here). Pricing follows the MTR script's
+        # proven pattern (verified live against real SAP behavior): SAP
+        # zeroes the parent's own price, so the whole line's taxable value
+        # rides on the FIRST child; every other child gets UnitPrice=0 but
+        # still carries its own real quantity, so stock/batch consumption
+        # for every component is still correct.
+        try:
+            children = flex_items.get_product_tree_children(item_code)
+        except flex_items.CfgExpansionFailed as e:
+            logger.error("flex_fetch(%s): %s -- skipping line", uniware_id, e)
+            continue
+
+        remaining_value = item_price
+        for child in children:
+            child_qty = qty * float(child["quantity"])
+            if child_qty <= 0:
+                continue
+            child_unit_price = round(remaining_value / child_qty, 4) if remaining_value and child_qty else 0.0
+            remaining_value = 0.0
+            items.append(
+                {
+                    "itemSku": child["item_code"],
+                    "sellerSkuCode": seller_sku,
+                    "channelProductId": channel_product_id,
+                    "quantity": child_qty,
+                    "totalPrice": child_unit_price * child_qty,
+                    "sellingPrice": child_unit_price * child_qty,
+                    "sellingPriceWithoutTaxesAndDiscount": child_unit_price,
+                    "taxPercentage": tax_percent,
+                    "statusCode": "DISPATCHED",
+                    "cancellationReason": "",
+                    "onHold": False,
+                    "bundleSkuCode": item_code,
+                    "code": item_code_field,
+                    "facilityCode": "",
+                    "created": line_timestamp,
+                    "updated": line_timestamp,
+                }
+            )
 
     if not items:
         return None

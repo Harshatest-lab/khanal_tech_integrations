@@ -17,22 +17,29 @@ seller SKUs that have simply never appeared in an already-synced order
 (new listings) -- those need the manual override tier below, same as any
 newly-listed product would need regardless of source.
 
-CFG (Sales BOM) bundle expansion is deliberately NOT ported here: checked
-unicommerce_order_lines.itemsku across this service's ENTIRE order history,
-every channel, ever -- zero rows have ever resolved to a CFG-prefixed SAP
-item code. ProductTree expansion (khanal_tech_integrations MTR script's
-_get_product_tree_children) is real, proven code, but porting it against a
-code path that's never actually fired would be guessing at whether the port
-is even correct. If a Flex order ever resolves to a real CFG parent,
-resolve_seller_sku raises CfgExpansionNotImplemented instead of silently
-mis-posting or guessing at pricing splits -- port the expansion then,
-against a real example.
+CFG (Sales BOM) bundle expansion: initially deferred (checked
+unicommerce_order_lines.itemsku across this service's entire order history,
+every channel -- zero rows had ever resolved to a CFG-prefixed SAP item
+code). Revisited 2026-08-20 against a real Channel Item Type Report export
+from Unicommerce: 31 of 138 real seller-SKU mappings are CFG parents, and
+15 of 43 real PRCJ SKUs in a 7-day sample resolve to one -- ~35% of real
+Flex volume, not rare. Confirmed directly with the user: CFG codes are
+real non-inventory SAP items with child items looked up via SAP
+ProductTrees (same iSalesTree mechanism the MTR script and this service's
+own sap_payload.py bundle-grouping already use); batch numbers belong on
+the children, never the parent -- sap_payload.py's existing
+bundleSkuCode-grouping already guarantees this (parent line is hardcoded
+BatchNumbers: [], children go through the normal per-line FEFO path).
+resolve_seller_sku returns the CFG parent code as-is; the caller
+(flex_fetch.py) is responsible for calling get_product_tree_children and
+expanding into per-child rows tagged with bundleSkuCode.
 """
 
 from __future__ import annotations
 
 import psycopg
 
+from unicommerce import sap_client
 from unicommerce.settings import UnicommerceSettings
 
 
@@ -42,11 +49,10 @@ class SkuUnresolved(Exception):
     the wrong item."""
 
 
-class CfgExpansionNotImplemented(Exception):
-    """A Flex line resolved to a real SAP CFG (Sales BOM) parent -- the
-    first time this has happened across this service's history. Port
-    ProductTree expansion now, against this real example, rather than the
-    speculative version that was deliberately left unbuilt."""
+class CfgExpansionFailed(Exception):
+    """SAP ProductTree lookup for a CFG parent failed or returned no
+    children -- callers must flag/skip the line, not guess at what the
+    bundle contains."""
 
 
 def build_sku_map(conn: psycopg.Connection) -> dict[str, str]:
@@ -70,8 +76,7 @@ def build_sku_map(conn: psycopg.Connection) -> dict[str, str]:
 
 def is_cfg_parent(item_code: str) -> bool:
     """SAP Sales-BOM parent naming convention, per the MTR script's
-    _is_cfg_parent_item -- kept for when CfgExpansionNotImplemented needs
-    porting for real."""
+    _is_cfg_parent_item."""
     return (item_code or "").strip().upper().startswith("CFG")
 
 
@@ -79,8 +84,10 @@ def resolve_seller_sku(sku_map: dict[str, str], settings: UnicommerceSettings, s
     """Manual override tier (settings.flex_sku_overrides) wins over the
     live-order-history map -- same override-wins precedence as
     khanal-oms's sku_resolver.py. Raises SkuUnresolved if neither covers
-    it, or CfgExpansionNotImplemented if the resolved code is a CFG
-    parent. Never guesses."""
+    it. Never guesses. Returns the resolved code as-is, whether plain or a
+    CFG parent -- callers must check is_cfg_parent() and expand via
+    get_product_tree_children() themselves; this function only resolves
+    the seller SKU to a SAP item code."""
     key = (seller_sku or "").strip()
     if not key:
         raise SkuUnresolved("empty seller SKU")
@@ -89,9 +96,17 @@ def resolve_seller_sku(sku_map: dict[str, str], settings: UnicommerceSettings, s
     if not item_code:
         raise SkuUnresolved(f"no override and no live-order-history match for seller SKU {key!r}")
 
-    if is_cfg_parent(item_code):
-        raise CfgExpansionNotImplemented(
-            f"seller SKU {key!r} resolved to CFG parent {item_code!r} -- ProductTree expansion not yet ported"
-        )
-
     return item_code
+
+
+def get_product_tree_children(parent_item_code: str) -> list[dict]:
+    """[{"item_code": str, "quantity": float}, ...] for a CFG (Sales BOM)
+    parent's child items, via SAP ProductTrees. Ported from the MTR
+    script's _get_product_tree_children (same 3-endpoint fallback for SAP
+    Service Layer version differences, same per-run cache). Raises
+    CfgExpansionFailed if every endpoint variant fails or returns no
+    children -- never guesses at bundle contents."""
+    try:
+        return sap_client.get_product_tree_children(parent_item_code)
+    except Exception as e:
+        raise CfgExpansionFailed(f"ProductTree lookup failed for CFG parent {parent_item_code!r}: {e}") from e
