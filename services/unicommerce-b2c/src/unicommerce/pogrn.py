@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 from unicommerce import stock_transfers, store
 from unicommerce.credentials import get_uc_credentials
-from unicommerce.sap_payload import CHANNEL_WAREHOUSE_MAP, DEFAULT_WAREHOUSE
+from unicommerce.sap_payload import DEFAULT_WAREHOUSE
 from unicommerce.settings import UnicommerceSettings, get_settings
 from unicommerce.uc_client import UcApiError, UcClient
 
@@ -33,23 +33,27 @@ MAX_GRN_ROUNDS = 200
 MAX_ATTEMPTS = 8
 MAX_HOURS = 48
 
-# TEMPORARY, 2026-08-20: EC-FG only. Phase B live-write verification against
-# AMAZON_FBA_IN_BLR7 (an AMZ-* facility) failed with a real UC error --
-# "Vendor [EC-B2C] is not configured for the facility [AMAZON_FBA_IN_BLR7]"
-# -- a UC admin-panel vendor-facility link that's missing for the AMZ-*
-# facilities (EC-FG's kfl_ecom_warehouse already has it, confirmed by
-# fetch/postInvoices/postCreditNotes running clean against it for weeks).
-# Staging (fetch_new_transfers/watched_warehouses) still watches every AMZ-*
-# warehouse same as always -- only claiming or writing is held back here, so
-# nothing is lost, it just waits. Widen ENABLED_TO_WAREHOUSES back to
-# watched_warehouses() once the UC-side vendor link is fixed and verified.
-ENABLED_TO_WAREHOUSES = {DEFAULT_WAREHOUSE}
-
-
+# Scope decision, 2026-08-20: EC-FG only, permanently -- not pending a fix.
+# Phase B live-write verification against AMAZON_FBA_IN_BLR7 (an AMZ-*
+# facility) failed on a real UC error -- "Vendor [EC-B2C] is not configured
+# for the facility [AMAZON_FBA_IN_BLR7]", a UC admin-panel vendor-facility
+# link missing for every AMZ-* facility. Chasing that config across ~10
+# facilities isn't worth it: unlike EC-FG, AMZ-* PO/GRN here has no real
+# operational meaning -- Amazon's own FBA network fulfils those orders and
+# manages that inventory independently (sellers replenish it via Amazon
+# Seller Central's own "Send to Amazon" flow, entirely outside UC/SAP).
+# This PO/GRN would only be mirroring SAP's stock-transfer bookkeeping into
+# UC's inventory ledger for a nominal warehouse Amazon never even sees --
+# not worth the config chase or the extra code path for a decision this low
+# stakes. CHANNEL_WAREHOUSE_MAP (sap_payload.py) is unaffected -- AMZ-*
+# invoice/credit-note warehouse routing has nothing to do with this and
+# still applies to every AMZ-* channel.
 def watched_warehouses() -> set[str]:
-    """EC-FG + every AMZ-* warehouse -- sap_payload.py's existing
-    constants are the single source of truth, not duplicated here."""
-    return {DEFAULT_WAREHOUSE} | set(CHANNEL_WAREHOUSE_MAP.values())
+    """EC-FG only -- see the scope-decision comment above. Not
+    CHANNEL_WAREHOUSE_MAP's full AMZ-* set; that constant is
+    sap_payload.py's invoice/credit-note routing table, a separate concern
+    from what PoGrn stages/claims here."""
+    return {DEFAULT_WAREHOUSE}
 
 
 def facility_code_for_warehouse(settings: UnicommerceSettings, sap_warehouse: str) -> str | None:
@@ -255,7 +259,7 @@ def process_ready_transfers(conn, limit: int = 20, dry_run: bool = False) -> dic
     staged = fetch_new_transfers(conn, limit=limit)
     recovery = store.recover_failed_pogrn(conn, limit=limit, max_attempts=MAX_ATTEMPTS, max_hours=MAX_HOURS)
 
-    doc_entries = store.get_claimable_pogrn_doc_entries(conn, limit, to_warehouses=ENABLED_TO_WAREHOUSES)
+    doc_entries = store.get_claimable_pogrn_doc_entries(conn, limit)
     processed = done = failed = 0
 
     if dry_run:

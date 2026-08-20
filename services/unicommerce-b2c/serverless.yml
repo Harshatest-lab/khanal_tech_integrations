@@ -344,8 +344,11 @@ functions:
       # legacy Frappe worker that this is real UC business-rule behavior,
       # not a bug (it never hit this either, only because it ran
       # continuously and never let a queued transfer's batch go stale).
-      # AMZ-* facilities stay blocked (see ENABLED_TO_WAREHOUSES's
-      # docstring) until their UC vendor-facility link is fixed.
+      # AMZ-* facilities are permanently out of scope for PO/GRN (see
+      # pogrn.watched_warehouses's docstring) -- not worth chasing UC
+      # vendor-facility config for bookkeeping Amazon's own FBA network
+      # never sees. Their invoice/credit-note routing (CHANNEL_WAREHOUSE_MAP
+      # in sap_payload.py) is unaffected and unrelated to this.
       - schedule:
           rate: cron(22,52 * * * ? *)
           enabled: ${self:custom.currentSchedulesEnabled}

@@ -9,14 +9,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from unicommerce import pogrn, store  # noqa: E402
-from unicommerce.sap_payload import CHANNEL_WAREHOUSE_MAP, DEFAULT_WAREHOUSE  # noqa: E402
+from unicommerce.sap_payload import DEFAULT_WAREHOUSE  # noqa: E402
 from unicommerce.settings import UnicommerceSettings  # noqa: E402
 
 
-def test_watched_warehouses_includes_ec_fg_and_all_amz():
-    result = pogrn.watched_warehouses()
-    assert DEFAULT_WAREHOUSE in result
-    assert set(CHANNEL_WAREHOUSE_MAP.values()) <= result
+def test_watched_warehouses_is_ec_fg_only():
+    # Scope decision 2026-08-20: AMZ-* PO/GRN dropped permanently -- it's
+    # bookkeeping for a warehouse Amazon's own FBA network never sees, not
+    # worth chasing the UC vendor-facility config across ~10 facilities for.
+    assert pogrn.watched_warehouses() == {DEFAULT_WAREHOUSE}
 
 
 def test_facility_code_for_warehouse_inverts_warehouse_map():
