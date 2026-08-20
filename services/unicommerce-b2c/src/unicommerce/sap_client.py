@@ -164,6 +164,34 @@ def find_invoice_by_uc_order_id(uc_order_id: str) -> dict | None:
     raise SapLookupError(f"Duplicate check failed for {key} on every path (HANA + SL): {last_exc}")
 
 
+def find_invoice_by_num_at_card(num_at_card: str) -> dict | None:
+    """AMAZON_FLEX-only duplicate guard: NumAtCard is a native SAP header
+    field (unlike U_UCOrderID, which SAP SL rejects on this install -- see
+    find_invoice_by_uc_order_id's docstring), so this queries it directly
+    via Service Layer instead of going through HANA. Ported from
+    amazon-us-b2c's sap_client._find_by_num_at_card, which already proves
+    this pattern works against this same SAP install. Other channels keep
+    using find_invoice_by_uc_order_id/HANA -- NumAtCard is unset on their
+    invoices, so this lookup would just never match for them."""
+    key = str(num_at_card or "").strip()
+    if not key:
+        return None
+    escaped = key.replace("'", "''")
+    path = quote(
+        f"Invoices?$filter=NumAtCard eq '{escaped}' and CancelStatus eq 'csNo'"
+        "&$select=DocEntry,DocNum,DocTaxAmount&$top=1",
+        safe="/?$&=',",
+    )
+    try:
+        status, body = _request("GET", path)
+    except Exception as e:
+        raise SapLookupError(f"NumAtCard duplicate check failed for {key}: {e}") from e
+    if status != 200 or not isinstance(body, dict):
+        raise SapLookupError(f"NumAtCard duplicate check failed for {key}: HTTP {status}")
+    rows = body.get("value", [])
+    return _row_to_result(rows[0]) if rows else None
+
+
 def _row_to_result(row: dict) -> dict:
     return {
         "doc_entry": int(row["DocEntry"]),
@@ -171,6 +199,21 @@ def _row_to_result(row: dict) -> dict:
         "doc_tax_amount": float(row.get("DocTaxAmount") or 0),
         "comments": str(row.get("Comments") or ""),
     }
+
+
+def set_invoice_num_at_card(doc_entry: int, value: str) -> None:
+    """One-off backfill: PATCH the native NumAtCard header field onto an
+    already-posted invoice. Used to migrate historical AR Invoices (posted
+    before NumAtCard-based dedup existed) so they become matchable by the
+    same $filter=NumAtCard lookup pattern amazon-us-b2c uses -- see
+    scripts/backfill_numatcard.py. Not part of the normal posting path
+    (post_invoice already sets NumAtCard at creation time going forward)."""
+    try:
+        status, body = _request("PATCH", f"Invoices({int(doc_entry)})", body={"NumAtCard": str(value)})
+    except Exception as e:
+        raise SapPostError(f"NumAtCard patch failed for DocEntry={doc_entry}: {e}") from e
+    if status not in (200, 204):
+        raise SapPostError(f"NumAtCard patch failed for DocEntry={doc_entry}: HTTP {status}: {str(body)[:500]}")
 
 
 def get_invoice_by_doc_entry(doc_entry: int) -> dict:

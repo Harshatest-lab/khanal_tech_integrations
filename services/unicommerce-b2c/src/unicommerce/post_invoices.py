@@ -217,12 +217,20 @@ def _batch_shortage_message(shortages: list[dict]) -> str:
 def _post_order(conn, row: dict, settings, batch_managed_cache: dict, fefo_cache: dict, series_cache: dict, reservation_ctx: dict) -> tuple[str, list]:
     """Returns (outcome, shortages) where outcome is 'posted' | 'batch_hold' | 'verify'."""
     uniware_id = row["uniware_id"]
+    channel_name = row.get("channel_name") or ""
 
     # Idempotency guard: if SAP already has an invoice for this order (a
     # prior attempt that timed out before we could record the docentry),
-    # mark it posted immediately instead of re-posting.
+    # mark it posted immediately instead of re-posting. AMAZON_FLEX uses
+    # NumAtCard (set at posting time in sap_payload.ar_invoice_payload)
+    # instead of the U_Order-UDF/HANA path every other channel uses -- see
+    # sap_client.find_invoice_by_num_at_card's docstring.
     try:
-        existing = sap_client.find_invoice_by_uc_order_id(uniware_id)
+        existing = (
+            sap_client.find_invoice_by_num_at_card(uniware_id)
+            if channel_name == "AMAZON_FLEX"
+            else sap_client.find_invoice_by_uc_order_id(uniware_id)
+        )
         if existing:
             store.mark_posted(conn, uniware_id, str(existing["doc_entry"]), str(existing["doc_num"]), existing.get("doc_tax_amount") or 0, None)
             logger.info("_post_order(%s): SAP invoice already exists (DocEntry=%s); skipping re-post.", uniware_id, existing["doc_entry"])
@@ -237,7 +245,6 @@ def _post_order(conn, row: dict, settings, batch_managed_cache: dict, fefo_cache
         return "verify", []
 
     uc_data = json.loads(row["order_json"] or "{}") if isinstance(row["order_json"], str) else (row["order_json"] or {})
-    channel_name = row.get("channel_name") or ""
 
     batch_check = _check_batches(uniware_id, channel_name, uc_data, settings, batch_managed_cache, fefo_cache, reservation_ctx)
     if not batch_check["ok"]:

@@ -82,6 +82,15 @@ provider:
             - ssm:GetParameter
           Resource:
             - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.ucSettingsParamName}
+        # Amazon Flex (PRCJ) SP-API LWA credentials — one new param, reuses
+        # khanal-oms's already-working refresh token value rather than a
+        # second Amazon app registration. See
+        # docs/superpowers/specs/2026-08-20-amazon-flex-sap-pipeline-design.md.
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+          Resource:
+            - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.flexLwaParamName}
         # Infra dashboard page: read-only introspection of this service's
         # own Lambdas/schedules/metrics -- no write actions, no other
         # service's resources. CloudWatch actions don't support
@@ -142,6 +151,7 @@ provider:
     DATABASE_URL: ${self:custom.currentDatabaseUrl}${self:custom.currentDbSearchPathSuffix}
     UC_API_PARAM_NAME: ${self:custom.ucApiParamName}
     UC_SETTINGS_PARAM_NAME: ${self:custom.ucSettingsParamName}
+    FLEX_LWA_PARAM_NAME: ${self:custom.flexLwaParamName}
     UC_ALERT_ADMIN_EMAIL: ${env:UC_ALERT_ADMIN_EMAIL, ''}
     UC_ALERT_FROM_EMAIL: ${env:UC_ALERT_FROM_EMAIL, ''}
     UC_SES_REGION: ${env:UC_SES_REGION, 'ap-south-1'}
@@ -173,6 +183,7 @@ provider:
 custom:
   ucApiParamName: ${env:UC_API_PARAM_NAME, '/unicommerce/api_credentials'}
   ucSettingsParamName: ${env:UC_SETTINGS_PARAM_NAME, '/unicommerce/settings'}
+  flexLwaParamName: ${env:FLEX_LWA_PARAM_NAME, '/amazon-flex/lwa'}
   # Stage-keyed database URL -- only "prod" gets its own dedicated database
   # (UC_PROD_DATABASE_URL); every other stage keeps reading the shared
   # DATABASE_URL secret unchanged, same as every other service in this repo.
@@ -274,6 +285,33 @@ functions:
       - schedule:
           rate: cron(2,32 * * * ? *)
           enabled: ${self:custom.currentSchedulesEnabled}
+
+  numatcardBackfill:
+    handler: src.handlers.numatcard_backfill_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+    # No schedule -- invoked manually (aws lambda invoke) in batches via
+    # {"limit", "offset", "apply"}. Exists only to run this SAP call from
+    # AWS's network path, which is proven to work today (2026-08-20) while
+    # the same call from outside AWS consistently fails -- see
+    # numatcard_backfill.py's module docstring. Delete once the ~1243
+    # historical invoices are fully backfilled; not a recurring job.
+
+  flexFetch:
+    handler: src.handlers.flex_fetch_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+    events:
+      # Once daily, not hourly like the UC fetch crons below -- Flex
+      # volume is ~15-20 PRCJ shipments/day (confirmed live 2026-08-20,
+      # 136 rows / 7 days), a single daily report-mode pull is plenty per
+      # the design doc; no need for amazon-us-b2c's hourly-incremental +
+      # daily-report dual mode, which exists for ~500-1000x higher volume.
+      # Deployed disabled until dry-run verified live, same convention as
+      # every other function here -- and until SAP TEST posting has been
+      # verified end-to-end (see docs/superpowers/specs/
+      # 2026-08-20-amazon-flex-sap-pipeline-design.md's phased build order).
+      - schedule:
+          rate: cron(15 4 * * ? *)
+          enabled: false
 
   unicommercePostInvoices:
     handler: src.handlers.post_invoices_handler

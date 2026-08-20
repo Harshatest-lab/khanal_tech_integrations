@@ -2,3 +2,4 @@
 
 DATABASE_URL = ""
 UC_API = {"base_url": "", "username": "", "password": "", "facility_code": ""}
+FLEX_LWA = {"host": "", "marketplace_id": "", "client_id": "", "client_secret": "", "refresh_token": ""}

@@ -32,7 +32,7 @@ _SRC = Path(__file__).resolve().parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unicommerce import credit_notes, dashboard_queries, fetch_sync, infra_status, pogrn, post_invoices, recon, store
+from unicommerce import credit_notes, dashboard_queries, fetch_sync, flex_fetch, infra_status, numatcard_backfill, pogrn, post_invoices, recon, store
 from unicommerce.alerts import send_alert
 
 # boto3 isn't a declared dev/CI dependency (only present in the real Lambda
@@ -104,6 +104,40 @@ def fetch_handler(event, context):
     if mode == "returns":
         return _run("fetch_returns", _go_returns)
     return _run("fetch_orders", _go_orders)
+
+
+def numatcard_backfill_handler(event, context):
+    """{"limit": int? (default 10), "offset": int? (default 0), "apply": bool?
+    (default false -- dry-run only)}. One-off: backfill NumAtCard onto
+    already-posted historical invoices, batched. Not scheduled -- invoke
+    manually (aws lambda invoke), same network path the real posting
+    Lambda uses (confirmed live 2026-08-20 this SAP call fails from outside
+    AWS but succeeds from here)."""
+    ev = event or {}
+    limit = int(ev.get("limit") or 10)
+    offset = int(ev.get("offset") or 0)
+    apply = bool(ev.get("apply") or False)
+
+    def _go():
+        return numatcard_backfill.run_backfill(limit=limit, offset=offset, apply=apply)
+
+    return _run("numatcard_backfill", _go)
+
+
+def flex_fetch_handler(event, context):
+    """{"lookback_days": int? (default 2)} -- pulls the Amazon SP-API
+    fulfilled-shipments report, filters to PRCJ, stages synthetic orders
+    into unicommerce_orders/order_lines (channel_name='AMAZON_FLEX',
+    pipeline_status='fetched'). Posting itself happens on the next
+    post_invoices_handler cycle, same as every other channel -- this
+    handler only fetches/stages."""
+    ev = event or {}
+    lookback_days = int(ev.get("lookback_days") or 2)
+
+    def _go():
+        return flex_fetch.fetch_flex_shipments(lookback_days=lookback_days)
+
+    return _run("flex_fetch", _go)
 
 
 def post_invoices_handler(event, context):
