@@ -112,9 +112,20 @@ provider:
             - lambda:GetFunctionConfiguration
           Resource:
             - arn:aws:lambda:${self:provider.region}:*:function:${self:service}-${self:provider.stage}-*
+        # ListRuleNamesByTarget enumerates across all rules to find which
+        # ones target a given Lambda -- confirmed live 2026-08-20 that AWS
+        # requires the IAM resource for this specific action to be the
+        # literal "rule/*" (matching every rule account-wide), not a
+        # name-prefixed pattern; a scoped resource here gets a silent
+        # AccessDeniedException. DescribeRule takes an explicit rule name
+        # in the request, so it can (and should) stay scoped normally.
         - Effect: Allow
           Action:
             - events:ListRuleNamesByTarget
+          Resource:
+            - arn:aws:events:${self:provider.region}:*:rule/*
+        - Effect: Allow
+          Action:
             - events:DescribeRule
           Resource:
             - arn:aws:events:${self:provider.region}:*:rule/${self:service}-${self:provider.stage}-*
