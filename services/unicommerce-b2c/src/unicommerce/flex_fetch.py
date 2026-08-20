@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 CHANNEL_NAME = "AMAZON_FLEX"
 PRCJ_FULFILLMENT_CENTER = "PRCJ"
+_GST_SLABS = (0, 5, 12, 18, 28)
 
 
 def _to_float(value) -> float:
@@ -96,7 +97,14 @@ def _build_synthetic_order(shipment_rows: list[dict], sku_map: dict, settings) -
         item_price = _to_float(row.get("item-price"))
         item_tax = _to_float(row.get("item-tax"))
         unit_price = round(item_price / qty, 4) if qty else 0.0
-        tax_percent = round((item_tax / item_price) * 100, 2) if item_price > 0 else 0.0
+        raw_tax_percent = (item_tax / item_price) * 100 if item_price > 0 else 0.0
+        # GST only has fixed slabs -- settings.tax_code_map has no entry
+        # for anything else, so a raw item-tax/item-price ratio (rounding
+        # noise in Amazon's own reported split, e.g. 16.99 -> "17") fails
+        # to resolve a tax code entirely (confirmed live 2026-08-20: "No
+        # tax code mapped for key: 17_intra"). Snap to the nearest real
+        # slab instead of trusting the raw ratio.
+        tax_percent = min(_GST_SLABS, key=lambda slab: abs(slab - raw_tax_percent))
 
         # created/updated must be a real value, not absent: mappers.
         # build_line_items() falls back to safe_str(item.get("created")) --

@@ -263,6 +263,7 @@ def _post_order(conn, row: dict, settings, batch_managed_cache: dict, fefo_cache
         )
     except Exception as e:
         _release_for_order(reservation_ctx, uniware_id)
+        logger.error("_post_order(%s): payload build failed: %s", uniware_id, e)
         store.mark_failed(conn, uniware_id, str(e), settings.max_retry_attempts)
         return "failed", []
 
@@ -273,7 +274,9 @@ def _post_order(conn, row: dict, settings, batch_managed_cache: dict, fefo_cache
         _release_for_order(reservation_ctx, uniware_id)
         if "timeout" in err.lower() or "connection" in err.lower():
             store.unclaim_order(conn, uniware_id, "verify")
+            logger.warning("_post_order(%s): SAP POST timed out/connection error, deferred to verify: %s", uniware_id, err)
             return "verify", []
+        logger.error("_post_order(%s): SAP POST failed: %s", uniware_id, err)
         store.mark_failed(conn, uniware_id, err, settings.max_retry_attempts)
         return "failed", []
 
