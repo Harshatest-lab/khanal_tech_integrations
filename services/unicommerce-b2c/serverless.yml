@@ -190,10 +190,14 @@ custom:
   # (post_ready_orders has no default channel filter), so enabling
   # flexFetch on prod before SAP TEST posting is verified would let real
   # PRCJ orders get swept into prod's next posting cycle within ~30-60min.
-  # dev only until that verification is done; add `prod: true` here
-  # explicitly (not by flipping a shared flag) once it is.
+  # Verified end-to-end against real SAP TEST (CFG bundles, NumAtCard
+  # dedup, tax-slab handling, posting-period/config fixes) and against
+  # real SAP PROD (19 real invoices posted, checked line-by-line, all
+  # correct) 2026-08-20 -- enabled on prod explicitly, by name, per the
+  # user's direct go-ahead, not by flipping a shared flag.
   flexFetchEnabledByStage:
     dev: true
+    prod: true
   flexFetchScheduleEnabled: ${self:custom.flexFetchEnabledByStage.${self:provider.stage}, false}
   # Stage-keyed database URL -- only "prod" gets its own dedicated database
   # (UC_PROD_DATABASE_URL); every other stage keeps reading the shared

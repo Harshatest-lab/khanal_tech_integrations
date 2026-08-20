@@ -611,16 +611,20 @@ def ar_invoice_payload(
         "DocumentLines": doc_lines,
         "Comments": f"Unicommerce Order: {uniware_id} | Channel: {channel}",
     }
-    if channel == "AMAZON_FLEX":
-        # Flex is not sourced from a real Unicommerce order, so the
-        # U_Order-UDF/HANA dedup every other channel uses doesn't apply the
-        # same way (it's line-level, keyed on uc_data["code"], and Flex
-        # deliberately leaves "code" unset -- see amazon_flex_items.py /
-        # flex_fetch.py -- to avoid a same-order-multiple-shipment dedup
-        # collision). NumAtCard is the native SAP header field
-        # amazon-us-b2c already dedups on the same way; it's unset on every
-        # other channel's invoices here, so this can't collide with them.
-        payload["NumAtCard"] = uniware_id
+    # Set on every channel going forward (not just AMAZON_FLEX) so
+    # NumAtCard-based cross-checking (sap_client.find_invoice_by_num_at_card,
+    # the same pattern amazon-us-b2c already dedups on) works universally
+    # without needing periodic re-backfills -- the one-time backfill run
+    # 2026-08-20 covered every invoice that existed at that moment (1277/
+    # 1278), but had no ongoing mechanism, so newly-posted invoices from
+    # every other channel kept drifting back to NumAtCard-unset. This does
+    # NOT change any existing channel's actual duplicate-guard LOOKUP
+    # (still U_Order-UDF/HANA -- proven, unchanged); it only ensures the
+    # field itself is populated going forward. AMAZON_FLEX still leaves
+    # uc_data["code"] unset (see amazon_flex_items.py / flex_fetch.py) so
+    # its own NumAtCard-based lookup can't collide across a split order's
+    # multiple shipments.
+    payload["NumAtCard"] = uniware_id
     transport_code = _resolve_transportation_code(uc_data)
     if transport_code is not None:
         payload["TransportationCode"] = int(transport_code)
