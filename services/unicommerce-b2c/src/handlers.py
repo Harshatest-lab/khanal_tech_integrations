@@ -141,10 +141,18 @@ def flex_fetch_handler(event, context):
 
 
 def post_invoices_handler(event, context):
-    """{"limit": 50?, "channel_name": str?, "start_date": "YYYY-MM-DD"?,
+    """{"limit": 300?, "channel_name": str?, "start_date": "YYYY-MM-DD"?,
     "end_date": "YYYY-MM-DD"?} — bulk posting run (promote fetched->ready +
     recovery + verify + ready-order posting, same as the scheduled cron;
     the date range keys off the order_date, matching the Ops Center UX).
+    Default bumped 50->300 on 2026-08-21: promote_fetched_to_ready has no
+    channel filter and orders oldest-fetched-first, so channels with a
+    long-lived stale 'fetched' backlog (orders that never complete
+    upstream in Unicommerce) were starving newer, smaller channels like
+    AMAZON_FLEX out of every cron cycle's batch. 300 covers the current
+    ~200-row cross-channel backlog with headroom; cost scales with actual
+    eligible rows, not this ceiling, and the 900s Lambda timeout has
+    plenty of margin against the 30-min cron cadence.
     {"uniware_id": str} — manual single-order retry, bypassing the limit.
     {"trigger": "manual_retry"} — set by dashboard_handler's async invoke;
     logs to unicommerce_sync_log as "retry_invoices" instead of
@@ -159,7 +167,7 @@ def post_invoices_handler(event, context):
             sync_mode = "retry_invoices" if ev.get("trigger") == "manual_retry" else "post_invoices"
             return post_invoices.post_ready_orders(
                 conn,
-                limit=int(ev.get("limit") or 50),
+                limit=int(ev.get("limit") or 300),
                 channel_name=ev.get("channel_name"),
                 start_date=ev.get("start_date"),
                 end_date=ev.get("end_date"),
