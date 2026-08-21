@@ -24,6 +24,7 @@ import os
 import re
 import sys
 import traceback
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -141,21 +142,21 @@ def flex_fetch_handler(event, context):
 
 
 def flex_refunds_handler(event, context):
-    """{"posted_after": "YYYY-MM-DDTHH:MM:SSZ", "posted_before": str?,
+    """{"posted_after": "YYYY-MM-DDTHH:MM:SSZ"?, "posted_before": str?,
     "dry_run": bool? (default false)} -- pulls Amazon Finances API refund
     events, matches each to its already-posted AMAZON_FLEX invoice, and
     posts a SAP AR Credit Note (WithoutInventoryMovement, same pattern as
-    amazon-us-b2c). posted_after is required -- Finances PostedDate lags
-    the actual refund by up to 1-2 weeks, so callers should pass a window
-    wider than the target period (e.g. last 45 days) rather than rely on
-    a default. dry_run logs what would post without writing to SAP or the
-    local log table -- use it to sanity-check a window before the first
-    real run. v1 does not handle CFG bundle refunds or shipping-only
-    refunds -- see flex_credit_note_payload.py."""
+    amazon-us-b2c). posted_after defaults to a rolling last-45-days window
+    when omitted -- same default amazon-us-b2c's own scheduled refund
+    poster uses, since Finances PostedDate lags the actual refund by up
+    to 1-2 weeks and the duplicate/amendment guards make re-processing
+    the same window free. dry_run logs what would post without writing
+    to SAP or the local log table. v1 does not handle CFG bundle refunds
+    or shipping-only refunds -- see flex_credit_note_payload.py."""
     ev = event or {}
-    posted_after = ev.get("posted_after")
-    if not posted_after:
-        return {"status": "error", "error": "posted_after is required"}
+    posted_after = ev.get("posted_after") or (
+        datetime.now(timezone.utc) - timedelta(days=45)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     def _go():
         with store.connect() as conn:

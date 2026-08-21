@@ -331,12 +331,26 @@ functions:
   flexRefunds:
     handler: src.handlers.flex_refunds_handler
     layers: [{ Ref: SharedLambdaLayer }]
-    # No schedule yet -- v1 build (2026-08-21), invoked manually
-    # ({"posted_after", "posted_before"?, "dry_run"?}) until verified
-    # end-to-end against real SAP TEST refund data, same phased rollout
-    # flexFetch/unicommercePostInvoices went through before their own
-    # schedules were enabled. Does not handle CFG bundle or shipping-only
-    # refunds in v1 -- see flex_credit_note_payload.py.
+    events:
+      # Verified end-to-end against real SAP PROD 2026-08-21 (2 real
+      # refunds posted, DocEntry 12674/12676, correct BaseEntry/qty) --
+      # enabled on the same phased-rollout basis flexFetch/
+      # unicommercePostInvoices went through. Every 6h with a rolling
+      # 45-day window (handler default) -- Finances PostedDate lags the
+      # actual refund by up to 1-2 weeks, and the duplicate/amendment
+      # guards make re-processing the same window free.
+      #
+      # :22 (not a plain rate(6 hours) or a :07/:37-aligned minute):
+      # unicommercePostInvoices runs hourly at :07/:37 and shares the
+      # same SAP SL session lock in SSM -- amazon-us-b2c hit exactly this
+      # collision with its own refund poster (every 6h cycle failing
+      # "exceeded max waits while is_locked" until moved to a clear
+      # slot). :22 sits 15min clear of both :07 and :37 on either side.
+      - schedule:
+          rate: cron(22 */6 * * ? *)
+          enabled: ${self:custom.currentSchedulesEnabled}
+    # Does not handle CFG bundle or shipping-only refunds in v1 -- see
+    # flex_credit_note_payload.py.
 
   unicommercePostInvoices:
     handler: src.handlers.post_invoices_handler
