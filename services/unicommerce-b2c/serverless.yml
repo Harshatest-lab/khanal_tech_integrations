@@ -340,14 +340,19 @@ functions:
       # actual refund by up to 1-2 weeks, and the duplicate/amendment
       # guards make re-processing the same window free.
       #
-      # :22 (not a plain rate(6 hours) or a :07/:37-aligned minute):
-      # unicommercePostInvoices runs hourly at :07/:37 and shares the
-      # same SAP SL session lock in SSM -- amazon-us-b2c hit exactly this
-      # collision with its own refund poster (every 6h cycle failing
-      # "exceeded max waits while is_locked" until moved to a clear
-      # slot). :22 sits 15min clear of both :07 and :37 on either side.
+      # :12, not :22: every hourly cron in this file shares the same SAP
+      # SL session lock in SSM (amazon-us-b2c hit exactly this collision
+      # with its own 6h refund poster once before -- "exceeded max waits
+      # while is_locked"), and :22 turned out to already be occupied by
+      # unicommercePoGrn's own hourly :22/:52 slot -- a real collision
+      # every 6h, caught only after deploying and inspecting the live
+      # EventBridge rules, not before. Full picture of every existing
+      # hourly cron's minute: fetch :02/:32, postInvoices :07/:37,
+      # postCreditNotes :17/:47, poGrn :22/:52, recon :27/:57 -- leaving
+      # exactly two 5-min-clear gaps, at :12 (between :07 and :17) and
+      # :42 (between :37 and :47). :12 sits in the first.
       - schedule:
-          rate: cron(22 */6 * * ? *)
+          rate: cron(12 */6 * * ? *)
           enabled: ${self:custom.currentSchedulesEnabled}
     # Does not handle CFG bundle or shipping-only refunds in v1 -- see
     # flex_credit_note_payload.py.
