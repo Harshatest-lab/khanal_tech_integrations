@@ -836,6 +836,149 @@ def mark_cn_posted(conn: psycopg.Connection, uc_return_id: str, doc_entry: str, 
     conn.commit()
 
 
+def ensure_flex_cn_log_table(conn: psycopg.Connection) -> None:
+    """Idempotent self-provisioning: this repo has no migration runner (every
+    other table here was created by hand against RDS), and dev/prod are
+    separate databases this session has no dev credential for. CREATE TABLE
+    IF NOT EXISTS is cheap and safe to run on every invocation rather than
+    requiring a manual DDL step in two databases before this ships."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS unicommerce_flex_cn_log (
+                refund_id text PRIMARY KEY,
+                amazon_order_id text NOT NULL,
+                posted_date date,
+                status text NOT NULL DEFAULT 'pending',
+                doc_entry text,
+                doc_num text,
+                base_doc_entry text,
+                payload_json jsonb,
+                response_json jsonb,
+                error text,
+                skip_reason text,
+                attempt_count integer NOT NULL DEFAULT 0,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                updated_at timestamptz NOT NULL DEFAULT now()
+            )
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_flex_cn_log_order ON unicommerce_flex_cn_log (amazon_order_id)"
+        )
+    conn.commit()
+
+
+# ── Flex refund credit notes ──────────────────────────────────────────────
+# unicommerce_flex_cn_log: separate staging table from unicommerce_cn_staging
+# (real UC returns, batch-tracked inventory reversal) -- Amazon Finances API
+# refund events aren't UC returns at all (money-only, no physical stock
+# movement), so they get their own log rather than force-fitting the
+# UC-return shape. Ported from amazon-us-b2c's store.get_cn_log/claim_cn/
+# upsert_cn_log, refund_id ("{amazon_order_id}-{PostedDate}") in place of
+# their order-id-only key.
+
+def get_flex_cn_log(conn: psycopg.Connection, refund_id: str) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT refund_id, amazon_order_id, posted_date, status, doc_entry, doc_num, "
+            "base_doc_entry, attempt_count, error, skip_reason "
+            "FROM unicommerce_flex_cn_log WHERE refund_id = %s",
+            (refund_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        cols = [d.name for d in cur.description]
+    return dict(zip(cols, row))
+
+
+def claim_flex_cn(conn: psycopg.Connection, refund_id: str, amazon_order_id: str, posted_date: str) -> bool:
+    """Atomic claim: insert-if-absent, or reclaim a non-'posted' row --
+    same double-submission guard as claim_credit_note. Reclaimable after
+    30min so a worker crash mid-flight doesn't wedge the row forever."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO unicommerce_flex_cn_log (refund_id, amazon_order_id, posted_date, status)
+            VALUES (%s, %s, %s, 'posting')
+            ON CONFLICT (refund_id) DO UPDATE SET
+              status = 'posting', updated_at = now()
+            WHERE unicommerce_flex_cn_log.status NOT IN ('posted', 'posting', 'failed_permanent')
+               OR unicommerce_flex_cn_log.updated_at < now() - interval '30 minutes'
+            """,
+            (refund_id, amazon_order_id, posted_date),
+        )
+        claimed = cur.rowcount == 1
+    conn.commit()
+    return claimed
+
+
+def upsert_flex_cn_log(
+    conn: psycopg.Connection,
+    refund_id: str,
+    amazon_order_id: str,
+    posted_date: str,
+    status: str,
+    doc_entry: str | None = None,
+    doc_num: str | None = None,
+    base_doc_entry: str | None = None,
+    payload: dict | None = None,
+    response: dict | None = None,
+    error: str | None = None,
+    skip_reason: str | None = None,
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO unicommerce_flex_cn_log
+              (refund_id, amazon_order_id, posted_date, status, doc_entry, doc_num,
+               base_doc_entry, payload_json, response_json, error, skip_reason, attempt_count)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0)
+            ON CONFLICT (refund_id) DO UPDATE SET
+              status = EXCLUDED.status,
+              doc_entry = COALESCE(EXCLUDED.doc_entry, unicommerce_flex_cn_log.doc_entry),
+              doc_num = COALESCE(EXCLUDED.doc_num, unicommerce_flex_cn_log.doc_num),
+              base_doc_entry = COALESCE(EXCLUDED.base_doc_entry, unicommerce_flex_cn_log.base_doc_entry),
+              payload_json = COALESCE(EXCLUDED.payload_json, unicommerce_flex_cn_log.payload_json),
+              response_json = COALESCE(EXCLUDED.response_json, unicommerce_flex_cn_log.response_json),
+              error = EXCLUDED.error,
+              skip_reason = EXCLUDED.skip_reason,
+              attempt_count = CASE WHEN EXCLUDED.status IN ('failed', 'failed_permanent')
+                                    THEN unicommerce_flex_cn_log.attempt_count + 1
+                                    ELSE unicommerce_flex_cn_log.attempt_count END,
+              updated_at = now()
+            """,
+            (
+                refund_id, amazon_order_id, posted_date, status, doc_entry, doc_num, base_doc_entry,
+                json.dumps(payload, default=str) if payload is not None else None,
+                json.dumps(response, default=str) if response is not None else None,
+                (error or "")[:2000] or None, (skip_reason or "")[:500] or None,
+            ),
+        )
+    conn.commit()
+
+
+def get_posted_flex_orders_by_amazon_order_id(conn: psycopg.Connection, amazon_order_id: str) -> list[dict]:
+    """All posted AMAZON_FLEX invoices for one Amazon order -- usually one
+    row, but an order can split across a PRCJ shipment and a real-FBA
+    shipment, or (rarely) two PRCJ shipments, each staged as its own
+    uniware_id ("FLEX-{order_id}-{shipment_id}", see flex_fetch.py). A
+    refund event only carries amazon_order_id, not shipment_id, so the
+    caller must disambiguate by which shipment's invoice actually
+    contains the refunded SKU."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT uniware_id, order_json, payload_json, sap_ar_invoice_docentry "
+            "FROM unicommerce_orders "
+            "WHERE channel_name = 'AMAZON_FLEX' AND pipeline_status = 'posted' "
+            "AND uniware_id LIKE %s",
+            (f"FLEX-{amazon_order_id}-%",),
+        )
+        cols = [d.name for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
 def mark_cn_failed(conn: psycopg.Connection, uc_return_id: str, error: str, max_retry_attempts: int) -> str:
     """Returns the resulting status ('failed' or 'dead'). Credit notes get
     a higher retry floor than the shared setting (8, same as the Frappe

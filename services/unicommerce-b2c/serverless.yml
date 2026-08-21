@@ -328,6 +328,16 @@ functions:
           rate: cron(15 4 * * ? *)
           enabled: ${self:custom.flexFetchScheduleEnabled}
 
+  flexRefunds:
+    handler: src.handlers.flex_refunds_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+    # No schedule yet -- v1 build (2026-08-21), invoked manually
+    # ({"posted_after", "posted_before"?, "dry_run"?}) until verified
+    # end-to-end against real SAP TEST refund data, same phased rollout
+    # flexFetch/unicommercePostInvoices went through before their own
+    # schedules were enabled. Does not handle CFG bundle or shipping-only
+    # refunds in v1 -- see flex_credit_note_payload.py.
+
   unicommercePostInvoices:
     handler: src.handlers.post_invoices_handler
     layers: [{ Ref: SharedLambdaLayer }]

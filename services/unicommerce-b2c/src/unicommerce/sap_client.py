@@ -314,6 +314,66 @@ def get_credit_note_by_doc_entry(doc_entry: int) -> dict:
     return body
 
 
+_BASE_DOCUMENT_CLOSED_MARKER = "already been closed"
+
+
+def is_base_document_closed(exc: Exception) -> bool:
+    """True if `exc` is a SapPostError caused by SAP -5002 base-document-line
+    closure -- i.e. the invoice line already has its one allowed linked
+    reversal, permanently unrecoverable, not worth retrying. Ported from
+    amazon-us-b2c's sap_client.is_base_document_closed, same SAP install."""
+    return isinstance(exc, SapPostError) and _BASE_DOCUMENT_CLOSED_MARKER in str(exc)
+
+
+def find_credit_note_by_num_at_card(num_at_card: str) -> dict | None:
+    """AMAZON_FLEX credit-note duplicate guard: NumAtCard is a native SAP
+    header field on CreditNotes too, same as find_invoice_by_num_at_card
+    on Invoices. Only Flex CNs set NumAtCard (refund_id) -- other
+    channels' CNs use U_UCReturnID, this lookup would just never match
+    for them."""
+    key = str(num_at_card or "").strip()
+    if not key:
+        return None
+    escaped = key.replace("'", "''")
+    path = quote(
+        f"CreditNotes?$filter=NumAtCard eq '{escaped}' and CancelStatus eq 'csNo'"
+        "&$select=DocEntry,DocNum&$top=1",
+        safe="/?$&=',",
+    )
+    try:
+        status, body = _request("GET", path)
+    except Exception as e:
+        raise SapLookupError(f"Flex CN NumAtCard duplicate check failed for {key}: {e}") from e
+    if status != 200 or not isinstance(body, dict):
+        raise SapLookupError(f"Flex CN NumAtCard duplicate check failed for {key}: HTTP {status}: {str(body)[:500]}")
+    rows = body.get("value", [])
+    return _row_to_result(rows[0]) if rows else None
+
+
+def find_credit_notes_by_num_at_card_prefix(prefix: str) -> list[dict]:
+    """All live (CancelStatus csNo) Flex CNs whose NumAtCard starts with
+    `prefix` -- the base refund_id plus any -AMEND{n} top-ups already
+    posted for it. Used by the amendment path to sum what's already been
+    reversed before computing a top-up. Returns full documents
+    (DocumentLines included), not the trimmed _row_to_result shape."""
+    key = str(prefix or "").strip()
+    if not key:
+        return []
+    escaped = key.replace("'", "''")
+    path = quote(
+        f"CreditNotes?$filter=startswith(NumAtCard,'{escaped}') and CancelStatus eq 'csNo'"
+        "&$select=DocEntry,DocNum,NumAtCard,DocumentLines",
+        safe="/?$&=',()",
+    )
+    try:
+        status, body = _request("GET", path)
+    except Exception as e:
+        raise SapLookupError(f"Flex CN prefix check failed for {key}: {e}") from e
+    if status != 200 or not isinstance(body, dict):
+        raise SapLookupError(f"Flex CN prefix check failed for {key}: HTTP {status}: {str(body)[:500]}")
+    return body.get("value", []) or []
+
+
 def find_credit_note_by_return_id(uc_return_id: str, base_doc_entry: int | str | None = None) -> dict | None:
     """Duplicate guard: SAP Credit Note already posted for this return.
     Primary check is hana_access.find_credit_note_by_base_invoice, keyed

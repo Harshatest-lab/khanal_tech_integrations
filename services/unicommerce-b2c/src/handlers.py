@@ -32,7 +32,7 @@ _SRC = Path(__file__).resolve().parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unicommerce import credit_notes, dashboard_queries, fetch_sync, flex_fetch, infra_status, numatcard_backfill, pogrn, post_invoices, recon, store
+from unicommerce import credit_notes, dashboard_queries, fetch_sync, flex_fetch, flex_refunds, infra_status, numatcard_backfill, pogrn, post_invoices, recon, store
 from unicommerce.alerts import send_alert
 
 # boto3 isn't a declared dev/CI dependency (only present in the real Lambda
@@ -138,6 +138,32 @@ def flex_fetch_handler(event, context):
         return flex_fetch.fetch_flex_shipments(lookback_days=lookback_days)
 
     return _run("flex_fetch", _go)
+
+
+def flex_refunds_handler(event, context):
+    """{"posted_after": "YYYY-MM-DDTHH:MM:SSZ", "posted_before": str?,
+    "dry_run": bool? (default false)} -- pulls Amazon Finances API refund
+    events, matches each to its already-posted AMAZON_FLEX invoice, and
+    posts a SAP AR Credit Note (WithoutInventoryMovement, same pattern as
+    amazon-us-b2c). posted_after is required -- Finances PostedDate lags
+    the actual refund by up to 1-2 weeks, so callers should pass a window
+    wider than the target period (e.g. last 45 days) rather than rely on
+    a default. dry_run logs what would post without writing to SAP or the
+    local log table -- use it to sanity-check a window before the first
+    real run. v1 does not handle CFG bundle refunds or shipping-only
+    refunds -- see flex_credit_note_payload.py."""
+    ev = event or {}
+    posted_after = ev.get("posted_after")
+    if not posted_after:
+        return {"status": "error", "error": "posted_after is required"}
+
+    def _go():
+        with store.connect() as conn:
+            return flex_refunds.post_flex_refunds(
+                conn, posted_after=posted_after, posted_before=ev.get("posted_before"), dry_run=bool(ev.get("dry_run") or False),
+            )
+
+    return _run("flex_refunds", _go)
 
 
 def post_invoices_handler(event, context):
