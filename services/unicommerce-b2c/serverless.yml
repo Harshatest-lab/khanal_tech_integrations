@@ -311,6 +311,13 @@ functions:
     # numatcard_backfill.py's module docstring. Delete once the ~1243
     # historical invoices are fully backfilled; not a recurring job.
 
+  debugBatchInventory:
+    handler: src.handlers.debug_batch_inventory_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+    # No schedule -- read-only ops tool, invoke manually
+    # ({"warehouse_code", "item_codes"}) to check real HANA batch
+    # inventory when a batch_hold shortage looks wrong.
+
   flexFetch:
     handler: src.handlers.flex_fetch_handler
     layers: [{ Ref: SharedLambdaLayer }]

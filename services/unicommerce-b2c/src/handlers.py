@@ -125,6 +125,28 @@ def numatcard_backfill_handler(event, context):
     return _run("numatcard_backfill", _go)
 
 
+def debug_batch_inventory_handler(event, context):
+    """{"warehouse_code": str, "item_codes": [str, ...]} -- read-only HANA
+    batch-inventory lookup (unicommerce.hana_access.
+    bulk_batch_inventory_by_warehouse), same query post_invoices.py's own
+    FEFO allocation uses. Not scheduled, ops tooling only -- invoke
+    manually to check what SAP actually has on hand for an item/warehouse
+    when a batch_hold/shortage looks wrong (e.g. real stock exists but a
+    posting attempt reported none)."""
+    from unicommerce import hana_access
+
+    ev = event or {}
+    warehouse_code = ev.get("warehouse_code")
+    item_codes = ev.get("item_codes") or []
+    if not warehouse_code or not item_codes:
+        return {"status": "error", "error": "warehouse_code and item_codes are required"}
+
+    def _go():
+        return {"rows": hana_access.bulk_batch_inventory_by_warehouse(warehouse_code, item_codes)}
+
+    return _run("debug_batch_inventory", _go)
+
+
 def flex_fetch_handler(event, context):
     """{"lookback_days": int? (default 2)} -- pulls the Amazon SP-API
     fulfilled-shipments report, filters to PRCJ, stages synthetic orders
