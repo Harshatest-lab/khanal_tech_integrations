@@ -836,40 +836,13 @@ def mark_cn_posted(conn: psycopg.Connection, uc_return_id: str, doc_entry: str, 
     conn.commit()
 
 
-def ensure_flex_cn_log_table(conn: psycopg.Connection) -> None:
-    """Idempotent self-provisioning: this repo has no migration runner (every
-    other table here was created by hand against RDS), and dev/prod are
-    separate databases this session has no dev credential for. CREATE TABLE
-    IF NOT EXISTS is cheap and safe to run on every invocation rather than
-    requiring a manual DDL step in two databases before this ships."""
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS unicommerce_flex_cn_log (
-                refund_id text PRIMARY KEY,
-                amazon_order_id text NOT NULL,
-                posted_date date,
-                status text NOT NULL DEFAULT 'pending',
-                doc_entry text,
-                doc_num text,
-                base_doc_entry text,
-                payload_json jsonb,
-                response_json jsonb,
-                error text,
-                skip_reason text,
-                attempt_count integer NOT NULL DEFAULT 0,
-                created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now()
-            )
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS idx_flex_cn_log_order ON unicommerce_flex_cn_log (amazon_order_id)"
-        )
-    conn.commit()
-
-
 # ── Flex refund credit notes ──────────────────────────────────────────────
+# unicommerce_flex_cn_log must exist before flex_refunds.post_flex_refunds
+# runs -- this app's DB role is deliberately least-privilege (RDS
+# hardening, 2026-08-18) with no CREATE TABLE grant, so schema changes
+# here are a one-off manual DDL step against each database (dev + prod),
+# same as every other table in this service. See
+# scripts/create_flex_cn_log_table.sql for the exact DDL.
 # unicommerce_flex_cn_log: separate staging table from unicommerce_cn_staging
 # (real UC returns, batch-tracked inventory reversal) -- Amazon Finances API
 # refund events aren't UC returns at all (money-only, no physical stock

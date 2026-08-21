@@ -66,8 +66,11 @@ def _pick_parent(candidates: list[dict], event: finances_api.RefundEvent) -> dic
 
 
 def post_flex_refunds(conn, posted_after: str, posted_before: str | None = None, dry_run: bool = False) -> dict:
-    """posted_after/posted_before: UTC ISO 8601."""
-    store.ensure_flex_cn_log_table(conn)
+    """posted_after/posted_before: UTC ISO 8601. Requires
+    unicommerce_flex_cn_log to already exist -- this app's DB role has no
+    CREATE TABLE grant (least-privilege, RDS hardening 2026-08-18), so the
+    table is a one-off manual DDL step, not self-provisioned at runtime.
+    See scripts/create_flex_cn_log_table.sql."""
     settings = get_settings(force_reload=True)
     if not settings.credit_note_series:
         result = {"total": 0, "posted": 0, "skipped": 0, "failed": 0, "abort_reason": "credit_note_series is not configured"}
