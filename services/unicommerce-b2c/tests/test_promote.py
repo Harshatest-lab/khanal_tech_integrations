@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -53,7 +54,7 @@ def test_promotes_only_complete_orders_with_eligible_items(monkeypatch):
 
     result = fetch_sync.promote_fetched_to_ready(conn=None)
 
-    assert result == {"moved_to_ready": 1, "deferred": 2}
+    assert result == {"moved_to_ready": 1, "deferred": 2, "refetched": 0}
     assert fake.marked_ready == ["A"]
     deferred_ids = [d[0] for d in fake.deferred]
     assert deferred_ids == ["B", "C"]
@@ -70,7 +71,7 @@ def test_handles_dict_order_json_not_just_str(monkeypatch):
 
     result = fetch_sync.promote_fetched_to_ready(conn=None)
 
-    assert result == {"moved_to_ready": 1, "deferred": 0}
+    assert result == {"moved_to_ready": 1, "deferred": 0, "refetched": 0}
 
 
 def test_mark_ready_returning_false_is_not_counted(monkeypatch):
@@ -83,10 +84,85 @@ def test_mark_ready_returning_false_is_not_counted(monkeypatch):
 
     result = fetch_sync.promote_fetched_to_ready(conn=None)
 
-    assert result == {"moved_to_ready": 0, "deferred": 0}
+    assert result == {"moved_to_ready": 0, "deferred": 0, "refetched": 0}
 
 
 def test_empty_fetched_queue(monkeypatch):
     fake = _FakeStore([])
     monkeypatch.setattr(fetch_sync, "store", fake)
-    assert fetch_sync.promote_fetched_to_ready(conn=None) == {"moved_to_ready": 0, "deferred": 0}
+    assert fetch_sync.promote_fetched_to_ready(conn=None) == {"moved_to_ready": 0, "deferred": 0, "refetched": 0}
+
+
+class _FakeUcClient:
+    """Records that a live re-fetch was attempted and returns a
+    now-COMPLETE order, standing in for uc_client.UcClient."""
+
+    def __init__(self, creds):
+        pass
+
+    def login(self):
+        pass
+
+    def get_order_detail(self, uniware_id):
+        return {"status": "COMPLETE", "saleOrderItems": [_ITEM_OK]}
+
+
+def test_stale_fetched_row_triggers_live_refetch_and_upsert(monkeypatch):
+    # Root cause found live 2026-08-22: an order stuck 'fetched' with a
+    # cached non-COMPLETE status never got re-checked, even a full day
+    # after it actually completed upstream in UC -- defer_fetched only
+    # ever re-reads the same stale order_json. Past the staleness cutoff,
+    # promote must do one live re-fetch before deciding.
+    old_ts = datetime.now(timezone.utc) - timedelta(minutes=120)
+    fetched = [{"uniware_id": "A", "order_json": _order("PROCESSING", [_ITEM_OK]), "updated_at": old_ts}]
+    fake = _FakeStore(fetched)
+    fake.upserted: list[tuple] = []
+    fake.upsert_order = lambda conn, uniware_id, order: fake.upserted.append((uniware_id, order))
+    monkeypatch.setattr(fetch_sync, "store", fake)
+    monkeypatch.setattr(fetch_sync, "UcClient", _FakeUcClient)
+    monkeypatch.setattr(fetch_sync, "get_uc_credentials", lambda: None)
+
+    result = fetch_sync.promote_fetched_to_ready(conn=None)
+
+    assert result == {"moved_to_ready": 1, "deferred": 0, "refetched": 1}
+    assert fake.marked_ready == ["A"]
+    assert fake.upserted[0][0] == "A"
+    assert fake.upserted[0][1]["status"] == "COMPLETE"
+
+
+def test_fresh_fetched_row_is_not_refetched(monkeypatch):
+    # A row still well within the staleness window must not trigger a
+    # live API call -- it's plausibly still genuinely in-flight upstream.
+    recent_ts = datetime.now(timezone.utc) - timedelta(minutes=5)
+    fetched = [{"uniware_id": "B", "order_json": _order("PROCESSING", [_ITEM_OK]), "updated_at": recent_ts}]
+    fake = _FakeStore(fetched)
+
+    def _must_not_construct(*a, **k):
+        raise AssertionError("UcClient must not be constructed for a fresh row")
+
+    monkeypatch.setattr(fetch_sync, "store", fake)
+    monkeypatch.setattr(fetch_sync, "UcClient", _must_not_construct)
+    monkeypatch.setattr(fetch_sync, "get_uc_credentials", lambda: None)
+
+    result = fetch_sync.promote_fetched_to_ready(conn=None)
+
+    assert result == {"moved_to_ready": 0, "deferred": 1, "refetched": 0}
+
+
+def test_stale_row_refetch_failure_falls_back_to_defer(monkeypatch):
+    old_ts = datetime.now(timezone.utc) - timedelta(minutes=120)
+    fetched = [{"uniware_id": "A", "order_json": _order("PROCESSING", [_ITEM_OK]), "updated_at": old_ts}]
+    fake = _FakeStore(fetched)
+
+    class _BoomUcClient(_FakeUcClient):
+        def get_order_detail(self, uniware_id):
+            raise RuntimeError("UC API down")
+
+    monkeypatch.setattr(fetch_sync, "store", fake)
+    monkeypatch.setattr(fetch_sync, "UcClient", _BoomUcClient)
+    monkeypatch.setattr(fetch_sync, "get_uc_credentials", lambda: None)
+
+    result = fetch_sync.promote_fetched_to_ready(conn=None)
+
+    assert result == {"moved_to_ready": 0, "deferred": 1, "refetched": 0}
+    assert fake.deferred[0][0] == "A"

@@ -8,9 +8,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+import pytest  # noqa: E402
+
 from unicommerce.dates import epoch_millis_to_ist_date, extract_order_date  # noqa: E402
 from unicommerce.mappers import (  # noqa: E402
     build_line_items,
+    compute_uc_financials,
     eligible_line_items,
     extract_uc_order_id,
     order_ready_for_invoice,
@@ -117,3 +120,56 @@ def test_build_line_items_maps_batch_and_return_status():
 
     l2 = next(l for l in lines if l["code"] == "L2")
     assert l2["uniware_return_status"] == ""
+
+
+class _FakeSettings:
+    def __init__(self, zero_discount_floor_channels):
+        self.zero_discount_floor_channels = zero_discount_floor_channels
+
+
+def _bogo_order(channel="DOGSEE_SITE_IN"):
+    return {
+        "channel": channel,
+        "saleOrderItems": [
+            {"sellingPriceWithoutTaxesAndDiscount": 249.0, "discount": 0.0, "quantity": 1},
+            {"sellingPriceWithoutTaxesAndDiscount": 199.0, "discount": 199.0, "quantity": 1},
+        ],
+    }
+
+
+def test_compute_uc_financials_floors_when_order_has_a_paid_line(monkeypatch):
+    # Mirrors sap_payload._append_sales_line's floor guard so the recon
+    # "expected" figure matches what actually gets posted, instead of
+    # false-flagging a mismatch on the free line of a real BOGO order.
+    import unicommerce.mappers as mappers_mod
+
+    monkeypatch.setattr(mappers_mod, "get_settings", lambda: _FakeSettings({"DOGSEE_SITE_IN": True}))
+    result = compute_uc_financials(_bogo_order())
+    # 249 (paid, unaffected) + 199 (kept gross instead of floored to 0)
+    assert result["uc_taxable_value"] == pytest.approx(448.0)
+
+
+def test_compute_uc_financials_stays_clamped_when_every_line_is_free(monkeypatch):
+    # Same replacement-order safeguard as sap_payload: no paid line
+    # anywhere in the order means this must NOT be floored, even on an
+    # opted-in channel.
+    import unicommerce.mappers as mappers_mod
+
+    monkeypatch.setattr(mappers_mod, "get_settings", lambda: _FakeSettings({"DOGSEE_SITE_IN": True}))
+    order = {
+        "channel": "DOGSEE_SITE_IN",
+        "saleOrderItems": [
+            {"sellingPriceWithoutTaxesAndDiscount": 349.0, "discount": 349.0, "quantity": 1},
+        ],
+    }
+    result = compute_uc_financials(order)
+    assert result["uc_taxable_value"] == pytest.approx(0.0)
+
+
+def test_compute_uc_financials_unaffected_when_channel_not_opted_in(monkeypatch):
+    import unicommerce.mappers as mappers_mod
+
+    monkeypatch.setattr(mappers_mod, "get_settings", lambda: _FakeSettings({"DOGSEE_SITE_IN": True}))
+    result = compute_uc_financials(_bogo_order(channel="FLIPKART"))
+    # Free line clamps to 0 same as today -- only the paid line counts.
+    assert result["uc_taxable_value"] == pytest.approx(249.0)

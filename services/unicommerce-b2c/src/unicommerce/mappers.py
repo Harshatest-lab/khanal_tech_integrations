@@ -10,6 +10,8 @@ from __future__ import annotations
 from typing import Any
 
 from unicommerce.dates import extract_order_date, format_cursor, parse_source_datetime
+from unicommerce.geo import resolve_mapped_value
+from unicommerce.settings import get_settings
 
 _DATA_MAX = 140
 
@@ -149,9 +151,36 @@ def extract_return_fields(order: dict) -> dict:
     }
 
 
+def _uc_item_net_price(item: dict) -> float:
+    """Unit price after discount for one raw saleOrderItems row -- same
+    math compute_uc_financials' loop uses, pulled out so it can also be
+    used to check the whole order up front (see order_has_paid_line)."""
+    try:
+        qty = float(item.get("quantity") or item.get("totalQuantity") or 1)
+    except Exception:
+        qty = 1.0
+    try:
+        selling_wo_tax = float(item.get("sellingPriceWithoutTaxesAndDiscount") or 0)
+    except Exception:
+        selling_wo_tax = 0.0
+    try:
+        discount = float(item.get("discount") or 0)
+    except Exception:
+        discount = 0.0
+    per_unit_disc = (discount / qty) if qty > 0 else 0.0
+    return selling_wo_tax - per_unit_disc
+
+
 def compute_uc_financials(order: dict) -> dict:
     """Raw UC financial totals from saleOrderItems at fetch time -- gives
     reconciliation a 3-way triangle: UC source -> expected -> SAP actual."""
+    channel = extract_channel(order)
+    zero_discount_floor_channels = get_settings().zero_discount_floor_channels
+    floor_guard = bool(resolve_mapped_value(zero_discount_floor_channels, channel, False))
+    # See sap_payload._append_sales_line's order_has_paid_line for why this
+    # matters: an order where every line nets to <= 0 looks like a
+    # goodwill/warranty replacement, not a promo, and must not be floored.
+    order_has_paid_line = any(_uc_item_net_price(item) > 0 for item in order.get("saleOrderItems") or [])
     taxable = cgst = sgst = igst = shipping = 0.0
     for item in order.get("saleOrderItems") or []:
         try:
@@ -167,7 +196,17 @@ def compute_uc_financials(order: dict) -> dict:
         except Exception:
             discount = 0.0
         per_unit_disc = (discount / qty) if qty > 0 else 0.0
-        unit_price = max(0.0, selling_wo_tax - per_unit_disc)
+        net_price = selling_wo_tax - per_unit_disc
+        if net_price > 0:
+            unit_price = net_price
+        elif floor_guard and order_has_paid_line:
+            # Mirrors sap_payload._append_sales_line's floor guard so this
+            # reconciliation "expected" figure matches what actually gets
+            # posted, instead of flagging a false mismatch on BOGO/100%-off
+            # lines.
+            unit_price = selling_wo_tax
+        else:
+            unit_price = max(0.0, net_price)
         line_taxable = unit_price * qty
         taxable += line_taxable
 

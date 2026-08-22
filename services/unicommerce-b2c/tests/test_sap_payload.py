@@ -134,6 +134,103 @@ def test_ar_invoice_payload_ignores_ucs_batch_number_uses_fefo_instead():
     assert line["BatchNumbers"] == [{"BatchNumber": "CURRENTLY-AVAILABLE", "Quantity": 5.0, "ItemCode": "SKU-A"}]
 
 
+def test_zero_discount_floor_keeps_gross_price_when_order_has_a_paid_line():
+    # The BOGO case this whole feature exists for: one paid line, one
+    # line whose discount equals its full price. On a channel opted into
+    # zero_discount_floor_channels, the free line must keep its gross
+    # UnitPrice instead of clamping to 0.0 -- SAP rejects a 0.0 UnitPrice
+    # outright ("Unit Price cannot be less than Item Cost").
+    settings = UnicommerceSettings(
+        channel_customer_map={"default": "C-DEFAULT"}, ar_invoice_series=10, tax_code_map={"0_intra": "GST0"},
+        zero_discount_floor_channels={"DOGSEE_SITE_IN": True},
+    )
+    uc_data = {
+        "code": "SO-1",
+        "items": [
+            {"itemSku": "SKU-PAID", "quantity": 1, "unitPrice": 249.0, "discount": 0, "taxPercent": 0, "warehouseCode": "EC-FG"},
+            {"itemSku": "SKU-FREE", "quantity": 1, "unitPrice": 199.0, "discount": 199.0, "taxPercent": 0, "warehouseCode": "EC-FG"},
+        ],
+    }
+    payload, _tax = ar_invoice_payload(
+        uniware_id="SO-1", channel="DOGSEE_SITE_IN", order_json="{}", uc_data=uc_data, order_date="2026-08-20",
+        settings=settings,
+    )
+    prices = {line["ItemCode"]: line["UnitPrice"] for line in payload["DocumentLines"]}
+    assert prices["SKU-PAID"] == 249.0
+    assert prices["SKU-FREE"] == 199.0  # kept gross, not clamped to 0
+
+
+def test_zero_discount_floor_off_for_channels_not_opted_in():
+    # Same exact BOGO shape, but the channel isn't in
+    # zero_discount_floor_channels -- must fall back to today's existing
+    # clamp-to-0 behavior, unchanged.
+    settings = UnicommerceSettings(
+        channel_customer_map={"default": "C-DEFAULT"}, ar_invoice_series=10, tax_code_map={"0_intra": "GST0"},
+        zero_discount_floor_channels={"DOGSEE_SITE_IN": True},
+    )
+    uc_data = {
+        "code": "SO-1",
+        "items": [
+            {"itemSku": "SKU-PAID", "quantity": 1, "unitPrice": 249.0, "discount": 0, "taxPercent": 0, "warehouseCode": "EC-FG"},
+            {"itemSku": "SKU-FREE", "quantity": 1, "unitPrice": 199.0, "discount": 199.0, "taxPercent": 0, "warehouseCode": "EC-FG"},
+        ],
+    }
+    payload, _tax = ar_invoice_payload(
+        uniware_id="SO-1", channel="FLIPKART", order_json="{}", uc_data=uc_data, order_date="2026-08-20",
+        settings=settings,
+    )
+    prices = {line["ItemCode"]: line["UnitPrice"] for line in payload["DocumentLines"]}
+    assert prices["SKU-FREE"] == 0.0
+
+
+def test_zero_discount_floor_stays_off_when_every_line_is_free():
+    # The replacement-order concern raised live: an order where EVERY
+    # line nets to <= 0 has no paid line to prove it's a genuine promo --
+    # this must NOT be floored, even on an opted-in channel, because
+    # there's no field that distinguishes a goodwill/warranty replacement
+    # from a promo (confirmed live: replacementSaleOrderCode and
+    # voucherCode are both null even on confirmed real BOGO orders).
+    # Falling through to the old clamp-to-0 leaves this order stuck
+    # failing at SAP -- visible and safe, rather than silently booking a
+    # free replacement as if it were paid-for.
+    settings = UnicommerceSettings(
+        channel_customer_map={"default": "C-DEFAULT"}, ar_invoice_series=10, tax_code_map={"0_intra": "GST0"},
+        zero_discount_floor_channels={"DOGSEE_SITE_IN": True},
+    )
+    uc_data = {
+        "code": "SO-1",
+        "items": [
+            {"itemSku": "SKU-REPLACEMENT", "quantity": 1, "unitPrice": 349.0, "discount": 349.0, "taxPercent": 0, "warehouseCode": "EC-FG"},
+        ],
+    }
+    payload, _tax = ar_invoice_payload(
+        uniware_id="SO-1", channel="DOGSEE_SITE_IN", order_json="{}", uc_data=uc_data, order_date="2026-08-20",
+        settings=settings,
+    )
+    assert payload["DocumentLines"][0]["UnitPrice"] == 0.0
+
+
+def test_zero_discount_floor_does_not_affect_normal_partial_discounts():
+    # Sanity check: an everyday partial discount (net price still
+    # positive) must be completely unaffected by this feature, on any
+    # channel, opted in or not.
+    settings = UnicommerceSettings(
+        channel_customer_map={"default": "C-DEFAULT"}, ar_invoice_series=10, tax_code_map={"0_intra": "GST0"},
+        zero_discount_floor_channels={"DOGSEE_SITE_IN": True},
+    )
+    uc_data = {
+        "code": "SO-1",
+        "items": [
+            {"itemSku": "SKU-A", "quantity": 1, "unitPrice": 183.82, "discount": 99.5, "taxPercent": 0, "warehouseCode": "EC-FG"},
+        ],
+    }
+    payload, _tax = ar_invoice_payload(
+        uniware_id="SO-1", channel="DOGSEE_SITE_IN", order_json="{}", uc_data=uc_data, order_date="2026-08-20",
+        settings=settings,
+    )
+    assert payload["DocumentLines"][0]["UnitPrice"] == pytest.approx(84.32)
+
+
 def test_resolve_sap_warehouse_fba_channel_always_wins():
     settings = UnicommerceSettings(warehouse_map={"some-uc-code": "OTHER-WH"})
     assert _resolve_sap_warehouse(settings, "amazon_fba_in_bom5", "some-uc-code") == "AMZ-BOM5"

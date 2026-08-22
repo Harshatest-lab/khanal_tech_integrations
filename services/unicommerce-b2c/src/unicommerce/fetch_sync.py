@@ -27,6 +27,14 @@ from unicommerce.uc_client import UcClient
 logger = logging.getLogger(__name__)
 
 ORDER_CURSOR_OVERLAP_MINUTES = 20
+# promote_fetched_to_ready only re-polls Uniware for a stuck 'fetched' row
+# once it's been sitting past this age -- fetch_orders()'s cursor never
+# revisits an order once its create-date window has passed, so without
+# this a row cached mid-status (e.g. PROCESSING) stays stale forever even
+# after it completes upstream in UC. Gated by age (not "every run") to
+# avoid hammering the UC API every 30 min for orders still genuinely
+# in-flight.
+STALE_FETCHED_RECHECK_MINUTES = 60
 RETURN_CURSOR_OVERLAP_MINUTES = 45
 _WATERMARK_ORDERS = "orders"
 _WATERMARK_RETURNS = "returns"
@@ -197,20 +205,42 @@ def promote_fetched_to_ready(
     order_ready_for_invoice). Orders that aren't ready yet stay 'fetched'
     with a reason recorded, so a later cycle re-checks them once they
     complete upstream in UC.
+
+    That "later cycle re-checks" claim only holds if something actually
+    re-fetches from Uniware -- otherwise this just re-evaluates the same
+    cached order_json forever. For a row stuck past
+    STALE_FETCHED_RECHECK_MINUTES, do one live re-fetch before deciding.
     """
     rows = store.get_fetched_orders(conn, limit=limit, start_date=start_date, end_date=end_date)
-    moved = deferred = 0
+    moved = deferred = refetched = 0
+    uc: UcClient | None = None
+    stale_cutoff = datetime.now(timezone.utc) - timedelta(minutes=STALE_FETCHED_RECHECK_MINUTES)
     for row in rows:
         raw = row["order_json"]
         order = raw if isinstance(raw, dict) else (json.loads(raw) if raw else {})
         is_ready, reason = order_ready_for_invoice(order)
+        row_updated_at = row.get("updated_at")
+        if not is_ready and row_updated_at and row_updated_at < stale_cutoff:
+            if uc is None:
+                uc = UcClient(get_uc_credentials())
+                uc.login()
+            try:
+                fresh = uc.get_order_detail(row["uniware_id"])
+            except Exception as exc:
+                fresh = None
+                logger.warning("promote_fetched_to_ready: re-fetch failed for %s: %s", row["uniware_id"], exc)
+            if fresh:
+                store.upsert_order(conn, row["uniware_id"], fresh)
+                refetched += 1
+                order = fresh
+                is_ready, reason = order_ready_for_invoice(order)
         if not is_ready:
             store.defer_fetched(conn, row["uniware_id"], reason)
             deferred += 1
             continue
         if store.mark_ready(conn, row["uniware_id"]):
             moved += 1
-    return {"moved_to_ready": moved, "deferred": deferred}
+    return {"moved_to_ready": moved, "deferred": deferred, "refetched": refetched}
 
 
 def fetch_returns(

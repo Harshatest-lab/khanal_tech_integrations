@@ -291,7 +291,7 @@ def get_fetched_orders(
         where.append("order_date <= %s")
         params.append(end_date)
     sql = f"""
-        SELECT uniware_id, order_json
+        SELECT uniware_id, order_json, updated_at
         FROM unicommerce_orders
         WHERE {' AND '.join(where)}
         ORDER BY order_date ASC, created_at ASC

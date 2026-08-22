@@ -188,31 +188,38 @@ def refresh_recon(conn, limit: int = DEFAULT_LIMIT, start_date: str | None = Non
     if not start_date or not end_date:
         start_date, end_date = current_and_previous_month_window()
 
-    invoice_ids = store.get_recon_invoice_candidates(conn, start_date, end_date, limit)
-    inv_refreshed = inv_failed = 0
-    for uniware_id in invoice_ids:
-        try:
-            _recon_invoice(conn, uniware_id, settings)
-            inv_refreshed += 1
-        except Exception as e:
-            inv_failed += 1
-            logger.warning("recon: invoice refresh failed for %s: %s", uniware_id, e, exc_info=True)
+    run_id = store.start_sync_log(conn, "recon", start_date, end_date)
+    try:
+        invoice_ids = store.get_recon_invoice_candidates(conn, start_date, end_date, limit)
+        inv_refreshed = inv_failed = 0
+        for uniware_id in invoice_ids:
+            try:
+                _recon_invoice(conn, uniware_id, settings)
+                inv_refreshed += 1
+            except Exception as e:
+                inv_failed += 1
+                logger.warning("recon: invoice refresh failed for %s: %s", uniware_id, e, exc_info=True)
 
-    cn_ids = store.get_recon_cn_candidates(conn, start_date, end_date, limit)
-    cn_refreshed = cn_failed = 0
-    for uniware_id in cn_ids:
-        try:
-            _recon_cn(conn, uniware_id)
-            cn_refreshed += 1
-        except Exception as e:
-            cn_failed += 1
-            logger.warning("recon: CN refresh failed for %s: %s", uniware_id, e, exc_info=True)
+        cn_ids = store.get_recon_cn_candidates(conn, start_date, end_date, limit)
+        cn_refreshed = cn_failed = 0
+        for uniware_id in cn_ids:
+            try:
+                _recon_cn(conn, uniware_id)
+                cn_refreshed += 1
+            except Exception as e:
+                cn_failed += 1
+                logger.warning("recon: CN refresh failed for %s: %s", uniware_id, e, exc_info=True)
 
-    return {
-        "window": {"start_date": start_date, "end_date": end_date},
-        "invoice_selected": len(invoice_ids), "invoice_refreshed": inv_refreshed, "invoice_failed": inv_failed,
-        "cn_selected": len(cn_ids), "cn_refreshed": cn_refreshed, "cn_failed": cn_failed,
-    }
+        result = {
+            "window": {"start_date": start_date, "end_date": end_date},
+            "invoice_selected": len(invoice_ids), "invoice_refreshed": inv_refreshed, "invoice_failed": inv_failed,
+            "cn_selected": len(cn_ids), "cn_refreshed": cn_refreshed, "cn_failed": cn_failed,
+        }
+        store.finish_sync_log(conn, run_id, "success", result)
+        return result
+    except Exception as e:
+        store.finish_sync_log(conn, run_id, "error", error=str(e))
+        raise
 
 
 def recon_one_order(conn, uniware_id: str) -> dict:

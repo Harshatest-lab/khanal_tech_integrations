@@ -136,6 +136,8 @@ class _FakeConn:
 def test_refresh_recon_uses_default_month_window_and_reports_counts(monkeypatch):
     monkeypatch.setattr(recon.store, "get_recon_invoice_candidates", lambda *a, **k: ["SO-1", "SO-2"])
     monkeypatch.setattr(recon.store, "get_recon_cn_candidates", lambda *a, **k: ["SO-3"])
+    monkeypatch.setattr(recon.store, "start_sync_log", lambda *a, **k: 1)
+    monkeypatch.setattr(recon.store, "finish_sync_log", lambda *a, **k: None)
 
     calls = {"invoice": [], "cn": []}
 
@@ -177,6 +179,8 @@ def test_refresh_recon_respects_explicit_date_window(monkeypatch):
 
     monkeypatch.setattr(recon.store, "get_recon_invoice_candidates", fake_invoice_candidates)
     monkeypatch.setattr(recon.store, "get_recon_cn_candidates", fake_cn_candidates)
+    monkeypatch.setattr(recon.store, "start_sync_log", lambda *a, **k: 1)
+    monkeypatch.setattr(recon.store, "finish_sync_log", lambda *a, **k: None)
     monkeypatch.setattr(recon, "get_settings", lambda **kw: object())
 
     result = recon.refresh_recon(_FakeConn(), limit=10, start_date="2026-05-01", end_date="2026-05-31")

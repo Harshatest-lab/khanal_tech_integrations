@@ -255,50 +255,59 @@ def _process_claimed(conn, claimed: dict, uc: UcClient | None, settings: Unicomm
 
 
 def process_ready_transfers(conn, limit: int = 20, dry_run: bool = False) -> dict:
-    settings = get_settings(force_reload=True)
-    staged = fetch_new_transfers(conn, limit=limit)
-    recovery = store.recover_failed_pogrn(conn, limit=limit, max_attempts=MAX_ATTEMPTS, max_hours=MAX_HOURS)
+    run_id = store.start_sync_log(conn, "pogrn")
+    try:
+        settings = get_settings(force_reload=True)
+        staged = fetch_new_transfers(conn, limit=limit)
+        recovery = store.recover_failed_pogrn(conn, limit=limit, max_attempts=MAX_ATTEMPTS, max_hours=MAX_HOURS)
 
-    doc_entries = store.get_claimable_pogrn_doc_entries(conn, limit)
-    processed = done = failed = 0
+        doc_entries = store.get_claimable_pogrn_doc_entries(conn, limit)
+        processed = done = failed = 0
 
-    if dry_run:
-        # Preview only -- must never claim. claim_pogrn moves a row to
-        # 'processing' with no matching mark_*/release call in dry_run
-        # mode, which would permanently block any real future run from
-        # claiming it (found live: a dry_run call left DocEntry 53974
-        # stuck at 'processing' forever).
-        results = []
+        if dry_run:
+            # Preview only -- must never claim. claim_pogrn moves a row to
+            # 'processing' with no matching mark_*/release call in dry_run
+            # mode, which would permanently block any real future run from
+            # claiming it (found live: a dry_run call left DocEntry 53974
+            # stuck at 'processing' forever).
+            results = []
+            for doc_entry in doc_entries:
+                row = store.get_pogrn_transfer(conn, doc_entry)
+                if not row:
+                    continue
+                processed += 1
+                results.append(_process_claimed(conn, row, uc=None, settings=settings, dry_run=True))
+            result = {
+                "staged": staged, "recovered": recovery["recovered"], "escalated_dead": recovery["escalated"],
+                "processed": processed, "previews": results,
+            }
+            store.finish_sync_log(conn, run_id, "success", {k: v for k, v in result.items() if k != "previews"})
+            return result
+
+        uc = _uc_client()
         for doc_entry in doc_entries:
-            row = store.get_pogrn_transfer(conn, doc_entry)
-            if not row:
+            claimed = store.claim_pogrn(conn, doc_entry)
+            if not claimed:
                 continue
             processed += 1
-            results.append(_process_claimed(conn, row, uc=None, settings=settings, dry_run=True))
-        return {
+            try:
+                result = _process_claimed(conn, claimed, uc, settings, dry_run=False)
+                if result.get("status") == "grn_done":
+                    done += 1
+            except Exception as e:
+                failed += 1
+                store.mark_pogrn_failed(conn, doc_entry, str(e), MAX_ATTEMPTS)
+                logger.error("pogrn: transfer %s crashed: %s", doc_entry, e, exc_info=True)
+
+        result = {
             "staged": staged, "recovered": recovery["recovered"], "escalated_dead": recovery["escalated"],
-            "processed": processed, "previews": results,
+            "processed": processed, "done": done, "failed": failed,
         }
-
-    uc = _uc_client()
-    for doc_entry in doc_entries:
-        claimed = store.claim_pogrn(conn, doc_entry)
-        if not claimed:
-            continue
-        processed += 1
-        try:
-            result = _process_claimed(conn, claimed, uc, settings, dry_run=False)
-            if result.get("status") == "grn_done":
-                done += 1
-        except Exception as e:
-            failed += 1
-            store.mark_pogrn_failed(conn, doc_entry, str(e), MAX_ATTEMPTS)
-            logger.error("pogrn: transfer %s crashed: %s", doc_entry, e, exc_info=True)
-
-    return {
-        "staged": staged, "recovered": recovery["recovered"], "escalated_dead": recovery["escalated"],
-        "processed": processed, "done": done, "failed": failed,
-    }
+        store.finish_sync_log(conn, run_id, "success", result)
+        return result
+    except Exception as e:
+        store.finish_sync_log(conn, run_id, "error", error=str(e))
+        raise
 
 
 def process_one_transfer(conn, sap_doc_entry: int, dry_run: bool = False) -> dict:

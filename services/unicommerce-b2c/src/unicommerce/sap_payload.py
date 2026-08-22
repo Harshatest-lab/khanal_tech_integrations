@@ -11,6 +11,7 @@ directly since our settings dataclass already holds parsed dicts.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date
 from typing import Any
 
@@ -19,6 +20,8 @@ from unicommerce.hana_access import bulk_batch_inventory_by_warehouse
 from unicommerce.mappers import normalize_text
 from unicommerce.settings import UnicommerceSettings
 from unicommerce.tax import compute_tax_from_line, get_tax_code
+
+logger = logging.getLogger(__name__)
 
 ORIGIN_STATE = "KA"
 SHIPPING_ITEM_CODE = "EXCM0027"
@@ -79,6 +82,18 @@ def _to_float(value: Any, default: float = 0.0) -> float:
         return float(value or 0)
     except Exception:
         return float(default)
+
+
+def _net_line_price(item: dict) -> float:
+    """Unit price after discount, same math _append_sales_line uses --
+    used order-wide to detect whether ANY line in the order actually has
+    value (see order_has_paid_line in ar_invoice_payload)."""
+    unit_price = _to_float(item.get("unitPrice"))
+    qty = _to_float(item.get("quantity"))
+    discount_total = _to_float(item.get("discount"))
+    if discount_total > 0 and qty > 0:
+        return unit_price - (discount_total / qty)
+    return unit_price
 
 
 def _resolve_order_address(uc_data: dict) -> dict:
@@ -368,13 +383,41 @@ def _append_sales_line(
     line_udfs: dict | None = None,
     batch_managed_cache: dict | None = None,
     fefo_rows_cache: dict | None = None,
+    order_has_paid_line: bool = False,
 ) -> float:
     item_code = normalize_text(item.get("itemSku"))
     qty = float(item.get("quantity", 0) or 0)
     unit_price = float(item.get("unitPrice", 0) or 0)
     discount_total = _to_float(item.get("discount"))
     if discount_total > 0 and qty > 0:
-        unit_price = max(0.0, unit_price - (discount_total / qty))
+        net_price = unit_price - (discount_total / qty)
+        if net_price > 0:
+            unit_price = net_price
+        elif order_has_paid_line and bool(resolve_mapped_value(settings.zero_discount_floor_channels, channel, False)):
+            # Discount >= full line value (BOGO / 100%-off promo) on a
+            # channel opted into the floor guard -- netting would send SAP
+            # a 0.0 UnitPrice, which trips its "Unit Price cannot be less
+            # than Item Cost" validation. Keep the gross UnitPrice; Finance
+            # books the promo spend separately (same convention as
+            # amazon-us-b2c's PURE GROSS pricing).
+            #
+            # order_has_paid_line requires at least one OTHER line in this
+            # order to have real value -- that's what tells a genuine promo
+            # apart from a goodwill/warranty replacement, where EVERY line
+            # legitimately nets to 0 and there's no field that tags that
+            # distinctly (confirmed live: neither replacementSaleOrderCode
+            # nor voucherCode is ever populated, even on confirmed real
+            # dogsee BOGO orders). Without a paid line elsewhere, this
+            # falls through to the old clamp-to-0 behavior below -- better
+            # to leave a genuine all-free order stuck failing at SAP
+            # (visible, safe) than silently book it at gross price
+            # (misstated revenue).
+            logger.info(
+                "promo_not_netted item_sku=%s channel=%s discount_total=%s gross_unit_price=%s",
+                item_code, channel, discount_total, unit_price,
+            )
+        else:
+            unit_price = max(0.0, net_price)
     tax_percent = float(item.get("taxPercent", 0) or 0)
     uc_wh_code = normalize_text(item.get("warehouseCode"))
     sap_wh_code = _resolve_sap_warehouse(settings, channel, uc_wh_code)
@@ -475,6 +518,18 @@ def ar_invoice_payload(
     if not items:
         raise ValueError(f"No items found in order_json for order {uniware_id}")
 
+    # A genuine promo (BOGO, flash-sale freebie) sits alongside at least
+    # one normally-priced line in the same order -- the customer paid
+    # something. An order where EVERY line nets to <= 0 looks instead
+    # like a goodwill/warranty replacement (no real sale happened), which
+    # the zero_discount_floor_channels guard below must never mistake for
+    # a promo -- silently booking a replacement at gross price would
+    # misstate revenue. Confirmed live: dogsee has no field that tags a
+    # replacement line distinctly (checked replacementSaleOrderCode and
+    # voucherCode -- both null on confirmed real BOGO orders too), so
+    # this order-wide shape is the only signal available.
+    order_has_paid_line = any(_net_line_price(item) > 0 for item in items)
+
     tax_inclusive = bool(resolve_mapped_value(tax_inclusive_map, channel, False))
     ship_state = extract_shipping_state(uc_data) or ORIGIN_STATE
     origin_state_code = resolve_origin_state_code(channel, settings)
@@ -547,6 +602,7 @@ def ar_invoice_payload(
                     line_udfs=line_udfs,
                     batch_managed_cache=batch_managed_cache,
                     fefo_rows_cache=fefo_rows_cache,
+                    order_has_paid_line=order_has_paid_line,
                 )
             continue
 
@@ -563,6 +619,7 @@ def ar_invoice_payload(
             line_udfs=line_udfs,
             batch_managed_cache=batch_managed_cache,
             fefo_rows_cache=fefo_rows_cache,
+            order_has_paid_line=order_has_paid_line,
         )
 
     for bucket in sorted(

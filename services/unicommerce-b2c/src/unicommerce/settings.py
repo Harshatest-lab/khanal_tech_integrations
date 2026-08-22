@@ -8,6 +8,12 @@ these were ported from for the exact semantics each map drives):
 {
   "channel_customer_map": {"<channel>": "<SAP CardCode>", "default": "..."},
   "tax_inclusive_map": {"<channel>": true},
+  "zero_discount_floor_channels": {"<channel>": true},  -- when a line's
+    discount would net UnitPrice to <= 0 (BOGO / 100%-off promos), keep the
+    gross UnitPrice instead of clamping to 0 -- SAP's "Unit Price cannot be
+    less than Item Cost" validation rejects a 0.0 line outright. Off by
+    default for every channel (existing max(0, net) clamp behavior is
+    unchanged) -- opt a channel in here as its promos need it.
   "tax_code_map": {"<pct>_<intra|inter>": "<SAP TaxCode>", "0_intra": "...", "0_exempt": "..."},
   "warehouse_map": {"<uc_warehouse_code>": "<sap_warehouse_code>"},
   "channel_warehouse_map": {"<channel>": "<sap_warehouse_code>"},
@@ -52,6 +58,7 @@ UC_SETTINGS_PARAM_NAME = _env("UC_SETTINGS_PARAM_NAME", "/unicommerce/settings")
 class UnicommerceSettings:
     channel_customer_map: dict = field(default_factory=dict)
     tax_inclusive_map: dict = field(default_factory=dict)
+    zero_discount_floor_channels: dict = field(default_factory=dict)
     tax_code_map: dict = field(default_factory=dict)
     warehouse_map: dict = field(default_factory=dict)
     channel_warehouse_map: dict = field(default_factory=dict)
@@ -96,6 +103,7 @@ def _from_dict(data: dict) -> UnicommerceSettings:
     return UnicommerceSettings(
         channel_customer_map=data.get("channel_customer_map") or {},
         tax_inclusive_map=data.get("tax_inclusive_map") or {},
+        zero_discount_floor_channels=data.get("zero_discount_floor_channels") or {},
         tax_code_map=data.get("tax_code_map") or {},
         warehouse_map=data.get("warehouse_map") or {},
         channel_warehouse_map=data.get("channel_warehouse_map") or {},
