@@ -126,12 +126,22 @@ def find_invoice_by_uc_order_id(uc_order_id: str) -> dict | None:
     # doesn't like rather than erroring. Found via a real corruption
     # incident (2026-08-19): 62% of a sample of 'posted' orders had a
     # sap_ar_invoice_docentry belonging to a provably unrelated order.
+    # DocTaxAmount deliberately NOT in $select -- see
+    # find_invoice_by_num_at_card's comment on the same field; confirmed
+    # live 2026-08-24 that assumption ("unlike prod's schema") was wrong --
+    # KFL_LIVE (prod) rejects it too ("Property 'DocTaxAmount' of
+    # 'Document' is invalid", HTTP 400), same as SAP TEST. This was the
+    # actual cause of 111 "Duplicate check failed ... HTTP 400" dead orders
+    # confirmed live -- HANA lookup failed for them, fell back to this SL
+    # path, which then 400'd on every attempt because of this field, never
+    # the real fallback it was meant to be. _row_to_result already treats
+    # a missing value as 0.
     try:
         status, body = _request(
             "GET",
             quote(
                 f"Invoices?$filter=U_UCOrderID eq '{escaped}'"
-                "&$select=DocEntry,DocNum,DocTaxAmount,DocTotal,Comments&$orderby=DocEntry desc&$top=5",
+                "&$select=DocEntry,DocNum,DocTotal,Comments&$orderby=DocEntry desc&$top=5",
                 safe="/?$&=',",
             ),
         )
@@ -147,7 +157,7 @@ def find_invoice_by_uc_order_id(uc_order_id: str) -> dict | None:
             "GET",
             quote(
                 f"Invoices?$filter=contains(Comments,'{escaped}')"
-                "&$select=DocEntry,DocNum,DocTaxAmount,DocTotal,Comments&$orderby=DocEntry desc&$top=20",
+                "&$select=DocEntry,DocNum,DocTotal,Comments&$orderby=DocEntry desc&$top=20",
                 safe="/?$&=',",
             ),
         )
@@ -179,9 +189,14 @@ def find_invoice_by_num_at_card(num_at_card: str) -> dict | None:
     escaped = key.replace("'", "''")
     # DocTaxAmount deliberately NOT in $select -- confirmed 2026-08-20 the
     # SAP TEST company rejects it outright ("Property 'DocTaxAmount' of
-    # 'Document' is invalid", HTTP 400), unlike prod's schema. It's only
-    # used for reconciliation bookkeeping downstream, not correctness --
-    # _row_to_result already treats a missing value as 0.
+    # 'Document' is invalid", HTTP 400). The original comment here claimed
+    # this was "unlike prod's schema" -- that was wrong, confirmed live
+    # 2026-08-24: KFL_LIVE (prod) rejects it identically. That wrong
+    # assumption is why find_invoice_by_uc_order_id/find_credit_note_by_return_id
+    # kept DocTaxAmount in their $select and silently 400'd on every SL
+    # fallback call for months. It's only used for reconciliation
+    # bookkeeping downstream, not correctness -- _row_to_result already
+    # treats a missing value as 0.
     path = quote(
         f"Invoices?$filter=NumAtCard eq '{escaped}' and CancelStatus eq 'csNo'"
         "&$select=DocEntry,DocNum&$top=1",
@@ -402,12 +417,15 @@ def find_credit_note_by_return_id(uc_return_id: str, base_doc_entry: int | str |
     # Comments selected (not just filtered on) so the match can be
     # verified -- same defense-in-depth as find_invoice_by_uc_order_id,
     # see its comment for why the $filter clause alone isn't trusted.
+    # DocTaxAmount deliberately NOT in $select -- same fix as
+    # find_invoice_by_uc_order_id, same reason: confirmed live 2026-08-24
+    # that KFL_LIVE (prod) rejects this field too.
     try:
         status, body = _request(
             "GET",
             quote(
                 f"CreditNotes?$filter=U_UCReturnID eq '{escaped}'"
-                "&$select=DocEntry,DocNum,DocTaxAmount,DocTotal,Comments&$orderby=DocEntry desc&$top=5",
+                "&$select=DocEntry,DocNum,DocTotal,Comments&$orderby=DocEntry desc&$top=5",
                 safe="/?$&=',",
             ),
         )
@@ -423,7 +441,7 @@ def find_credit_note_by_return_id(uc_return_id: str, base_doc_entry: int | str |
             "GET",
             quote(
                 f"CreditNotes?$filter=contains(Comments,'{escaped}')"
-                "&$select=DocEntry,DocNum,DocTaxAmount,DocTotal,Comments&$orderby=DocEntry desc&$top=20",
+                "&$select=DocEntry,DocNum,DocTotal,Comments&$orderby=DocEntry desc&$top=20",
                 safe="/?$&=',",
             ),
         )
