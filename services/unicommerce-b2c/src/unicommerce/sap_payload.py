@@ -26,6 +26,23 @@ logger = logging.getLogger(__name__)
 ORIGIN_STATE = "KA"
 SHIPPING_ITEM_CODE = "EXCM0027"
 
+# SAP UDF EditSize on INV1 (AR Invoice DocumentLines) -- confirmed live
+# 2026-08-24 via UserFieldsMD (TableName='INV1'), not documented anywhere
+# else. A real address that exceeds these gets rejected outright ("Value
+# too long in property 'U_City' of 'DocumentLine'", HTTP 400) -- confirmed
+# live on 6 real orders with long district names (e.g. "Balarampur
+# Puruliya District", 29 chars > the 20-char limit). These UDFs are
+# reference/lookup data on the invoice line, not something SAP's own
+# tax/pricing logic reads, so truncating is safe -- unlike DocTaxAmount
+# elsewhere, there's no "drop it if too long" option since SAP requires
+# some value here (empty city was never the issue).
+_UDF_MAX_LEN = {"U_City": 20, "U_State": 20, "U_Country": 20, "U_BuyerName": 120, "U_Order": 75}
+
+
+def _udf(key: str, value: str) -> str:
+    limit = _UDF_MAX_LEN.get(key)
+    return value[:limit] if limit else value
+
 # Warehouse routing — single source of truth. Amazon FBA fulfilment-centre
 # channels have their own dedicated warehouses; every other channel ships
 # out of EC-FG. Keyed by UPPER-CASED channel name so case differences
@@ -539,13 +556,13 @@ def ar_invoice_payload(
     order_id = normalize_text(uc_data.get("code") or uniware_id)
     raw_order_json = _raw_order_json_for_sap(order_json)
     line_udfs = {
-        "U_Order": order_id,
+        "U_Order": _udf("U_Order", order_id),
         "U_OrderedOn": order_date,
-        "U_BuyerName": str(order_address.get("name") or "").strip(),
-        "U_City": str(order_address.get("city") or "").strip(),
-        "U_State": str(order_address.get("state") or "").strip(),
+        "U_BuyerName": _udf("U_BuyerName", str(order_address.get("name") or "").strip()),
+        "U_City": _udf("U_City", str(order_address.get("city") or "").strip()),
+        "U_State": _udf("U_State", str(order_address.get("state") or "").strip()),
         "U_PINCode": str(order_address.get("pincode") or "").strip(),
-        "U_Country": str(order_address.get("country") or "India").strip(),
+        "U_Country": _udf("U_Country", str(order_address.get("country") or "India").strip()),
         "U_Order_JSON": raw_order_json,
     }
     doc_lines: list[dict] = []
