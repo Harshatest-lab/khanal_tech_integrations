@@ -202,12 +202,24 @@ def post_invoices_handler(event, context):
     ~200-row cross-channel backlog with headroom; cost scales with actual
     eligible rows, not this ceiling, and the 900s Lambda timeout has
     plenty of margin against the 30-min cron cadence.
+    start_date defaults to a rolling last-14-days window when omitted --
+    same idea as flex_refunds_handler's 45-day default below. Confirmed
+    live 2026-08-24: the backlog regrew past 300 rows again (chronically
+    stuck pre-cutoff orders that never pass order_ready_for_invoice sit at
+    the head of the oldest-first scan forever), so every cron cycle was
+    re-examining the same dead rows and never reaching that day's actual
+    new orders. The old backlog still gets swept by any manual Ops Center
+    run with an explicit start_date -- this only changes the unscoped
+    scheduled-cron default.
     {"uniware_id": str} — manual single-order retry, bypassing the limit.
     {"trigger": "manual_retry"} — set by dashboard_handler's async invoke;
     logs to unicommerce_sync_log as "retry_invoices" instead of
     "post_invoices" so the dashboard's sync-log panel can tell a manual
     dashboard retry apart from the scheduled cron run."""
     ev = event or {}
+    start_date = ev.get("start_date") or (
+        datetime.now(timezone.utc) - timedelta(days=14)
+    ).strftime("%Y-%m-%d")
 
     def _go():
         with store.connect() as conn:
@@ -218,7 +230,7 @@ def post_invoices_handler(event, context):
                 conn,
                 limit=int(ev.get("limit") or 300),
                 channel_name=ev.get("channel_name"),
-                start_date=ev.get("start_date"),
+                start_date=start_date,
                 end_date=ev.get("end_date"),
                 sync_mode=sync_mode,
             )
