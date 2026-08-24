@@ -21,7 +21,7 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from unicommerce import stock_transfers, store
+from unicommerce import constants, stock_transfers, store
 from unicommerce.credentials import get_uc_credentials
 from unicommerce.sap_payload import DEFAULT_WAREHOUSE
 from unicommerce.settings import UnicommerceSettings, get_settings
@@ -181,7 +181,7 @@ def fetch_new_transfers(conn, limit: int = 50) -> int:
     by the polling cursor re-seeing it."""
     watermark = int(store.get_watermark(conn, "pogrn_transfers") or 0)
     watched = watched_warehouses()
-    transfers = stock_transfers.list_since(watermark, limit=limit)
+    transfers = stock_transfers.list_since(watermark, limit=limit, doc_date_floor=constants.POGRN_DOC_DATE_FLOOR)
     staged = 0
     highest = watermark
     for summary in transfers:

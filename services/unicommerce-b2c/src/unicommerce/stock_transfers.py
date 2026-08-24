@@ -19,13 +19,20 @@ from urllib.parse import quote
 from unicommerce import sap_client
 
 
-def list_since(since_doc_entry: int, limit: int = 50) -> list[dict]:
+def list_since(since_doc_entry: int, limit: int = 50, doc_date_floor: str | None = None) -> list[dict]:
     """Transfers with DocEntry > since_doc_entry, ascending. Header + line
-    summary only (no BatchNumbers) -- call detail() per DocEntry for that."""
+    summary only (no BatchNumbers) -- call detail() per DocEntry for that.
+
+    doc_date_floor (see constants.POGRN_DOC_DATE_FLOOR) additionally
+    excludes anything dated before it -- the watermark alone doesn't stop
+    a fresh/reset scan from walking SAP's entire StockTransfers history."""
+    doc_filter = f"DocEntry gt {int(since_doc_entry)}"
+    if doc_date_floor:
+        doc_filter += f" and DocDate ge '{doc_date_floor}'"
     status, body = sap_client._request(
         "GET",
         quote(
-            f"StockTransfers?$filter=DocEntry gt {int(since_doc_entry)}"
+            f"StockTransfers?$filter={doc_filter}"
             f"&$orderby=DocEntry asc&$top={int(limit)}",
             safe="/?$&=',",
         ),
