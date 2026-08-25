@@ -68,7 +68,17 @@ def _run(label: str, fn):
     try:
         result = fn()
         logger.info("%s result: %s", label, result)
-        return result
+        # Lambda's runtime JSON-marshals whatever gets returned here --
+        # a date/datetime/Decimal anywhere in it crashes that step even
+        # though the handler's actual work (e.g. a DB write) already
+        # committed by this point. Round-trip through json.dumps(...,
+        # default=str) so the return value is always marshal-safe, same
+        # convention dashboard_handler's _json_response already uses.
+        # Confirmed real 2026-08-25: a delete handler's response (raw DB
+        # rows with date columns) crashed here post-commit, losing the
+        # caller's only copy of what was deleted until it was recovered
+        # from the log line just above.
+        return json.loads(json.dumps(result, default=str))
     except Exception as e:
         send_alert(f"{label} crashed", _scrub(f"{e}\n\n{traceback.format_exc()[-3000:]}"))
         raise

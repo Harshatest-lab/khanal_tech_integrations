@@ -7,8 +7,10 @@ synchronously, untouched."""
 
 from __future__ import annotations
 
+import datetime
 import json
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -114,3 +116,29 @@ def test_retry_cn_single_return_stays_synchronous(monkeypatch):
     assert resp["statusCode"] == 200
     assert json.loads(resp["body"]) == {"uc_return_id": "RP0584", "result": "posted"}
     assert fake_client.calls == []
+
+
+def test_run_coerces_date_datetime_decimal_so_lambda_can_marshal_the_response():
+    """Confirmed real 2026-08-25: a handler returning raw DB rows (date
+    columns included) crashed at the Lambda runtime's JSON-marshal step
+    -- AFTER the handler's own work (a DB delete) had already committed,
+    losing the caller's only copy of the response until it was recovered
+    from this function's own log line. _run must make every return value
+    JSON-safe, not just handlers that happen to remember to do it
+    themselves."""
+    result = handlers._run(
+        "test_label",
+        lambda: {
+            "a_date": datetime.date(2026, 7, 28),
+            "a_datetime": datetime.datetime(2026, 8, 25, 11, 10, 46, tzinfo=datetime.timezone.utc),
+            "a_decimal": Decimal("12.50"),
+            "nested": {"list": [datetime.date(2026, 1, 1)]},
+        },
+    )
+
+    # Every value must now be a plain JSON-serializable type -- json.dumps
+    # on the result itself must not raise.
+    json.dumps(result)
+    assert result["a_date"] == "2026-07-28"
+    assert result["a_decimal"] == "12.50"
+    assert result["nested"]["list"] == ["2026-01-01"]
