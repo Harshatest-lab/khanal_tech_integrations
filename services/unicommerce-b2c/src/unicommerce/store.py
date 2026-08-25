@@ -541,6 +541,36 @@ def recover_batch_hold_orders(conn: psycopg.Connection, limit: int, max_attempts
     return {"recovered": recovered, "escalated": escalated}
 
 
+def reset_dead_orders_for_retry(conn: psycopg.Connection, uniware_ids: list[str]) -> int:
+    """Manual unstick for orders escalated to 'dead' by recover_batch_hold_orders'
+    48h/10-attempt cap, once the underlying stock shortage has cleared.
+    Clears batch_hold_since and attempt_count too, not just pipeline_status --
+    mark_batch_hold's `batch_hold_since = COALESCE(batch_hold_since, now())`
+    never gets cleared on the dead-escalation path, so without this a
+    revived order that hits batch_hold again would look like it's already
+    been held for the old (already-expired) window and get re-escalated
+    on the very next recovery pass instead of getting a fresh 48h budget.
+    Scoped to explicit ids AND to currently-'dead' rows, so it can't
+    accidentally revive orders parked dead for an unrelated reason (e.g.
+    SAP price-floor rejections) just because their id was passed by
+    mistake."""
+    if not uniware_ids:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE unicommerce_orders
+            SET pipeline_status = 'ready', attempt_count = 0, batch_hold_since = NULL,
+                last_error = '', updated_at = now()
+            WHERE pipeline_status = 'dead' AND uniware_id = ANY(%s)
+            """,
+            (uniware_ids,),
+        )
+        affected = cur.rowcount
+    conn.commit()
+    return affected
+
+
 def get_verify_orders(conn: psycopg.Connection, limit: int) -> list[dict]:
     with conn.cursor() as cur:
         cur.execute(

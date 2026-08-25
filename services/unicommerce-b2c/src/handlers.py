@@ -215,7 +215,14 @@ def post_invoices_handler(event, context):
     {"trigger": "manual_retry"} — set by dashboard_handler's async invoke;
     logs to unicommerce_sync_log as "retry_invoices" instead of
     "post_invoices" so the dashboard's sync-log panel can tell a manual
-    dashboard retry apart from the scheduled cron run."""
+    dashboard retry apart from the scheduled cron run.
+    {"reset_dead_ids": [str, ...]} — manual unstick for orders escalated
+    to 'dead' by the batch-hold 48h/10-attempt cap (see
+    store.reset_dead_orders_for_retry), once the underlying stock
+    shortage has cleared. Resets exactly those ids to 'ready' with a
+    fresh attempt/hold budget, then runs the normal ready-order sweep in
+    the same invocation so they get retried immediately instead of
+    waiting for the next cron tick."""
     ev = event or {}
     start_date = ev.get("start_date") or (
         datetime.now(timezone.utc) - timedelta(days=14)
@@ -225,8 +232,9 @@ def post_invoices_handler(event, context):
         with store.connect() as conn:
             if ev.get("uniware_id"):
                 return post_invoices.post_one_order(conn, ev["uniware_id"])
-            sync_mode = "retry_invoices" if ev.get("trigger") == "manual_retry" else "post_invoices"
-            return post_invoices.post_ready_orders(
+            reset_count = store.reset_dead_orders_for_retry(conn, ev.get("reset_dead_ids") or [])
+            sync_mode = "retry_invoices" if (ev.get("trigger") == "manual_retry" or ev.get("reset_dead_ids")) else "post_invoices"
+            result = post_invoices.post_ready_orders(
                 conn,
                 limit=int(ev.get("limit") or 300),
                 channel_name=ev.get("channel_name"),
@@ -234,6 +242,8 @@ def post_invoices_handler(event, context):
                 end_date=ev.get("end_date"),
                 sync_mode=sync_mode,
             )
+            result["reset_dead"] = reset_count
+            return result
 
     return _run("post_invoices", _go)
 
