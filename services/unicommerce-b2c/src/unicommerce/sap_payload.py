@@ -297,14 +297,107 @@ def _resolve_gl_account_code(
 def resolve_item_code(item_code: str, settings: UnicommerceSettings) -> str:
     """Substitute a UC itemSku that's been retired in SAP for its
     replacement ItemCode (settings.sku_remap), e.g. dead item FGHN0056
-    replaced by CFGHN0009. Must be applied at every point a new invoice
-    line's item code gets resolved -- HANA batch-availability queries and
-    the AR invoice payload alike -- otherwise a retired code just returns
-    zero batches from HANA forever and looks like a permanent stock-out
-    instead of a wrong item code. Credit notes don't go through this --
-    they inherit sapItemCode from the base invoice's own already-posted
-    DocumentLines."""
+    replaced by CFGHN0009. Internal to resolve_and_expand_items -- callers
+    building a new invoice line should go through that instead of calling
+    this directly, since a remap target can itself be a CFG (Sales BOM)
+    parent that needs expanding, not just a 1:1 substitution. Credit notes
+    don't go through either -- they inherit sapItemCode from the base
+    invoice's own already-posted DocumentLines."""
     return (settings.sku_remap or {}).get(item_code, item_code)
+
+
+_cfg_children_cache: dict[str, list[dict]] = {}
+
+
+def _cfg_children(item_code: str) -> list[dict]:
+    """In-process memoized ProductTree lookup (mirrors settings.py's
+    per-container caching convention) -- a CFG parent's bundle
+    composition doesn't change within a container's lifetime, and without
+    this every order referencing the same bundle repeats the same SAP
+    call."""
+    if item_code not in _cfg_children_cache:
+        from unicommerce.amazon_flex_items import get_product_tree_children
+
+        _cfg_children_cache[item_code] = get_product_tree_children(item_code)
+    return _cfg_children_cache[item_code]
+
+
+def resolve_and_expand_items(uc_data: dict, settings: UnicommerceSettings) -> list[dict]:
+    """parse_line_items() + settings.sku_remap substitution + CFG (Sales
+    BOM) expansion, in one pass -- the single choke point every consumer
+    of a staged order's line items (batch-availability check, HANA
+    prewarm, and the AR invoice payload itself) must use instead of
+    calling parse_line_items directly. Without this, a UC item remapped
+    to a SAP Sales BOM parent (e.g. dead FGHN0056 -> CFGHN0009) would
+    reach SAP as one unexpandable line -- SAP rejects posting a Sales BOM
+    parent's ItemCode directly ("Selecting multiple locations is not
+    permitted"; confirmed live 2026-08-25 on real FGHN0056 orders after
+    the remap alone was applied). It only accepts the expanded child
+    lines under a synthetic iSalesTree parent, same as the bundle-
+    grouping loop in ar_invoice_payload already builds for Amazon Flex's
+    own CFG orders.
+
+    Price distribution mirrors flex_fetch.py's CFG expansion exactly:
+    proportional by quantity share, remainder absorbed by the last child,
+    so no line ever goes to a zero UnitPrice -- that trips SAP's own
+    cost-floor validation whenever a child item has a nonzero Item Cost
+    on file (confirmed real 2026-08-21 on CFGHN0006/CFGDC0038 via the
+    Flex path this mirrors)."""
+    from unicommerce.amazon_flex_items import CfgExpansionFailed, is_cfg_parent
+
+    raw_items = parse_line_items(uc_data)
+    expanded: list[dict] = []
+    for item in raw_items:
+        item_code = resolve_item_code(normalize_text(item.get("itemSku")), settings)
+        if not is_cfg_parent(item_code):
+            resolved_item = dict(item)
+            resolved_item["itemSku"] = item_code
+            expanded.append(resolved_item)
+            continue
+
+        try:
+            children = _cfg_children(item_code)
+        except CfgExpansionFailed as e:
+            logger.error("resolve_and_expand_items: %s -- leaving line unexpanded, will fail batch check", e)
+            resolved_item = dict(item)
+            resolved_item["itemSku"] = item_code
+            expanded.append(resolved_item)
+            continue
+
+        qty = float(item.get("quantity", 0) or 0)
+        unit_price = float(item.get("unitPrice", 0) or 0)
+        discount_total = _to_float(item.get("discount"))
+        line_value = round(max(0.0, unit_price * qty - discount_total), 4)
+
+        valid_children = [c for c in children if qty * float(c["quantity"]) > 0]
+        total_child_qty = sum(qty * float(c["quantity"]) for c in valid_children)
+        base_unit_price = round(line_value / total_child_qty, 4) if total_child_qty else 0.0
+        allocated_value = 0.0
+        for idx, child in enumerate(valid_children, start=1):
+            child_qty = qty * float(child["quantity"])
+            if idx == len(valid_children):
+                # Last child absorbs the rounding remainder so the
+                # bundle's lines sum back to exactly line_value, not a
+                # rounding-drift total.
+                child_total = round(line_value - allocated_value, 4)
+                child_unit_price = round(child_total / child_qty, 4) if child_qty else 0.0
+            else:
+                child_unit_price = base_unit_price
+                child_total = round(child_unit_price * child_qty, 4)
+                allocated_value += child_total
+            child_item = dict(item)
+            child_item.update(
+                {
+                    "itemSku": child["item_code"],
+                    "quantity": child_qty,
+                    "unitPrice": child_unit_price,
+                    "discount": 0,
+                    "bundleSkuCode": item_code,
+                    "batchNumber": "",
+                }
+            )
+            expanded.append(child_item)
+    return expanded
 
 
 def fefo_allocate_from_rows(rows: list[dict], qty_needed: float) -> list[dict]:
@@ -415,7 +508,7 @@ def _append_sales_line(
     fefo_rows_cache: dict | None = None,
     order_has_paid_line: bool = False,
 ) -> float:
-    item_code = resolve_item_code(normalize_text(item.get("itemSku")), settings)
+    item_code = normalize_text(item.get("itemSku"))
     qty = float(item.get("quantity", 0) or 0)
     unit_price = float(item.get("unitPrice", 0) or 0)
     discount_total = _to_float(item.get("discount"))
@@ -544,7 +637,7 @@ def ar_invoice_payload(
     tax_inclusive_map = settings.tax_inclusive_map
     customer_code = resolve_customer_code(settings, channel)
 
-    items = parse_line_items(uc_data)
+    items = resolve_and_expand_items(uc_data, settings)
     if not items:
         raise ValueError(f"No items found in order_json for order {uniware_id}")
 
