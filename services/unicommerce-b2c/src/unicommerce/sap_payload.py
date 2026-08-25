@@ -60,7 +60,7 @@ CHANNEL_WAREHOUSE_MAP: dict[str, str] = {
     "AMAZON_FBA_IN_BLR4": "AMZ-BLR4",
 }
 DEFAULT_WAREHOUSE = "EC-FG"
-RETURN_WAREHOUSE_CODE = "EC-QA"
+RETURN_WAREHOUSE_CODE = "EC-IT"
 
 # Must match BATCH_QTY_TOLERANCE in the (not yet ported) posting worker.
 BATCH_QTY_TOLERANCE = 0.01
@@ -185,7 +185,7 @@ def _resolve_freight_gross(item: dict) -> float:
     return round(max(0.0, shipping + shipping_method + cod), 4)
 
 
-def _resolve_sap_warehouse(settings: UnicommerceSettings, channel: str, uc_wh_code: str) -> str:
+def _resolve_sap_warehouse(settings: UnicommerceSettings, channel: str, uc_wh_code: str, default: str = DEFAULT_WAREHOUSE) -> str:
     channel_upper = (channel or "").strip().upper()
     if channel_upper in CHANNEL_WAREHOUSE_MAP:
         return CHANNEL_WAREHOUSE_MAP[channel_upper]
@@ -197,7 +197,7 @@ def _resolve_sap_warehouse(settings: UnicommerceSettings, channel: str, uc_wh_co
     if resolved:
         return str(resolved).strip()
 
-    return DEFAULT_WAREHOUSE
+    return default
 
 
 def _resolve_bill_ship_codes(settings: UnicommerceSettings, channel: str, tax_bucket: str) -> tuple[str, str]:
@@ -914,13 +914,21 @@ def credit_note_payload(cn: dict, parent_order: dict, settings: UnicommerceSetti
             raise ValueError(f"Missing parent invoice batch mapping for return item {item_code} in {cn.get('uc_return_id')}")
 
         # Warehouse for return: FBA channels use their originating AMZ-* warehouse;
-        # all other channels use the QA quarantine warehouse (EC-QA).
+        # all other channels fall back to RETURN_WAREHOUSE_CODE (EC-IT) when
+        # no explicit warehouse_map/channel_warehouse_map entry applies.
+        # Previously passed `or RETURN_WAREHOUSE_CODE` after
+        # _resolve_sap_warehouse -- dead code, since that function's own
+        # last resort is DEFAULT_WAREHOUSE ("EC-FG"), never a falsy value,
+        # so returns for unmapped non-FBA channels were silently landing
+        # at EC-FG instead of the intended return-specific warehouse
+        # (confirmed 2026-08-25). Passing default= here makes
+        # RETURN_WAREHOUSE_CODE the actual last resort instead.
         item_uc_wh = normalize_text(item.get("warehouseCode"))
         channel_upper = parent_channel.strip().upper()
         if channel_upper in CHANNEL_WAREHOUSE_MAP:
             return_wh = CHANNEL_WAREHOUSE_MAP[channel_upper]
         else:
-            return_wh = _resolve_sap_warehouse(settings, parent_channel, item_uc_wh) or RETURN_WAREHOUSE_CODE
+            return_wh = _resolve_sap_warehouse(settings, parent_channel, item_uc_wh, default=RETURN_WAREHOUSE_CODE)
 
         line = {
             "ItemCode": item_code,

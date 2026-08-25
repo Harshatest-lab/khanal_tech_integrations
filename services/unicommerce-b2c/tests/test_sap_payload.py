@@ -12,6 +12,7 @@ import pytest  # noqa: E402
 
 from unicommerce.sap_payload import (  # noqa: E402
     DEFAULT_WAREHOUSE,
+    RETURN_WAREHOUSE_CODE,
     _allocate_return_batches,
     _resolve_freight_gross,
     _resolve_sap_warehouse,
@@ -327,6 +328,18 @@ def test_credit_note_payload_builds_expected_shape():
 def test_credit_note_payload_fba_channel_routes_to_dedicated_warehouse():
     payload = credit_note_payload(_cn(), {"channel_name": "amazon_fba_in_bom5", "state": "KA"}, _SETTINGS_WITH_CN)
     assert payload["DocumentLines"][0]["WarehouseCode"] == "AMZ-BOM5"
+
+
+def test_credit_note_payload_non_fba_channel_falls_back_to_return_warehouse_code():
+    """Non-FBA channel with no warehouse_map/channel_warehouse_map entry
+    must land on RETURN_WAREHOUSE_CODE (EC-IT), not silently fall through
+    to DEFAULT_WAREHOUSE (EC-FG) -- confirmed real 2026-08-25: the old
+    `_resolve_sap_warehouse(...) or RETURN_WAREHOUSE_CODE` was dead code
+    since _resolve_sap_warehouse never returns a falsy value, so every
+    unmapped non-FBA return was silently landing at EC-FG instead."""
+    payload = credit_note_payload(_cn(), {"channel_name": "FLIPKART", "state": "KA"}, _SETTINGS_WITH_CN)
+    assert payload["DocumentLines"][0]["WarehouseCode"] == RETURN_WAREHOUSE_CODE
+    assert RETURN_WAREHOUSE_CODE != DEFAULT_WAREHOUSE
 
 
 def test_credit_note_payload_missing_parent_doc_entry_raises():
