@@ -216,11 +216,12 @@ def post_invoices_handler(event, context):
     logs to unicommerce_sync_log as "retry_invoices" instead of
     "post_invoices" so the dashboard's sync-log panel can tell a manual
     dashboard retry apart from the scheduled cron run.
-    {"reset_dead_ids": [str, ...]} — manual unstick for orders escalated
-    to 'dead' by the batch-hold 48h/10-attempt cap (see
+    {"reset_dead_ids": [str, ...]} — manual unstick for orders sitting at
+    'dead' (batch-hold 48h/10-attempt cap) or still at 'batch_hold' (see
     store.reset_dead_orders_for_retry), once the underlying stock
-    shortage has cleared. Resets exactly those ids to 'ready' with a
-    fresh attempt/hold budget, then runs the normal ready-order sweep in
+    shortage has cleared -- also skips batch_hold's own 30-min recovery
+    cooldown for exactly these ids. Resets them to 'ready' with a fresh
+    attempt/hold budget, then runs the normal ready-order sweep in
     the same invocation so they get retried immediately instead of
     waiting for the next cron tick."""
     ev = event or {}
