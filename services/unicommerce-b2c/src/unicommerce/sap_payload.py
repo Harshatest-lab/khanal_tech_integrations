@@ -294,6 +294,19 @@ def _resolve_gl_account_code(
     return str(acct).strip() or None if acct not in (None, "") else None
 
 
+def resolve_item_code(item_code: str, settings: UnicommerceSettings) -> str:
+    """Substitute a UC itemSku that's been retired in SAP for its
+    replacement ItemCode (settings.sku_remap), e.g. dead item FGHN0056
+    replaced by CFGHN0009. Must be applied at every point a new invoice
+    line's item code gets resolved -- HANA batch-availability queries and
+    the AR invoice payload alike -- otherwise a retired code just returns
+    zero batches from HANA forever and looks like a permanent stock-out
+    instead of a wrong item code. Credit notes don't go through this --
+    they inherit sapItemCode from the base invoice's own already-posted
+    DocumentLines."""
+    return (settings.sku_remap or {}).get(item_code, item_code)
+
+
 def fefo_allocate_from_rows(rows: list[dict], qty_needed: float) -> list[dict]:
     """Allocate qty_needed across already-fetched FEFO rows (must already
     be sorted earliest-expiry-first). Returns SAP BatchNumbers rows, or []
@@ -402,7 +415,7 @@ def _append_sales_line(
     fefo_rows_cache: dict | None = None,
     order_has_paid_line: bool = False,
 ) -> float:
-    item_code = normalize_text(item.get("itemSku"))
+    item_code = resolve_item_code(normalize_text(item.get("itemSku")), settings)
     qty = float(item.get("quantity", 0) or 0)
     unit_price = float(item.get("unitPrice", 0) or 0)
     discount_total = _to_float(item.get("discount"))

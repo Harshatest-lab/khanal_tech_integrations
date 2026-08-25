@@ -37,6 +37,20 @@ these were ported from for the exact semantics each map drives):
                              -- amazon_flex_items.build_sku_map) -- checked before
                              -- the live-order-history map, same override-wins
                              -- precedence as khanal-oms's sku_resolver.py
+  "sku_remap": {"<UC itemSku>": "<current SAP ItemCode>"}
+                             -- for items retired/renamed in SAP (e.g. dead item
+                             -- FGHN0056 replaced by CFGHN0009) while UC's own
+                             -- catalog still reports the old code on order line
+                             -- items. Applied uniformly wherever an item code is
+                             -- resolved for a new invoice line (batch-availability
+                             -- check, HANA prewarm, and the AR invoice payload
+                             -- itself) via sap_payload.resolve_item_code, so a
+                             -- retired code can never look like a real stock-out
+                             -- (querying HANA by a dead ItemCode just returns zero
+                             -- batches forever). Not applied to credit notes --
+                             -- those inherit sapItemCode from the base invoice's
+                             -- own posted DocumentLines, which already carry
+                             -- whatever code the invoice was posted with.
 }
 """
 
@@ -75,6 +89,7 @@ class UnicommerceSettings:
     ec_fg_fefo_fallback: bool = False
     vendor_code: str = "EC-B2C"
     flex_sku_overrides: dict = field(default_factory=dict)
+    sku_remap: dict = field(default_factory=dict)
 
 
 _settings_cache: UnicommerceSettings | None = None
@@ -120,6 +135,7 @@ def _from_dict(data: dict) -> UnicommerceSettings:
         ec_fg_fefo_fallback=bool(data.get("ec_fg_fefo_fallback") or False),
         vendor_code=data.get("vendor_code") or "EC-B2C",
         flex_sku_overrides=data.get("flex_sku_overrides") or {},
+        sku_remap=data.get("sku_remap") or {},
     )
 
 

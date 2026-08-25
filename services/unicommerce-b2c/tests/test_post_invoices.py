@@ -102,3 +102,23 @@ def test_check_batches_ignores_ucs_batch_number_uses_fefo_instead():
     )
     assert result["ok"] is True
     assert result["missing"] == []
+
+
+def test_check_batches_applies_sku_remap_for_retired_items():
+    """A UC line still reporting a SAP-retired itemSku (e.g. FGHN0056,
+    replaced by CFGHN0009) must resolve against the replacement code's
+    own batch/managed caches, not the dead one -- otherwise HANA never
+    has any batches under the old code and it looks like a permanent
+    stock-out instead of a wrong item code."""
+    uc_data = {"items": [{"itemSku": "FGHN0056", "quantity": 2, "warehouseCode": "EC-FG"}]}
+    result = post_invoices._check_batches(
+        uniware_id="SO-2",
+        channel_name="FLIPKART",
+        uc_data=uc_data,
+        settings=UnicommerceSettings(sku_remap={"FGHN0056": "CFGHN0009"}),
+        batch_managed_cache={"CFGHN0009": True},
+        fefo_cache={("CFGHN0009", "EC-FG"): [{"batch_number": "B1", "quantity": 10}]},
+        reservation_ctx=post_invoices.new_reservation_context(),
+    )
+    assert result["ok"] is True
+    assert result["missing"] == []

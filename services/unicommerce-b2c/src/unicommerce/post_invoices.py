@@ -84,6 +84,7 @@ def _prewarm_caches(orders: list[dict], settings) -> tuple[dict, dict]:
                 item_code = str(item.get("itemSku") or "").strip()
                 if not item_code:
                     continue
+                item_code = sap_payload.resolve_item_code(item_code, settings)
                 all_item_codes.add(item_code)
                 sap_wh = sap_payload._resolve_sap_warehouse(settings, channel, item.get("warehouseCode", ""))
                 if sap_wh:
@@ -138,6 +139,7 @@ def _check_batches(
         qty_needed = float(item.get("quantity", 0) or 0)
         if not item_code or qty_needed <= 0:
             continue
+        item_code = sap_payload.resolve_item_code(item_code, settings)
         uc_wh = item.get("warehouseCode", "")
         sap_wh = sap_payload._resolve_sap_warehouse(settings, channel_name, uc_wh)
 
