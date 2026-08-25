@@ -33,7 +33,7 @@ _SRC = Path(__file__).resolve().parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unicommerce import credit_notes, dashboard_queries, fetch_sync, flex_fetch, flex_refunds, infra_status, numatcard_backfill, pogrn, post_invoices, recon, store
+from unicommerce import constants, credit_notes, dashboard_queries, fetch_sync, flex_fetch, flex_refunds, infra_status, numatcard_backfill, pogrn, post_invoices, recon, store
 from unicommerce.alerts import send_alert
 
 # boto3 isn't a declared dev/CI dependency (only present in the real Lambda
@@ -226,7 +226,14 @@ def post_invoices_handler(event, context):
     cooldown for exactly these ids. Resets them to 'ready' with a fresh
     attempt/hold budget, then runs the normal ready-order sweep in
     the same invocation so they get retried immediately instead of
-    waiting for the next cron tick."""
+    waiting for the next cron tick.
+    {"delete_pre_cutoff_ready": true} — one-off cleanup, user-requested
+    2026-08-25: permanently deletes every 'ready' order with order_date
+    before POSTING_CUTOFF_DATE (see store.delete_pre_cutoff_ready_orders
+    -- these can never be posted, get_ready_orders' own cutoff excludes
+    them forever). Returns every deleted row's full data in the response
+    -- the caller must persist that as the only remaining record, since
+    this is irreversible and nothing else keeps a copy once it commits."""
     ev = event or {}
     start_date = ev.get("start_date") or (
         datetime.now(timezone.utc) - timedelta(days=14)
@@ -236,6 +243,9 @@ def post_invoices_handler(event, context):
         with store.connect() as conn:
             if ev.get("uniware_id"):
                 return post_invoices.post_one_order(conn, ev["uniware_id"], force=bool(ev.get("force") or False))
+            if ev.get("delete_pre_cutoff_ready"):
+                deleted = store.delete_pre_cutoff_ready_orders(conn, constants.POSTING_CUTOFF_DATE)
+                return {"deleted_count": len(deleted), "deleted_orders": deleted}
             reset_count = store.reset_dead_orders_for_retry(conn, ev.get("reset_dead_ids") or [])
             sync_mode = "retry_invoices" if (ev.get("trigger") == "manual_retry" or ev.get("reset_dead_ids")) else "post_invoices"
             result = post_invoices.post_ready_orders(

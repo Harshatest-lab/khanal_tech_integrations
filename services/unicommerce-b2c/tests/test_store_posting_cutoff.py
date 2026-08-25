@@ -48,6 +48,42 @@ class _FakeConn:
         return self._cursor
 
 
+class _RecordingCursor:
+    """Records every execute() call (SQL + params) in order, unlike
+    _FakeCursor which only remembers the last one -- delete_pre_cutoff_
+    ready_orders issues a SELECT then up to two DELETEs on the same
+    cursor, and the test needs to see all three."""
+
+    def __init__(self, cols, select_rows):
+        self.description = [_Desc(c) for c in cols]
+        self.calls: list[tuple[str, object]] = []
+        self._select_rows = select_rows
+
+    def execute(self, sql, params=None):
+        self.calls.append((sql, params))
+
+    def fetchall(self):
+        return self._select_rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _RecordingConn:
+    def __init__(self, cols, select_rows):
+        self._cursor = _RecordingCursor(cols, select_rows)
+        self.committed = False
+
+    def cursor(self):
+        return self._cursor
+
+    def commit(self):
+        self.committed = True
+
+
 def test_get_ready_orders_applies_cutoff_as_hard_floor():
     conn = _FakeConn(["uniware_id", "channel_name", "order_date", "order_json", "attempt_count"])
     store.get_ready_orders(conn, limit=10, cutoff_date="2026-08-01")
@@ -84,3 +120,47 @@ def test_get_pending_credit_notes_cutoff_survives_explicit_date_range():
     assert "o.order_date >= %s" in cur.last_sql or "o.order_date BETWEEN %s AND %s" in cur.last_sql
     assert cur.last_params[0] == "2026-08-01"
     assert "2026-05-01" in cur.last_params
+
+
+def test_delete_pre_cutoff_ready_orders_deletes_lines_then_order_and_commits():
+    """Must delete the companion unicommerce_order_lines rows before the
+    unicommerce_orders row itself (same order upsert_order's own refresh
+    uses), scoped by pipeline_status='ready' AND order_date < cutoff on
+    both the select and the final delete, and commit exactly once."""
+    fake_row = ("UC-OLD", "FLIPKART", "ready", "2026-06-04")
+    conn = _RecordingConn(["uniware_id", "channel_name", "pipeline_status", "order_date"], [fake_row])
+
+    result = store.delete_pre_cutoff_ready_orders(conn, "2026-08-01")
+
+    assert result == [{"uniware_id": "UC-OLD", "channel_name": "FLIPKART", "pipeline_status": "ready", "order_date": "2026-06-04"}]
+    calls = conn._cursor.calls
+    assert len(calls) == 3
+
+    select_sql, select_params = calls[0]
+    assert "pipeline_status = 'ready'" in select_sql
+    assert "order_date < %s" in select_sql
+    assert select_params == ("2026-08-01",)
+
+    lines_sql, lines_params = calls[1]
+    assert "unicommerce_order_lines" in lines_sql
+    assert lines_params == (["UC-OLD"],)
+
+    orders_sql, orders_params = calls[2]
+    assert "unicommerce_orders" in orders_sql
+    assert "pipeline_status = 'ready'" in orders_sql
+    assert orders_params == ("2026-08-01",)
+
+    assert conn.committed is True
+
+
+def test_delete_pre_cutoff_ready_orders_skips_deletes_when_nothing_found():
+    """No rows matched -> must not issue either DELETE (the ids=[] guard),
+    but still commits (a no-op transaction is harmless and keeps the
+    connection state consistent with the found-rows path)."""
+    conn = _RecordingConn(["uniware_id", "channel_name", "pipeline_status", "order_date"], [])
+
+    result = store.delete_pre_cutoff_ready_orders(conn, "2026-08-01")
+
+    assert result == []
+    assert len(conn._cursor.calls) == 1
+    assert conn.committed is True

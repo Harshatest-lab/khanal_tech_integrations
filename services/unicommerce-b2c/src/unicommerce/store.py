@@ -367,6 +367,33 @@ def get_ready_orders(
     return rows
 
 
+def delete_pre_cutoff_ready_orders(conn: psycopg.Connection, cutoff_date: str) -> list[dict]:
+    """Permanently deletes 'ready' orders with order_date before
+    cutoff_date (unicommerce.constants.POSTING_CUTOFF_DATE) -- these can
+    never be picked up by get_ready_orders' own cutoff filter and predate
+    the 2026-08-12 legacy-Frappe cutover, so they sit in our table
+    forever as permanently-inert local state, never to post. User
+    explicitly confirmed a hard delete (2026-08-25) over a status-flip
+    archive. Deletes the companion unicommerce_order_lines rows first
+    (same cleanup upsert_order's own refresh does before reinserting),
+    then the order rows, in one transaction. Returns every deleted
+    order's full row -- the caller must persist this externally as the
+    only remaining record, since this is irreversible and nothing else
+    keeps a copy once it commits. cutoff_date is required, not read from
+    settings internally, matching get_ready_orders' own "no caller can
+    accidentally sweep in the wrong window" convention."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM unicommerce_orders WHERE pipeline_status = 'ready' AND order_date < %s", (cutoff_date,))
+        cols = [d.name for d in cur.description]
+        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        ids = [r["uniware_id"] for r in rows]
+        if ids:
+            cur.execute("DELETE FROM unicommerce_order_lines WHERE uniware_id = ANY(%s)", (ids,))
+            cur.execute("DELETE FROM unicommerce_orders WHERE pipeline_status = 'ready' AND order_date < %s", (cutoff_date,))
+    conn.commit()
+    return rows
+
+
 def claim_ready_order(conn: psycopg.Connection, uniware_id: str) -> bool:
     """Atomically move an order from 'ready' to 'posting'. False = another
     worker already claimed it (protects against two concurrent posting
