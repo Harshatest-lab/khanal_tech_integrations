@@ -434,11 +434,37 @@ def _verify_posted_orders(conn, limit: int, settings) -> dict:
     return {"checked": checked, "posted": posted, "requeued": requeued, "dead": dead}
 
 
-def post_one_order(conn, uniware_id: str) -> dict:
+def post_one_order(conn, uniware_id: str, force: bool = False) -> dict:
     """Manual retry path: reset to 'ready' then claim + post through the
     same atomic path the scheduler uses (khanal_tech_integrations PR #1303
     fixed exactly this shortcut being skipped in the Frappe source's
-    equivalent -- reproduce the fix here, not the original bug)."""
+    equivalent -- reproduce the fix here, not the original bug).
+
+    Enforces constants.POSTING_CUTOFF_DATE the same as the scheduled
+    cron's get_ready_orders -- this was the one gap in that guard: a
+    manual/scripted retry loop over a list of uniware_ids (e.g. the
+    2026-08-19 DocEntry-corruption remediation) had no date filter here
+    at all, so 3 real orders from April/June/July got posted weeks-to-
+    months late, into already-closed accounting periods (confirmed real
+    2026-08-25). force=True is an explicit, conscious override for a
+    future remediation that genuinely needs to post a pre-cutoff order
+    -- never the default."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT uniware_id, channel_name, order_date, order_json, attempt_count FROM unicommerce_orders WHERE uniware_id = %s", (uniware_id,))
+        cols = [d.name for d in cur.description]
+        r = cur.fetchone()
+        row = dict(zip(cols, r)) if r else None
+    if row is None:
+        return {"status": "not_found", "uniware_id": uniware_id}
+
+    order_date = row.get("order_date")
+    order_date_str = order_date.isoformat() if hasattr(order_date, "isoformat") else str(order_date)
+    if not force and order_date_str < constants.POSTING_CUTOFF_DATE:
+        return {
+            "status": "pre_cutoff_blocked", "uniware_id": uniware_id,
+            "order_date": order_date_str, "cutoff_date": constants.POSTING_CUTOFF_DATE,
+        }
+
     settings = get_settings(force_reload=True)
 
     series_ok, series_msg = sap_client.validate_active_series(settings)
@@ -449,14 +475,6 @@ def post_one_order(conn, uniware_id: str) -> dict:
     store.unclaim_order(conn, uniware_id, "ready")
     if not store.claim_ready_order(conn, uniware_id):
         return {"status": "already_claimed", "uniware_id": uniware_id}
-
-    with conn.cursor() as cur:
-        cur.execute("SELECT uniware_id, channel_name, order_date, order_json, attempt_count FROM unicommerce_orders WHERE uniware_id = %s", (uniware_id,))
-        cols = [d.name for d in cur.description]
-        r = cur.fetchone()
-        row = dict(zip(cols, r)) if r else None
-    if row is None:
-        return {"status": "not_found", "uniware_id": uniware_id}
 
     batch_managed_cache, fefo_cache = _prewarm_caches([row], settings)
     reservation_ctx = new_reservation_context()

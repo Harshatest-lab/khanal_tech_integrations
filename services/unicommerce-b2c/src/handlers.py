@@ -211,7 +211,10 @@ def post_invoices_handler(event, context):
     new orders. The old backlog still gets swept by any manual Ops Center
     run with an explicit start_date -- this only changes the unscoped
     scheduled-cron default.
-    {"uniware_id": str} — manual single-order retry, bypassing the limit.
+    {"uniware_id": str, "force": bool?} — manual single-order retry,
+    bypassing the limit. Enforces POSTING_CUTOFF_DATE same as the
+    scheduled cron unless force=true is explicitly passed (see
+    post_invoices.post_one_order's docstring for why this guard exists).
     {"trigger": "manual_retry"} — set by dashboard_handler's async invoke;
     logs to unicommerce_sync_log as "retry_invoices" instead of
     "post_invoices" so the dashboard's sync-log panel can tell a manual
@@ -232,7 +235,7 @@ def post_invoices_handler(event, context):
     def _go():
         with store.connect() as conn:
             if ev.get("uniware_id"):
-                return post_invoices.post_one_order(conn, ev["uniware_id"])
+                return post_invoices.post_one_order(conn, ev["uniware_id"], force=bool(ev.get("force") or False))
             reset_count = store.reset_dead_orders_for_retry(conn, ev.get("reset_dead_ids") or [])
             sync_mode = "retry_invoices" if (ev.get("trigger") == "manual_retry" or ev.get("reset_dead_ids")) else "post_invoices"
             result = post_invoices.post_ready_orders(

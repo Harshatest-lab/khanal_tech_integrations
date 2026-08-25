@@ -8,6 +8,7 @@ the full posting pipeline)."""
 from __future__ import annotations
 
 import sys
+import types
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -151,3 +152,76 @@ def test_check_batches_expands_sku_remap_to_cfg_bundle(monkeypatch):
     )
     assert result["ok"] is True
     assert result["missing"] == []
+
+
+class _FakeCursor:
+    def __init__(self, row):
+        self._row = row
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, *a, **k):
+        pass
+
+    @property
+    def description(self):
+        return [types.SimpleNamespace(name=n) for n in ("uniware_id", "channel_name", "order_date", "order_json", "attempt_count")]
+
+    def fetchone(self):
+        return self._row
+
+
+class _FakeConn:
+    def __init__(self, row):
+        self._row = row
+
+    def cursor(self):
+        return _FakeCursor(self._row)
+
+
+def test_post_one_order_blocks_pre_cutoff_orders_by_default(monkeypatch):
+    """post_one_order was the one gap POSTING_CUTOFF_DATE didn't cover --
+    confirmed real 2026-08-25: a manual retry loop with no date filter on
+    its list of uniware_ids posted 3 real orders from April/June/July
+    into already-closed accounting periods. Must refuse by default, and
+    never touch the series-guard/claim state while refusing -- no side
+    effects from a blocked call."""
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("must not proceed past the cutoff check")
+
+    monkeypatch.setattr(post_invoices.sap_client, "validate_active_series", fail_if_called)
+    monkeypatch.setattr(post_invoices.store, "unclaim_order", fail_if_called)
+    monkeypatch.setattr(post_invoices.store, "claim_ready_order", fail_if_called)
+
+    row = ("UC-OLD", "FLIPKART", "2026-06-04", "{}", 0)
+    result = post_invoices.post_one_order(_FakeConn(row), "UC-OLD")
+
+    assert result["status"] == "pre_cutoff_blocked"
+    assert result["order_date"] == "2026-06-04"
+    assert result["cutoff_date"] == constants.POSTING_CUTOFF_DATE
+
+
+def test_post_one_order_force_bypasses_cutoff(monkeypatch):
+    """force=True is the explicit override for a future remediation that
+    genuinely needs to post a pre-cutoff order -- confirms the check is
+    actually skipped (reaches the series guard) rather than just always
+    blocking."""
+    calls = {}
+
+    def fake_validate(settings):
+        calls["reached_series_guard"] = True
+        return False, "forced-early-exit-for-test"
+
+    monkeypatch.setattr(post_invoices.sap_client, "validate_active_series", fake_validate)
+    monkeypatch.setattr(post_invoices, "get_settings", lambda **kw: object())
+
+    row = ("UC-OLD", "FLIPKART", "2026-06-04", "{}", 0)
+    result = post_invoices.post_one_order(_FakeConn(row), "UC-OLD", force=True)
+
+    assert calls.get("reached_series_guard") is True
+    assert result["status"] == "series_guard_failed"
