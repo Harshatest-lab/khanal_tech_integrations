@@ -299,61 +299,6 @@ def post_credit_notes_handler(event, context):
     return _run("post_credit_notes", _go)
 
 
-def admin_debug_cn_mismatch_handler(event, context):
-    """TEMPORARY, invoke-only, read-only. {"uc_return_id": str} -- diffs
-    our locally-cached invoice payload_json against the live SAP invoice
-    (GET by DocEntry) for the return's parent order, to root-cause the
-    2026-08 batch of credit notes dead on SAP -5002 ("Base document card
-    and target document card do not match" / "Target item number does
-    not match base item number"). Remove once that investigation is
-    done -- same lifecycle as the 2026-08-19 DocEntry-corruption debug
-    Lambdas this is modeled on (see git history / PR #98 for the
-    removal precedent)."""
-    from unicommerce import sap_client
-
-    ev = event or {}
-    uc_return_id = ev.get("uc_return_id")
-    if not uc_return_id:
-        return {"error": "uc_return_id is required"}
-
-    def _go():
-        with store.connect() as conn:
-            cn = store.get_cn(conn, uc_return_id)
-            if cn is None:
-                return {"error": "cn not found", "uc_return_id": uc_return_id}
-            parent = store.get_order(conn, cn["uc_order_id"]) if cn.get("uc_order_id") else None
-            if not parent or not parent.get("sap_ar_invoice_docentry"):
-                return {"error": "parent order or its DocEntry not found", "cn": cn}
-
-            doc_entry = int(parent["sap_ar_invoice_docentry"])
-            local_payload = json.loads(parent.get("payload_json") or "{}") if isinstance(parent.get("payload_json"), str) else (parent.get("payload_json") or {})
-            local_lines = [
-                {"LineNum": l.get("LineNum"), "ItemCode": l.get("ItemCode")}
-                for l in (local_payload.get("DocumentLines") or [])
-            ]
-
-            live = sap_client.get_invoice_by_doc_entry(doc_entry)
-            live_lines = [
-                {"LineNum": l.get("LineNum"), "ItemCode": l.get("ItemCode")}
-                for l in (live.get("DocumentLines") or [])
-            ]
-
-            return {
-                "uc_return_id": uc_return_id,
-                "uc_order_id": cn.get("uc_order_id"),
-                "doc_entry": doc_entry,
-                "local_card_code": local_payload.get("CardCode"),
-                "live_card_code": live.get("CardCode"),
-                "card_code_matches": local_payload.get("CardCode") == live.get("CardCode"),
-                "local_lines": local_lines,
-                "live_lines": live_lines,
-                "lines_match": local_lines == live_lines,
-                "cn_items": cn.get("items"),
-            }
-
-    return _run("admin_debug_cn_mismatch", _go)
-
-
 def pogrn_handler(event, context):
     """{"limit": 20?, "dry_run": bool?} — bulk run (poll SAP transfers ->
     stage -> claim -> create UC PO+GRN). {"sap_doc_entry": int, "dry_run":
