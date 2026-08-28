@@ -61,15 +61,17 @@ when someone noticed a miss). This port fixes that instead of inheriting it:
   backlog. Doesn't process anything itself; the next scheduled `poll` runs
   work it down like any other backlog.
 
-## Open item, unverified against real data
+## Resolved: series_name join (was OSRI, is NNM1)
 
-`hana_candidates.py`'s `OINV` → `OSRI` join to resolve a `series_name`
-prefix (e.g. `KAIN24`) has **not** been checked against real HANA data —
-the legacy pipeline populated this field through a path this port didn't
-fully trace. If the join doesn't resolve a name, `client.py` falls back to
-trying every prefix in `config.INVOICE_SERIES_PREFIXES`, so correctness
-doesn't depend on the join working — but it's worth confirming during dev
-testing, since a broken join means every candidate takes the slow path.
+`hana_candidates.py`'s `OINV` → series-master join originally targeted
+`OSRI` (guessed, ported from a not-fully-traced legacy path) — the first
+real prod invoke (2026-08-28, `days=1`) failed outright with `invalid
+column name: T1.Series`, since OSRI isn't SAP B1's numbering-series table
+at all. Fixed to join `NNM1` (`ObjectCode='13'` for A/R Invoices) instead,
+verified against real prod HANA data: every `Series` value real `OINV`
+rows use resolves to exactly one `NNM1` row. `client.py`'s
+prefix-fallback (`config.INVOICE_SERIES_PREFIXES`) is now effectively a
+safety net for future series years, not the common path.
 
 ## Setup before first dev run
 

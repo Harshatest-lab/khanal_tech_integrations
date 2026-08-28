@@ -16,7 +16,12 @@ from dataclasses import dataclass
 
 from khanal_shared.hana.pool import hana_connection
 
-from .config import NON_SAFEXPRESS_TRANSPORTERS, SAP_TRANSPORTATION_CODE_SAFEXPRESS
+from .config import (
+    NON_SAFEXPRESS_TRANSPORTERS,
+    SAP_FIELD_TRANSPORTATION_CODE,
+    SAP_OBJECT_CODE_INVOICES,
+    SAP_TRANSPORTATION_CODE_SAFEXPRESS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +35,14 @@ class InvoiceCandidate:
 
 
 def _run_candidate_query(days: int | None) -> list[InvoiceCandidate]:
-    """AR invoices (OINV) marked for SafeExpress (TransportationCode = 1)
-    with no tracking number yet (U_TrackingNo empty/null), excluding known
-    non-SafeExpress transporters that share the same TransportationCode
-    (see config.NON_SAFEXPRESS_TRANSPORTERS — this replaces the legacy
-    code's local transporter_type column check, querying U_TN directly
-    instead).
+    """AR invoices (OINV) marked for SafeExpress (TrnspCode = 1, SAP B1's
+    real column — config.SAP_FIELD_TRANSPORTATION_CODE, verified 2026-08-28
+    against prod OINV; the legacy pipeline's own "TransportationCode" name
+    doesn't exist on this schema) with no tracking number yet
+    (U_TrackingNo empty/null), excluding known non-SafeExpress transporters
+    that share the same TrnspCode (see config.NON_SAFEXPRESS_TRANSPORTERS —
+    this replaces the legacy code's local transporter_type column check,
+    querying U_TN directly instead).
 
     `days=None` runs unbounded (no UpdateDate filter at all) — used once
     for the go-live backfill. `days=N` adds a rolling `UpdateDate >=
@@ -49,15 +56,15 @@ def _run_candidate_query(days: int | None) -> list[InvoiceCandidate]:
     query = f"""
         SELECT T0."DocEntry", T0."DocNum", T1."SeriesName", T0."UpdateDate"
         FROM "OINV" T0
-        LEFT JOIN "OSRI" T1 ON T0."Series" = T1."Series"
+        LEFT JOIN "NNM1" T1 ON T0."Series" = T1."Series" AND T1."ObjectCode" = ?
         WHERE T0."CANCELED" = 'N'
-          AND T0."TransportationCode" = ?
+          AND T0."{SAP_FIELD_TRANSPORTATION_CODE}" = ?
           AND (T0."U_TrackingNo" IS NULL OR TRIM(T0."U_TrackingNo") = '')
           AND (T0."U_TN" IS NULL OR T0."U_TN" NOT IN ({exclude_placeholders}))
           {date_clause}
         ORDER BY T0."DocEntry" DESC
     """
-    params: list = [SAP_TRANSPORTATION_CODE_SAFEXPRESS, *NON_SAFEXPRESS_TRANSPORTERS]
+    params: list = [SAP_OBJECT_CODE_INVOICES, SAP_TRANSPORTATION_CODE_SAFEXPRESS, *NON_SAFEXPRESS_TRANSPORTERS]
     if days is not None:
         params.append(-int(days))
 

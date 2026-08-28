@@ -16,17 +16,25 @@ POD_S3_UPLOAD_URL = "https://tg31l9q380.execute-api.us-west-1.amazonaws.com/dev/
 POD_S3_BUCKET_URL = "https://khanalfoods-fileupload-bucket.s3.us-west-1.amazonaws.com/"
 
 # Invoice series prefixes SafeExpress invoice numbers are formatted with
-# ("KAIN24/12345" etc) — ported from safexpress2/config.py. Used as a
-# fallback when the HANA series-name join (hana_candidates.py) doesn't
-# resolve a prefix for a given DocEntry.
+# ("KAIN24/12345" etc). Refreshed 2026-08-28 from real prod HANA data
+# (every NNM1 series real OINV rows actually use, ObjectCode='13') once
+# the series-name join was fixed (see SAP_OBJECT_CODE_INVOICES below) —
+# now mostly a safety net for a future series year the join hasn't seen
+# yet, not the common path.
 INVOICE_SERIES_PREFIXES: list[str] = [
-    "KAIN24", "KAIN25",
-    "AR2024", "AR2025",
-    "HRIN24", "HRIN25",
-    "MHIN24", "MHIN25",
-    "KAIN23", "AR2023", "HRIN23", "MHIN23",
+    "AR2022", "KAIN22", "MHIN22", "HRIN22",
+    "AR2023", "KAIN23", "MHIN23", "INTSER22", "INTSER23", "KAB2C23", "KASER23", "INTL23",
+    "KAIN24", "KAB2C24", "KASER24", "INTL24",
+    "KAIN25", "INTSER25", "KAB2C25", "HRB2C25", "MHB2C25", "INTL25", "TNB2C25",
+    "INTSER26", "KAIN26", "TNB2C26", "INTL26", "MHB2C26", "HRB2C26", "KAB2C26", "AR2026",
     "Manual",
 ]
+
+# SAP NNM1 (numbering series master) ObjectCode for A/R Invoices — used to
+# scope the OINV->NNM1 series_name join (hana_candidates.py) to invoice
+# series only, avoiding any ambiguity if a Series number is ever reused by
+# a different document type. Verified 2026-08-28 against real prod data.
+SAP_OBJECT_CODE_INVOICES = "13"
 
 # SAP TransportationCode values, ported from
 # khanal_tech_integrations/utils/safexpress/automated_invoice_attach.py's
@@ -55,7 +63,10 @@ SAP_FIELD_TRANSPORTER_NAME = "U_TN"
 SAP_FIELD_TRACKING_NUMBER = "U_TrackingNo"
 SAP_FIELD_POD_LINK = "U_Pod_Link"
 SAP_FIELD_POD_DATE = "U_POD_DATE"
-SAP_FIELD_TRANSPORTATION_CODE = "TransportationCode"
+# Real column verified 2026-08-28 against prod OINV (SYS.TABLE_COLUMNS) —
+# "TransportationCode" (the legacy pipeline's own field name) doesn't
+# exist on this schema; SAP B1's actual header field is "TrnspCode".
+SAP_FIELD_TRANSPORTATION_CODE = "TrnspCode"
 
 DOC_TYPE_INVOICE = "INV"
 DOC_TYPE_WAYBILL = "WB"
