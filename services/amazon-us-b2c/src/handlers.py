@@ -989,6 +989,31 @@ def dashboard_handler(event, context):
                     "earliest_posted_at_above_threshold": str(row[5]) if row[5] else None,
                 })
 
+            if path.endswith("/v1/amazon/debug-order-total-drift-scope"):
+                # Lists amazon_order_ids whose cached order_total_amount no
+                # longer matches the live sum of their own order_lines --
+                # the pre-2026-08-28 header-drift bug (see
+                # store.upsert_order / store.backfill_order_totals). Feeds
+                # directly into amazonPostInvoices' backfill_order_totals
+                # mode's amazon_order_ids list.
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT o.amazon_order_id
+                        FROM amazon_us_orders o
+                        JOIN (
+                          SELECT amazon_order_id,
+                                 SUM(item_price_amount + item_tax_amount + shipping_price_amount + shipping_tax_amount) AS total
+                          FROM amazon_us_order_lines
+                          GROUP BY amazon_order_id
+                        ) sub ON sub.amazon_order_id = o.amazon_order_id
+                        WHERE ABS(o.order_total_amount - sub.total) > 0.01
+                        ORDER BY o.amazon_order_id
+                        """
+                    )
+                    ids = [r[0] for r in cur.fetchall()]
+                return _json_response(200, {"count": len(ids), "amazon_order_ids": ids})
+
             if path.endswith("/v1/amazon/debug-low-docentry-sample"):
                 # Sample of "posted" orders whose sap_doc_entry falls within
                 # the live SAP company's real range (<= threshold) -- these
