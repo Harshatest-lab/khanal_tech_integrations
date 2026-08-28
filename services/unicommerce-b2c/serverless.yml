@@ -376,6 +376,14 @@ functions:
           rate: cron(7,37 * * * ? *)
           enabled: ${self:custom.currentSchedulesEnabled}
 
+  # TEMPORARY -- invoke-only, read-only, no schedule/httpApi route. Built
+  # 2026-08-28 to inspect orphaned Credit Notes (DocEntry 12717-12732)
+  # created by dead-CN retries that all hit the response-verification
+  # guard's U_UCReturnID=None case. Remove once done.
+  unicommerceAdminDebugGetCn:
+    handler: src.handlers.admin_debug_get_cn_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+
   unicommercePostCreditNotes:
     handler: src.handlers.post_credit_notes_handler
     layers: [{ Ref: SharedLambdaLayer }]

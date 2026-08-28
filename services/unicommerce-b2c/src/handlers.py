@@ -272,6 +272,31 @@ def post_invoices_handler(event, context):
     return _run("post_invoices", _go)
 
 
+def admin_debug_get_cn_handler(event, context):
+    """TEMPORARY, invoke-only, read-only. {"doc_entry": int} -- GETs a
+    live SAP Credit Note by DocEntry, raw. Built 2026-08-28 to inspect
+    the orphaned Credit Notes (DocEntry 12717-12732) created when 12
+    dead-CN retries all hit the 2026-08-19 response-verification guard
+    (credit_notes.py's U_UCReturnID check, PR from the DocEntry
+    cross-attribution incident) -- every retry's POST response came back
+    with U_UCReturnID=None, so nothing got recorded locally even though
+    SAP assigned a real, incrementing DocEntry each time. This checks
+    whether SAP actually persisted the field (a GET-vs-POST-response
+    discrepancy) or never registered it at all for Credit Notes. Remove
+    once this investigation is done."""
+    from unicommerce import sap_client
+
+    ev = event or {}
+    doc_entry = ev.get("doc_entry")
+    if not doc_entry:
+        return {"error": "doc_entry is required"}
+
+    def _go():
+        return sap_client.get_credit_note_by_doc_entry(int(doc_entry))
+
+    return _run("admin_debug_get_cn", _go)
+
+
 def post_credit_notes_handler(event, context):
     """{"limit": 50?, "start_date": "YYYY-MM-DD"?, "end_date": "YYYY-MM-DD"?,
     "channel_name": str?} — bulk posting run, date range keys off the
