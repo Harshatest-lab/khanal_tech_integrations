@@ -375,6 +375,13 @@ def post_invoices_handler(event, context):
                     }
                 cur.close()
             return out
+        if ev.get("mode") == "force_requeue_and_post":
+            # Manual ops helper: requeue exactly these order ids from
+            # failed -> ready regardless of attempt_count, then post them.
+            # Scoped to the explicit id list; never sweeps other orders.
+            order_ids = ev.get("amazon_order_ids") or []
+            with store.connect() as conn:
+                return post_invoices.force_requeue_and_post(conn, order_ids)
         with store.connect() as conn:
             if ev.get("amazon_order_id"):
                 return post_invoices.post_one_order(
