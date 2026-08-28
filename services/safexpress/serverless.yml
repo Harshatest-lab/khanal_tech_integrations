@@ -1,0 +1,128 @@
+service: safexpress
+
+frameworkVersion: "3"
+
+provider:
+  name: aws
+  runtime: python3.12
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'ap-south-1'}
+  memorySize: 512
+  timeout: 900
+  iam:
+    role:
+      statements:
+        # SafeExpress API credentials + cached OAuth token.
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+          Resource:
+            - arn:aws:ssm:${self:provider.region}:*:parameter/safexpress/credentials
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+            - ssm:PutParameter
+          Resource:
+            - arn:aws:ssm:${self:provider.region}:*:parameter/safexpress/token
+        # SAP HANA read-only (candidate query) + Service Layer write (PATCH
+        # invoices/delivery notes) — stage-keyed prefix, same pattern as
+        # amazon-us-b2c/unicommerce-b2c: "dev" stays pinned to a TEST
+        # company forever, "prod" resolves to the real one.
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+          Resource:
+            - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.currentHanaPrefix}/hana_config
+            - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.currentHanaPrefix}/hana_credentials
+            - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.currentSlPrefix}/sl_config
+            - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.currentSlPrefix}/credentials
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+            - ssm:PutParameter
+          Resource:
+            - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.currentSlPrefix}/b1_session
+  environment:
+    STAGE: ${self:provider.stage}
+    LOG_LEVEL: ${env:LOG_LEVEL, 'INFO'}
+    # Dedicated database (safexpress_prod on khanal-db-prod), not the
+    # shared khanal_serverless/DATABASE_URL pattern — see
+    # docs/architecture/PLATFORM_ARCHITECTURE.md §5. "dev" falls back to
+    # the shared DATABASE_URL secret (own schema/isolation TBD when dev
+    # testing starts) until a dedicated dev database is worth creating.
+    DATABASE_URL: ${self:custom.currentDatabaseUrl}
+    SAP_SL_USE_SSM: ${env:SAP_SL_USE_SSM, 'true'}
+    SAP_SL_VERIFY_SSL: ${env:SAP_SL_VERIFY_SSL, 'true'}
+    SAP_SL_PROFILE: ${self:custom.currentSlProfile}
+    HANA_USE_SSM: ${env:HANA_USE_SSM, '1'}
+    HANA_PROFILE: ${self:custom.currentHanaProfile}
+    SAFEXPRESS_CREDENTIALS_PARAM: ${env:SAFEXPRESS_CREDENTIALS_PARAM, '/safexpress/credentials'}
+    SAFEXPRESS_TOKEN_PARAM: ${env:SAFEXPRESS_TOKEN_PARAM, '/safexpress/token'}
+
+custom:
+  databaseUrlByStage:
+    prod: ${env:SAFEXPRESS_PROD_DATABASE_URL, env:DATABASE_URL, ''}
+  currentDatabaseUrl: ${self:custom.databaseUrlByStage.${self:provider.stage}, env:DATABASE_URL, ''}
+  # Mirrors amazon-us-b2c/unicommerce-b2c: dev pinned to a TEST company
+  # forever, prod resolves to the real one — never silently defaults to
+  # touching live SAP from dev.
+  slProfileByStage:
+    dev: india_test
+    prod: unicommerce
+  currentSlProfile: ${self:custom.slProfileByStage.${self:provider.stage}, 'india_test'}
+  slPrefixByStage:
+    dev: /sap/india_test
+    prod: /sap/unicommerce
+  currentSlPrefix: ${self:custom.slPrefixByStage.${self:provider.stage}, '/sap/india_test'}
+  hanaProfileByStage:
+    dev: india_test
+    prod: unicommerce
+  currentHanaProfile: ${self:custom.hanaProfileByStage.${self:provider.stage}, 'india_test'}
+  hanaPrefixByStage:
+    dev: /sap/india_test
+    prod: /sap/unicommerce
+  currentHanaPrefix: ${self:custom.hanaPrefixByStage.${self:provider.stage}, '/sap/india_test'}
+  # Schedules stay off on every stage until dev testing against the TEST
+  # SAP company has verified the HANA candidate query and SafeExpress
+  # calls — same dual-run-safe default every other cutover in this repo
+  # uses.
+  scheduleEnabledByStage:
+    dev: false
+    prod: false
+  currentScheduleEnabled: ${self:custom.scheduleEnabledByStage.${self:provider.stage}, false}
+
+layers:
+  shared:
+    name: ${self:service}-${self:provider.stage}-shared
+    path: ../../layers/build
+    package:
+      patterns:
+        - "python/**"
+    compatibleRuntimes:
+      - python3.12
+
+package:
+  patterns:
+    - "!**"
+    - "src/**"
+    - "!src/safexpress/credentials_local.py"
+    - "!**/__pycache__/**"
+    - "!**/*.pyc"
+
+functions:
+  safexpressTrack:
+    handler: src.handlers.track_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+    # Same reasoning as amazon-us-b2c's scheduled functions: a stuck run
+    # should wait for its next natural schedule, not get concurrent
+    # auto-retries stacking onto the same external API.
+    maximumRetryAttempts: 0
+    events:
+      - schedule:
+          rate: cron(20 */3 * * ? *)   # every 3h, same cadence as the legacy Frappe cron
+          enabled: ${self:custom.currentScheduleEnabled}
+          input: { mode: poll }
+      - schedule:
+          rate: cron(50 5 * * ? *)     # daily retry sweep for pending_sap rows
+          enabled: ${self:custom.currentScheduleEnabled}
+          input: { mode: retry_pending_sap }

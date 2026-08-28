@@ -1,0 +1,7 @@
+{
+  "name": "safexpress",
+  "private": true,
+  "devDependencies": {
+    "serverless": "^3.39.0"
+  }
+}
