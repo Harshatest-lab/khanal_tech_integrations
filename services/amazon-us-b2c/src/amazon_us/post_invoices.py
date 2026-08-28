@@ -190,35 +190,42 @@ def force_requeue_and_post(conn, amazon_order_ids: list[str]) -> dict:
     each one individually via post_one_order. Scoped to the explicit id
     list only -- never sweeps other failed orders. Use after a root-cause
     fix (e.g. stock replenished) to clear orders the auto-retry cron has
-    given up on."""
+    given up on. Logs to amazon_us_sync_log (mode "force_requeue") same as
+    every other run type, so Sync History shows manual interventions too."""
+    run_id = store.start_sync_log(conn, "force_requeue")
     mapping = store.get_sku_mapping(conn)
     results: dict[str, dict] = {}
     counts = {"requeued": 0, "posted": 0, "recovered": 0, "failed": 0, "skipped": 0, "not_failed": 0}
 
-    for oid in amazon_order_ids:
-        if store.get_order_stage(conn, oid) != "failed":
-            counts["not_failed"] += 1
-            results[oid] = {"status": "skipped", "reason": "not in failed stage"}
-            continue
-        if not store.claim(conn, oid, "failed", "ready"):
-            counts["not_failed"] += 1
-            results[oid] = {"status": "skipped", "reason": "claim failed (concurrent worker)"}
-            continue
-        counts["requeued"] += 1
+    try:
+        for oid in amazon_order_ids:
+            if store.get_order_stage(conn, oid) != "failed":
+                counts["not_failed"] += 1
+                results[oid] = {"status": "skipped", "reason": "not in failed stage"}
+                continue
+            if not store.claim(conn, oid, "failed", "ready"):
+                counts["not_failed"] += 1
+                results[oid] = {"status": "skipped", "reason": "claim failed (concurrent worker)"}
+                continue
+            counts["requeued"] += 1
 
-        order = store.get_order(conn, oid)
-        if not store.claim(conn, oid, "ready", "posting"):
-            results[oid] = {"status": "skipped", "reason": "claim failed after requeue"}
-            counts["skipped"] += 1
-            continue
+            order = store.get_order(conn, oid)
+            if not store.claim(conn, oid, "ready", "posting"):
+                results[oid] = {"status": "skipped", "reason": "claim failed after requeue"}
+                counts["skipped"] += 1
+                continue
 
-        one_counts = {"posted": 0, "recovered": 0, "failed": 0, "skipped": 0}
-        _post_one_claimed(conn, order, mapping, one_counts)
-        for k in ("posted", "recovered", "failed", "skipped"):
-            counts[k] += one_counts[k]
-        outcome = next((k for k in ("posted", "recovered", "failed", "skipped") if one_counts[k]), "skipped")
-        results[oid] = {"status": outcome}
+            one_counts = {"posted": 0, "recovered": 0, "failed": 0, "skipped": 0}
+            _post_one_claimed(conn, order, mapping, one_counts)
+            for k in ("posted", "recovered", "failed", "skipped"):
+                counts[k] += one_counts[k]
+            outcome = next((k for k in ("posted", "recovered", "failed", "skipped") if one_counts[k]), "skipped")
+            results[oid] = {"status": outcome}
+    except Exception as e:
+        store.finish_sync_log(conn, run_id, "error", counts, error=str(e))
+        raise
 
+    store.finish_sync_log(conn, run_id, "success", counts)
     return {"status": "done", "counts": counts, "orders": results}
 
 
