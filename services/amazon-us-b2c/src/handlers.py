@@ -750,9 +750,14 @@ def post_credit_notes_handler(event, context):
 
 
 def recon_handler(event, context):
-    """modes: invariants (default) | mtr | close_stuck_run.
+    """modes: invariants (default) | mtr | close_stuck_run | revenue_drift.
     mtr event: {"mode": "mtr", "s3_bucket": ..., "s3_key": ...,
     "period_from": "YYYY-MM-DD", "period_to": "YYYY-MM-DD"}.
+    revenue_drift event: {"mode": "revenue_drift", "from_date": "YYYY-MM-DD",
+    "to_date": "YYYY-MM-DD"} -- API-vs-SAP revenue reconciliation: sums
+    order_total_amount (Amazon API, what we posted from) against SAP's
+    live DocTotal for every posted order in the ship-date window. Ops
+    tooling, not on any schedule.
     close_stuck_run event: {"mode": "close_stuck_run", "run_id": int,
     "status": "error"?, "error": str?} -- a handler that dies via hard
     timeout (Sandbox.Timedout) never reaches finish_sync_log, leaving its
@@ -764,6 +769,8 @@ def recon_handler(event, context):
         with store.connect() as conn:
             if mode == "invariants":
                 return recon.run_invariants(conn)
+            if mode == "revenue_drift":
+                return recon.check_revenue_drift(conn, event["from_date"], event["to_date"])
             if mode == "mtr":
                 return recon.run_mtr_recon(
                     conn, event["s3_bucket"], event["s3_key"], event["period_from"], event["period_to"]

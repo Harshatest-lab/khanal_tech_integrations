@@ -102,6 +102,61 @@ def check_docdate_drift(conn, from_date: str, to_date: str) -> list[dict]:
     return drifted
 
 
+def check_revenue_drift(conn, from_date: str, to_date: str) -> dict:
+    """API-vs-SAP revenue reconciliation for a ship-date window: for every
+    posted order, compare our locally-recorded order_total_amount (the
+    Amazon API's own figure, what the invoice payload was built from)
+    against the live DocTotal SAP actually has for that DocEntry today.
+    Same bulk-query shape as check_docdate_drift -- one HANA round trip
+    per 500 orders, not one call per order. A real drift here would mean
+    either a post-posting manual SAP edit, or a bug in payload building;
+    by construction these should always agree -- this is the check that
+    proves it rather than assumes it."""
+    from khanal_shared.hana.pool import hana_connection
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT amazon_order_id, order_total_amount, sap_doc_entry
+            FROM amazon_us_orders
+            WHERE stage = 'posted' AND sap_doc_entry IS NOT NULL
+              AND actual_ship_date BETWEEN %s::date AND %s::date
+            """,
+            (from_date, to_date),
+        )
+        by_entry = {int(doc_entry): (oid, float(total)) for oid, total, doc_entry in cur.fetchall()}
+
+    result = {"orders_checked": len(by_entry), "local_total": 0.0, "sap_total": 0.0, "mismatches": []}
+    if not by_entry:
+        return result
+
+    entries = list(by_entry.keys())
+    with hana_connection() as hconn:
+        cur = hconn.cursor()
+        for i in range(0, len(entries), 500):
+            chunk = entries[i:i + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            cur.execute(f'SELECT "DocEntry", "DocTotal" FROM "OINV" WHERE "DocEntry" IN ({placeholders})', chunk)
+            for doc_entry, doc_total in cur.fetchall() or []:
+                oid, local_total = by_entry[int(doc_entry)]
+                doc_total = float(doc_total)
+                result["local_total"] += local_total
+                result["sap_total"] += doc_total
+                if abs(doc_total - local_total) > _AMOUNT_TOLERANCE:
+                    result["mismatches"].append({
+                        "amazon_order_id": oid,
+                        "local_order_total_amount": local_total,
+                        "sap_doc_total": doc_total,
+                        "diff": round(doc_total - local_total, 2),
+                        "sap_doc_entry": doc_entry,
+                    })
+        cur.close()
+    result["local_total"] = round(result["local_total"], 2)
+    result["sap_total"] = round(result["sap_total"], 2)
+    result["diff"] = round(result["sap_total"] - result["local_total"], 2)
+    return result
+
+
 def run_invariants(conn) -> dict:
     run_id = store.start_sync_log(conn, "recon")
     try:
