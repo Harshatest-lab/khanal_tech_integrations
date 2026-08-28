@@ -111,14 +111,24 @@ def resume_fba_reports(conn, poll_budget: int = _RESUME_POLL_BUDGET_SEC) -> dict
     """Finish any FBA-report jobs sync_ship_dates deferred because Amazon's
     queue wasn't done within the poll budget. Same pattern as
     fetch_sync.resume_orders_reports -- never re-requests a pending
-    report, just checks whether it's ready yet."""
+    report, just checks whether it's ready yet.
+
+    Logs to amazon_us_sync_log (mode "resume_fba") even when there's
+    nothing pending -- without this, a deferred report's real
+    parsed/updated counts (which can take several cycles to land) never
+    showed anywhere: only sync_ship_dates' own immediate 0/0 entry did,
+    making an FBA sync that's actually working look completely dead."""
     if not store.try_acquire_lock(conn, store.REPORTS_API_LOCK):
         return {"status": "skipped", "reason": "locked"}
+    run_id = store.start_sync_log(conn, "resume_fba")
     try:
         pending = store.list_pending_reports(conn, "fba_report")
         if not pending:
-            return {"status": "success", "resumed": 0, "still_pending": 0}
+            result = {"status": "success", "resumed": 0, "still_pending": 0}
+            store.finish_sync_log(conn, run_id, "success", result)
+            return result
 
+        totals = {"parsed": 0, "updated": 0}
         resumed, still_pending = 0, 0
         for row in pending:
             try:
@@ -127,13 +137,21 @@ def resume_fba_reports(conn, poll_budget: int = _RESUME_POLL_BUDGET_SEC) -> dict
                 still_pending += 1
                 continue
             content = reports_api.download_report(doc_id)
-            _process_fba_report(conn, content)
+            one = _process_fba_report(conn, content)
+            totals["parsed"] += one["parsed"]
+            totals["updated"] += one["updated"]
             store.finish_pending_report(conn, row["id"], "done")
             resumed += 1
 
-        return {"status": "success", "resumed": resumed, "still_pending": still_pending}
+        result = {"status": "success", "resumed": resumed, "still_pending": still_pending, **totals}
+        store.finish_sync_log(conn, run_id, "success", result)
+        return result
     except SpApiThrottledError as e:
         logger.warning("resume_fba_reports throttled: %s", e)
+        store.finish_sync_log(conn, run_id, "throttled", error=str(e))
         return {"status": "throttled", "detail": str(e)}
+    except Exception as e:
+        store.finish_sync_log(conn, run_id, "error", error=str(e))
+        raise
     finally:
         store.release_lock(conn, store.REPORTS_API_LOCK)

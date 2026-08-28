@@ -286,13 +286,22 @@ def resume_orders_reports(conn, poll_budget: int = _RESUME_POLL_BUDGET_SEC) -> d
     version of the old manual debug_resume_report tool. A report still
     not ready within this (short) budget just stays pending for the next
     check; it is never re-requested (that would waste the shared
-    createReport quota on a report Amazon is already generating)."""
+    createReport quota on a report Amazon is already generating).
+
+    Logs to amazon_us_sync_log (mode "resume_orders") even when there's
+    nothing pending -- without this, the deferred report's real work
+    (which can take several cycles to land) is invisible in Sync History:
+    only sync_via_report's own immediate 0-result entry ever showed,
+    making a job that's actually progressing look like it's failing."""
     if not store.try_acquire_lock(conn, store.REPORTS_API_LOCK):
         return {"status": "skipped", "reason": "locked"}
+    run_id = store.start_sync_log(conn, "resume_orders")
     try:
         pending = store.list_pending_reports(conn, "orders_report")
         if not pending:
-            return {"status": "success", "resumed": 0, "still_pending": 0}
+            result = {"status": "success", "resumed": 0, "still_pending": 0}
+            store.finish_sync_log(conn, run_id, "success", result)
+            return result
 
         mapping = refresh_sku_map(conn)
         resumed, still_pending = 0, 0
@@ -309,10 +318,16 @@ def resume_orders_reports(conn, poll_budget: int = _RESUME_POLL_BUDGET_SEC) -> d
 
         if resumed:
             store.promote_fetched_orders(conn, mapping)
-        return {"status": "success", "resumed": resumed, "still_pending": still_pending}
+        result = {"status": "success", "resumed": resumed, "still_pending": still_pending}
+        store.finish_sync_log(conn, run_id, "success", result)
+        return result
     except SpApiThrottledError as e:
         logger.warning("resume_orders_reports throttled: %s", e)
+        store.finish_sync_log(conn, run_id, "throttled", error=str(e))
         return {"status": "throttled", "detail": str(e)}
+    except Exception as e:
+        store.finish_sync_log(conn, run_id, "error", error=str(e))
+        raise
     finally:
         store.release_lock(conn, store.REPORTS_API_LOCK)
 
