@@ -44,18 +44,48 @@ def _rows_to_dicts(cur: psycopg.Cursor) -> list[dict[str, Any]]:
     return [dict(zip(columns, row)) for row in cur.fetchall()]
 
 
-def fetch_stats(conn: psycopg.Connection) -> dict[str, Any]:
+# Pseudo-stage values the dashboard's stat tiles / stage filter use that
+# aren't real `stage` column values -- each maps to its own WHERE clause.
+# "cancelled" mirrors Amazon's own spelling (one L) since order_status is
+# stored verbatim from the SP-API response, not renormalized.
+_MISSING_SHIP_DATE_WHERE = "order_status = 'Shipped' AND actual_ship_date IS NULL"
+_STUCK_SKU_WHERE = "stage = 'fetched' AND last_error LIKE 'Unmapped SKUs%%'"
+_CANCELLED_WHERE = "order_status = 'Canceled'"
+_PSEUDO_STAGE_WHERE = {
+    "cancelled": _CANCELLED_WHERE,
+    "missing_ship_date": _MISSING_SHIP_DATE_WHERE,
+    "stuck_sku": _STUCK_SKU_WHERE,
+}
+
+
+def fetch_stats(conn: psycopg.Connection, *, date_from: str | None = None, date_to: str | None = None) -> dict[str, Any]:
+    """date_from/date_to scope every amazon_us_orders-based count to
+    purchase_date (the dashboard's "period" picker) -- optional and
+    backward compatible: omitted, every count is all-time same as before.
+    CN counts stay all-time; amazon_us_cn_log isn't keyed by purchase_date."""
+    where = []
+    params: list[Any] = []
+    if date_from:
+        where.append("purchase_date >= %s")
+        params.append(date_from)
+    if date_to:
+        where.append("purchase_date < %s::date + interval '1 day'")
+        params.append(date_to)
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+    and_sql = f"AND {' AND '.join(where)}" if where else ""
+
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT stage, COUNT(*)::int AS count FROM amazon_us_orders GROUP BY stage"
+            f"SELECT stage, COUNT(*)::int AS count FROM amazon_us_orders {where_sql} GROUP BY stage", params
         )
         by_stage = {r["stage"]: r["count"] for r in _rows_to_dicts(cur)}
 
-        cur.execute("SELECT COUNT(*) FROM amazon_us_orders")
+        cur.execute(f"SELECT COUNT(*) FROM amazon_us_orders {where_sql}", params)
         total_orders = int(cur.fetchone()[0])
 
         cur.execute(
-            "SELECT fulfillment_channel, COUNT(*)::int AS count FROM amazon_us_orders GROUP BY fulfillment_channel"
+            f"SELECT fulfillment_channel, COUNT(*)::int AS count FROM amazon_us_orders {where_sql} GROUP BY fulfillment_channel",
+            params,
         )
         by_fulfillment_channel = {r["fulfillment_channel"]: r["count"] for r in _rows_to_dicts(cur)}
 
@@ -65,10 +95,20 @@ def fetch_stats(conn: psycopg.Connection) -> dict[str, Any]:
         cn_by_status = {r["status"]: r["count"] for r in _rows_to_dicts(cur)}
 
         cur.execute(
-            "SELECT ship_country, COUNT(*)::int AS count FROM amazon_us_orders "
-            "WHERE ship_country <> 'US' GROUP BY ship_country ORDER BY count DESC"
+            f"SELECT ship_country, COUNT(*)::int AS count FROM amazon_us_orders "
+            f"WHERE ship_country <> 'US' {and_sql} GROUP BY ship_country ORDER BY count DESC",
+            params,
         )
         by_non_us_country = {r["ship_country"] or "(blank)": r["count"] for r in _rows_to_dicts(cur)}
+
+        cur.execute(f"SELECT COUNT(*) FROM amazon_us_orders WHERE {_CANCELLED_WHERE} {and_sql}", params)
+        cancelled = int(cur.fetchone()[0])
+
+        cur.execute(f"SELECT COUNT(*) FROM amazon_us_orders WHERE {_MISSING_SHIP_DATE_WHERE} {and_sql}", params)
+        missing_ship_date = int(cur.fetchone()[0])
+
+        cur.execute(f"SELECT COUNT(*) FROM amazon_us_orders WHERE {_STUCK_SKU_WHERE} {and_sql}", params)
+        stuck_sku = int(cur.fetchone()[0])
 
         cur.execute(
             """
@@ -87,6 +127,9 @@ def fetch_stats(conn: psycopg.Connection) -> dict[str, Any]:
         "cn_by_status": cn_by_status,
         "by_non_us_country": by_non_us_country,
         "non_us_total": sum(by_non_us_country.values()),
+        "cancelled": cancelled,
+        "missing_ship_date": missing_ship_date,
+        "stuck_sku": stuck_sku,
         "last_run_by_mode": last_run_by_mode,
     }
 
@@ -107,7 +150,9 @@ def fetch_orders(
 ) -> dict[str, Any]:
     where = []
     params: list[Any] = []
-    if stage:
+    if stage in _PSEUDO_STAGE_WHERE:
+        where.append(_PSEUDO_STAGE_WHERE[stage])
+    elif stage:
         where.append("stage = %s")
         params.append(stage)
     if order_status:

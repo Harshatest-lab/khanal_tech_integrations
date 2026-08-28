@@ -459,8 +459,26 @@ function kpiCard(icon, value, label, variant) {
   `;
 }
 
+function kpiCardClickable(icon, value, label, variant, stageValue) {
+  return `
+    <button type="button" class="kpi-card kpi-card--clickable${variant ? ` kpi-card--${variant}` : ""}" data-stage="${escapeHtml(stageValue)}">
+      <span class="kpi-icon">${KPI_ICON[icon]}</span>
+      <span class="kpi-text">
+        <span class="kpi-value">${escapeHtml(String(value))}</span>
+        <span class="kpi-label">${escapeHtml(label)}</span>
+      </span>
+    </button>
+  `;
+}
+
 async function loadStats() {
-  const stats = await apiGet("/v1/amazon/stats");
+  const params = new URLSearchParams();
+  const df = orderDateFrom?.value || "";
+  const dt = orderDateTo?.value || "";
+  if (df) params.set("order_date_from", df);
+  if (dt) params.set("order_date_to", dt);
+  const query = params.toString();
+  const stats = await apiGet(`/v1/amazon/stats${query ? `?${query}` : ""}`);
   lastStats = stats;
   const chips = document.getElementById("stat-chips");
   const byStage = stats.by_stage || {};
@@ -468,17 +486,30 @@ async function loadStats() {
   const posted = byStage.posted || 0;
   const ready = byStage.ready || 0;
   const fetched = byStage.fetched || 0;
+  const cancelled = stats.cancelled || 0;
+  const missingShipDate = stats.missing_ship_date || 0;
+  const stuckSku = stats.stuck_sku || 0;
   const cnPosted = stats.cn_by_status?.posted || 0;
   const cnFailed = (stats.cn_by_status?.failed || 0) + (stats.cn_by_status?.failed_permanent || 0);
   chips.innerHTML = [
-    kpiCard("package", stats.total_orders ?? 0, "orders"),
-    kpiCard("check", posted, "posted", "good"),
-    kpiCard("send", ready, "ready"),
+    kpiCard("package", stats.total_orders ?? 0, "orders (period)"),
     kpiCard("download", fetched, "fetched"),
+    kpiCard("send", ready, "ready"),
+    kpiCard("check", posted, "posted", "good"),
     kpiCard("alert", failed, "failed", failed > 0 ? "crit" : undefined),
+    kpiCardClickable("alert", cancelled, "cancelled", cancelled > 0 ? "warn" : undefined, "cancelled"),
+    kpiCardClickable("alert", missingShipDate, "missing ship date", missingShipDate > 0 ? "warn" : undefined, "missing_ship_date"),
+    kpiCardClickable("alert", stuckSku, "stuck — SKU unavailable", stuckSku > 0 ? "crit" : undefined, "stuck_sku"),
     kpiCard("refund", cnPosted, "CN posted", "good"),
     kpiCard("refund", cnFailed, "CN failed", cnFailed > 0 ? "crit" : undefined),
   ].join("");
+  chips.querySelectorAll(".kpi-card--clickable").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      setActivePanel("orders-panel");
+      stageFilter.value = btn.dataset.stage;
+      loadOrders(true).catch((e) => showError(e.message));
+    });
+  });
 }
 
 // ── Pipeline health panel ────────────────────────────────────────────────
@@ -689,6 +720,7 @@ let currentOffset = 0;
 let sortBy = "updated_at";
 let sortDir = "desc";
 
+const periodFilter = document.getElementById("period-filter");
 const orderFilter = document.getElementById("order-filter");
 const stageFilter = document.getElementById("stage-filter");
 const statusFilter = document.getElementById("status-filter");
@@ -768,7 +800,7 @@ async function loadOrders(reset) {
 
 function renderOrders(items, offset, total) {
   if (!items.length) {
-    ordersBody.innerHTML = `<tr><td colspan="11" class="loading-cell">No orders found.</td></tr>`;
+    ordersBody.innerHTML = `<tr><td colspan="12" class="loading-cell">No orders found.</td></tr>`;
     setRecordCount(0, total);
     updatePagination(offset, total, 0);
     return;
@@ -789,6 +821,7 @@ function renderOrders(items, offset, total) {
       <td>${escapeHtml(row.fulfillment_channel || "—")}</td>
       <td class="cell-mono">${formatMoney(row.order_total_amount)}</td>
       <td class="cell-mono">${row.sap_doc_entry != null ? escapeHtml(String(row.sap_doc_entry)) : "—"}</td>
+      <td title="${escapeHtml(row.last_error || "")}">${escapeHtml(truncate(row.last_error, 36) || "—")}</td>
       <td>${formatDate(row.updated_at)}</td>
       <td class="cell-center"><button type="button" class="btn-view" data-oid="${escapeHtml(row.amazon_order_id)}">View</button></td>
     </tr>`
@@ -800,20 +833,54 @@ function renderOrders(items, offset, total) {
   });
 }
 
-document.getElementById("refresh-btn").addEventListener("click", () => {
-  loadStats().catch(() => {});
+function toISODate(d) {
+  return d.toISOString().slice(0, 10);
+}
+
+// "This month" / "Last month" just fill the existing order-date-from/to
+// fields — same plumbing the manual date pickers already use for both the
+// Orders table and the (now period-filtered) KPI row.
+function applyPeriodPreset(value) {
+  const now = new Date();
+  if (value === "this_month") {
+    orderDateFrom.value = toISODate(new Date(now.getFullYear(), now.getMonth(), 1));
+    orderDateTo.value = toISODate(now);
+  } else if (value === "last_month") {
+    orderDateFrom.value = toISODate(new Date(now.getFullYear(), now.getMonth() - 1, 1));
+    orderDateTo.value = toISODate(new Date(now.getFullYear(), now.getMonth(), 0));
+  } else {
+    orderDateFrom.value = "";
+    orderDateTo.value = "";
+  }
+}
+
+function refreshAll() {
+  loadStats().catch((e) => showError(e.message));
   loadOrders(true).catch((e) => showError(e.message));
-});
+}
+
+document.getElementById("refresh-btn").addEventListener("click", refreshAll);
 document.getElementById("clear-filters-btn").addEventListener("click", () => {
+  periodFilter.value = "";
   orderFilter.value = "";
   stageFilter.value = "";
   statusFilter.value = "";
   orderDateFrom.value = "";
   orderDateTo.value = "";
-  loadOrders(true).catch((e) => showError(e.message));
+  refreshAll();
 });
-[orderFilter, stageFilter, statusFilter, orderDateFrom, orderDateTo, pageSizeSelect].forEach((el) => {
+periodFilter.addEventListener("change", () => {
+  applyPeriodPreset(periodFilter.value);
+  refreshAll();
+});
+[orderFilter, stageFilter, statusFilter, pageSizeSelect].forEach((el) => {
   el.addEventListener("change", () => loadOrders(true).catch((e) => showError(e.message)));
+});
+[orderDateFrom, orderDateTo].forEach((el) => {
+  el.addEventListener("change", () => {
+    periodFilter.value = ""; // manual edit overrides whatever preset was picked
+    refreshAll();
+  });
 });
 orderFilter.addEventListener("keydown", (e) => {
   if (e.key === "Enter") loadOrders(true).catch((err) => showError(err.message));

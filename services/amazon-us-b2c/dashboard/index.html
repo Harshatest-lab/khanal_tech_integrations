@@ -94,6 +94,14 @@
         <div class="filter-card" id="orders-filter-card">
           <div class="filter-card-grid">
             <label class="filter-field">
+              <span class="filter-label">Period</span>
+              <select id="period-filter">
+                <option value="">All time</option>
+                <option value="this_month">This month</option>
+                <option value="last_month">Last month</option>
+              </select>
+            </label>
+            <label class="filter-field">
               <span class="filter-label">Order #</span>
               <input type="search" id="order-filter" placeholder="Search order id…" autocomplete="off" spellcheck="false" />
             </label>
@@ -106,6 +114,9 @@
                 <option value="posting">Posting</option>
                 <option value="posted">Posted</option>
                 <option value="failed">Failed</option>
+                <option value="cancelled">Cancelled</option>
+                <option value="missing_ship_date">Missing ship date</option>
+                <option value="stuck_sku">Stuck — SKU unavailable</option>
               </select>
             </label>
             <label class="filter-field">
@@ -152,12 +163,13 @@
                 <th>Channel</th>
                 <th class="sortable-th" data-sort-key="order_total_amount"><button type="button" class="sortable-btn">Total <span class="sort-indicator"></span></button></th>
                 <th>SAP DocEntry</th>
+                <th>Notes</th>
                 <th class="sortable-th" data-sort-key="updated_at"><button type="button" class="sortable-btn">Updated <span class="sort-indicator"></span></button></th>
                 <th class="col-action">Actions</th>
               </tr>
             </thead>
             <tbody id="orders-body">
-              <tr><td colspan="11" class="loading-cell">Loading orders…</td></tr>
+              <tr><td colspan="12" class="loading-cell">Loading orders…</td></tr>
             </tbody>
           </table>
         </div>

@@ -911,7 +911,12 @@ def dashboard_handler(event, context):
 
         with store.connect() as conn:
             if path.endswith("/v1/amazon/stats"):
-                return _json_response(200, dashboard_queries.fetch_stats(conn))
+                return _json_response(
+                    200,
+                    dashboard_queries.fetch_stats(
+                        conn, date_from=q.get("order_date_from") or None, date_to=q.get("order_date_to") or None
+                    ),
+                )
 
             if path.endswith("/v1/amazon/debug-docentry-scope"):
                 # Sizes the blast radius of a discovered mismatch: SAP's live

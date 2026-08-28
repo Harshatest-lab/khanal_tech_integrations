@@ -213,11 +213,22 @@ body {
 .kpi-card--accent .kpi-icon { background: var(--accent-soft); color: var(--accent-strong); }
 .kpi-card--good .kpi-icon { background: var(--good-bg); color: var(--good); }
 .kpi-card--crit .kpi-icon { background: var(--crit-bg); color: var(--crit); }
+.kpi-card--warn .kpi-icon { background: var(--warn-bg); color: var(--warn); }
 .kpi-text { display: flex; flex-direction: column; line-height: 1.15; }
 .kpi-value { font-family: var(--font-mono); font-weight: 600; font-size: 0.98rem; font-variant-numeric: tabular-nums; color: var(--text); }
 .kpi-card--crit .kpi-value { color: var(--crit); }
 .kpi-card--good .kpi-value { color: var(--good); }
+.kpi-card--warn .kpi-value { color: var(--warn); }
 .kpi-label { font-size: 0.68rem; color: var(--muted); font-weight: 500; margin-top: 1px; }
+
+/* Breakdown KPI cards double as drill-down filters (click -> Orders panel
+   pre-filtered to that bucket) — rendered as <button>, so reset the
+   browser's default button chrome back to the plain .kpi-card look. */
+button.kpi-card--clickable {
+  border: 1px solid var(--border); font-family: inherit; text-align: left; cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+button.kpi-card--clickable:hover { border-color: var(--accent); box-shadow: var(--shadow-sm); }
 
 /* legacy stat-chip (still used by recon breakdown chips); also the
    container class for the KPI row above, which supplies the same
