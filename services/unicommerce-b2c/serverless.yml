@@ -389,6 +389,16 @@ functions:
           rate: cron(17,47 * * * ? *)
           enabled: ${self:custom.currentSchedulesEnabled}
 
+  # TEMPORARY -- invoke-only, read-only, no schedule/httpApi route. Built
+  # 2026-08-28 to root-cause the batch of August credit notes dead on SAP
+  # -5002 (CardCode/ItemCode mismatch vs the base invoice). Remove once
+  # that investigation is done, same lifecycle as the 2026-08-19
+  # DocEntry-corruption debug Lambdas (see PR #98 for the removal
+  # precedent).
+  unicommerceAdminDebugCnMismatch:
+    handler: src.handlers.admin_debug_cn_mismatch_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+
   unicommercePoGrn:
     handler: src.handlers.pogrn_handler
     layers: [{ Ref: SharedLambdaLayer }]

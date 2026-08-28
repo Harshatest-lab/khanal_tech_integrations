@@ -23,7 +23,16 @@ from unicommerce.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
-BATCH_HOLD_MAX_ATTEMPTS = 10
+# The post-invoices schedule runs every 30 min (cron 7,37 * * * *) and
+# recover_batch_hold_orders' cooldown is a flat 30 min, so the attempt
+# count climbs by ~1 per run once cooldown-eligible. At the old value of
+# 10, a still-batch_held order hit the attempt cap and died at ~5-10h
+# elapsed -- 5x sooner than the 48h stock-replenishment window this was
+# supposed to give it (confirmed 2026-08-28: 59 of 63 dead August orders
+# died this way, all for genuine stock-shortage SKUs that just needed
+# more cycles within 48h, not fewer). 100 keeps a margin above the ~96
+# cycles 48h/30min implies, so max_hours is the real gate as intended.
+BATCH_HOLD_MAX_ATTEMPTS = 100
 BATCH_HOLD_MAX_HOURS = 48
 # Must match sap_payload.BATCH_QTY_TOLERANCE.
 BATCH_QTY_TOLERANCE = 0.01
