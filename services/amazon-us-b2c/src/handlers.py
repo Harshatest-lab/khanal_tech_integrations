@@ -296,6 +296,20 @@ def post_invoices_handler(event, context):
         if ev.get("mode") == "debug_find_all_invoices":
             from amazon_us import sap_client
             return {"invoices": sap_client.find_all_invoices_by_order_debug(ev["amazon_order_id"])}
+        if ev.get("mode") == "set_sku_overrides":
+            # Ops helper: pin seller_sku -> sap_item_code mappings that
+            # survive HANA refreshes (source='override', wins over
+            # source='hana'), then re-evaluate FETCHED orders so any now
+            # fully-mapped order promotes to READY immediately. The
+            # durable fix is still adding the SKU to SAP's OITM.U_Amz_SKU;
+            # this unblocks orders without waiting on that.
+            mappings = ev.get("mappings") or {}
+            with store.connect() as conn:
+                for seller_sku, sap_item_code in mappings.items():
+                    store.upsert_sku_override(conn, seller_sku, sap_item_code)
+                mapping = store.get_sku_mapping(conn)
+                promoted = store.promote_fetched_orders(conn, mapping)
+            return {"status": "done", "overrides_set": len(mappings), "promoted": promoted}
         if ev.get("mode") == "debug_sku_check":
             from amazon_us.hana_access import fetch_amazon_sku_map
             raw = fetch_amazon_sku_map()

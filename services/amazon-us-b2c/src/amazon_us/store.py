@@ -533,6 +533,26 @@ def replace_hana_sku_rows(conn: psycopg.Connection, sku_map: dict[str, list[str]
     return len(singles), ambiguous
 
 
+def upsert_sku_override(conn: psycopg.Connection, seller_sku: str, sap_item_code: str) -> None:
+    """Manually pin a seller_sku -> sap_item_code mapping that survives
+    every HANA refresh (replace_hana_sku_rows only ever touches
+    source='hana' rows) and wins over any hana-sourced mapping for the
+    same SKU. For SKUs not yet in SAP's OITM.U_Amz_SKU field -- the
+    durable fix is still to add it there; this unblocks orders in the
+    meantime without waiting on that."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO amazon_us_sku_map (seller_sku, sap_item_code, source)
+            VALUES (%s, %s, 'override')
+            ON CONFLICT (seller_sku, source) DO UPDATE
+              SET sap_item_code = EXCLUDED.sap_item_code, updated_at = now()
+            """,
+            (seller_sku, sap_item_code),
+        )
+    conn.commit()
+
+
 def get_sku_mapping(conn: psycopg.Connection) -> dict[str, str]:
     """{seller_sku: sap_item_code}; override rows win over hana rows."""
     with conn.cursor() as cur:
