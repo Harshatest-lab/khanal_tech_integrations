@@ -382,6 +382,14 @@ def post_invoices_handler(event, context):
             order_ids = ev.get("amazon_order_ids") or []
             with store.connect() as conn:
                 return post_invoices.force_requeue_and_post(conn, order_ids)
+        if ev.get("mode") == "recover_stale_posting_and_post":
+            # Manual ops helper: recover orders orphaned in stage=posting
+            # (claimed but never resolved because the Lambda died mid-call)
+            # back to ready, then post them. Scoped to the explicit id
+            # list; caller identifies staleness (e.g. via updated_at).
+            order_ids = ev.get("amazon_order_ids") or []
+            with store.connect() as conn:
+                return post_invoices.recover_stale_posting_and_post(conn, order_ids)
         with store.connect() as conn:
             if ev.get("amazon_order_id"):
                 return post_invoices.post_one_order(

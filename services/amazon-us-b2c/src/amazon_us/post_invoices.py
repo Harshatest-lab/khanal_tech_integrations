@@ -73,28 +73,47 @@ def post_ready_orders(
 def post_one_order(conn, amazon_order_id: str, dry_run: bool = False) -> dict:
     """Manual pilot/ops helper: post exactly one order by id, independent
     of post_ready_orders' oldest-ship-date-first ordering. Not used by any
-    scheduled cron."""
-    mapping = store.get_sku_mapping(conn)
-    order = store.get_order(conn, amazon_order_id)
-    if order is None or order.get("stage") != "ready":
-        return {
-            "status": "done", "posted": 0, "recovered": 0, "failed": 0, "skipped": 1,
-            "reason": "order not found or not in ready stage",
-        }
+    scheduled cron.
 
-    if dry_run:
-        counts = _dry_run(conn, [order], mapping)
-        return {"status": "dry_run", **counts}
+    Logs to amazon_us_sync_log (mode "post_one") like every other run type.
+    Without this, a claim (ready -> posting) that never resolves because
+    the Lambda dies mid-call (SAP hang, timeout) is invisible: nothing
+    else ever looks at the posting stage, so the order sits orphaned
+    forever with no trace of who claimed it or when. Logging doesn't
+    prevent an external kill, but it means the started-but-never-finished
+    sync_log row is now the trace that lets ops notice and recover it."""
+    run_id = store.start_sync_log(conn, "post_one")
+    try:
+        mapping = store.get_sku_mapping(conn)
+        order = store.get_order(conn, amazon_order_id)
+        if order is None or order.get("stage") != "ready":
+            result = {
+                "status": "done", "posted": 0, "recovered": 0, "failed": 0, "skipped": 1,
+                "reason": "order not found or not in ready stage",
+            }
+            store.finish_sync_log(conn, run_id, "success", result)
+            return result
 
-    if not store.claim(conn, amazon_order_id, "ready", "posting"):
-        return {
-            "status": "done", "posted": 0, "recovered": 0, "failed": 0, "skipped": 1,
-            "reason": "claim failed (concurrent worker)",
-        }
+        if dry_run:
+            counts = _dry_run(conn, [order], mapping)
+            store.finish_sync_log(conn, run_id, "success", counts)
+            return {"status": "dry_run", **counts}
 
-    counts = {"posted": 0, "recovered": 0, "failed": 0, "skipped": 0}
-    _post_one_claimed(conn, order, mapping, counts)
-    return {"status": "done", **counts}
+        if not store.claim(conn, amazon_order_id, "ready", "posting"):
+            result = {
+                "status": "done", "posted": 0, "recovered": 0, "failed": 0, "skipped": 1,
+                "reason": "claim failed (concurrent worker)",
+            }
+            store.finish_sync_log(conn, run_id, "success", result)
+            return result
+
+        counts = {"posted": 0, "recovered": 0, "failed": 0, "skipped": 0}
+        _post_one_claimed(conn, order, mapping, counts)
+        store.finish_sync_log(conn, run_id, "success", counts)
+        return {"status": "done", **counts}
+    except Exception as e:
+        store.finish_sync_log(conn, run_id, "error", error=str(e))
+        raise
 
 
 def _post_one_claimed(conn, order: dict, mapping: dict[str, str], counts: dict) -> bool:
@@ -183,28 +202,27 @@ def retry_failed_orders(conn, limit: int = 50) -> dict:
     return {"status": "done", "requeued": 0}
 
 
-def force_requeue_and_post(conn, amazon_order_ids: list[str]) -> dict:
-    """Manual ops helper: requeue exactly the given order ids from FAILED
-    back to READY regardless of attempt_count (bypasses the MAX_ATTEMPTS
-    definitive-failure gate that retry_failed_orders respects), then post
-    each one individually via post_one_order. Scoped to the explicit id
-    list only -- never sweeps other failed orders. Use after a root-cause
-    fix (e.g. stock replenished) to clear orders the auto-retry cron has
-    given up on. Logs to amazon_us_sync_log (mode "force_requeue") same as
-    every other run type, so Sync History shows manual interventions too."""
-    run_id = store.start_sync_log(conn, "force_requeue")
+def _requeue_and_post(conn, amazon_order_ids: list[str], from_stage: str, sync_log_mode: str) -> dict:
+    """Shared by force_requeue_and_post and recover_stale_posting_and_post:
+    requeue exactly the given order ids from from_stage back to READY
+    (bypassing whatever normal gate would otherwise apply), then post each
+    one individually. Scoped to the explicit id list only -- never sweeps
+    other orders. Logs to amazon_us_sync_log so Sync History shows the
+    manual intervention."""
+    run_id = store.start_sync_log(conn, sync_log_mode)
     mapping = store.get_sku_mapping(conn)
     results: dict[str, dict] = {}
-    counts = {"requeued": 0, "posted": 0, "recovered": 0, "failed": 0, "skipped": 0, "not_failed": 0}
+    not_matched_key = f"not_{from_stage}"
+    counts = {"requeued": 0, "posted": 0, "recovered": 0, "failed": 0, "skipped": 0, not_matched_key: 0}
 
     try:
         for oid in amazon_order_ids:
-            if store.get_order_stage(conn, oid) != "failed":
-                counts["not_failed"] += 1
-                results[oid] = {"status": "skipped", "reason": "not in failed stage"}
+            if store.get_order_stage(conn, oid) != from_stage:
+                counts[not_matched_key] += 1
+                results[oid] = {"status": "skipped", "reason": f"not in {from_stage} stage"}
                 continue
-            if not store.claim(conn, oid, "failed", "ready"):
-                counts["not_failed"] += 1
+            if not store.claim(conn, oid, from_stage, "ready"):
+                counts[not_matched_key] += 1
                 results[oid] = {"status": "skipped", "reason": "claim failed (concurrent worker)"}
                 continue
             counts["requeued"] += 1
@@ -227,6 +245,27 @@ def force_requeue_and_post(conn, amazon_order_ids: list[str]) -> dict:
 
     store.finish_sync_log(conn, run_id, "success", counts)
     return {"status": "done", "counts": counts, "orders": results}
+
+
+def force_requeue_and_post(conn, amazon_order_ids: list[str]) -> dict:
+    """Manual ops helper: requeue exactly the given order ids from FAILED
+    back to READY regardless of attempt_count (bypasses the MAX_ATTEMPTS
+    definitive-failure gate that retry_failed_orders respects), then post
+    each one individually. Use after a root-cause fix (e.g. stock
+    replenished) to clear orders the auto-retry cron has given up on."""
+    return _requeue_and_post(conn, amazon_order_ids, "failed", "force_requeue")
+
+
+def recover_stale_posting_and_post(conn, amazon_order_ids: list[str]) -> dict:
+    """Manual ops helper: recover orders orphaned in the POSTING stage --
+    claimed by post_one_order or post_ready_orders but never resolved
+    because the Lambda died mid-call (SAP hang, timeout) before it could
+    mark_posted/mark_failed or revert the claim. Nothing else ever
+    revisits the posting stage, so these sit stuck forever without this.
+    Caller is responsible for identifying which order ids are genuinely
+    stale (e.g. via updated_at) -- this moves exactly the given ids back
+    to READY and posts them, no age check of its own."""
+    return _requeue_and_post(conn, amazon_order_ids, "posting", "recover_stale_posting")
 
 
 def _dry_run(conn, ready: list[dict], mapping: dict[str, str]) -> dict:
