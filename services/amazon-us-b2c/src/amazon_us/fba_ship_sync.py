@@ -63,6 +63,24 @@ def sync_ship_dates(conn, from_date: str, to_date: str) -> dict:
         logger.info("sync_ship_dates skipped -- another Reports API sync is already running")
         return {"status": "skipped", "reason": "locked"}
     try:
+        # Single-flight guard: an unresolved fba_report from a prior hourly run
+        # almost always still covers this run's window too (default window is
+        # "last 21 days", shifting once per day, not per hour) -- requesting a
+        # fresh report on top of it just doubles up against the shared
+        # createReport quota amazonFetch also draws from, without getting data
+        # back any sooner. resume_fba_reports() polls existing pending reports
+        # every hour regardless, so let it catch up instead of piling on.
+        already_pending = store.list_pending_reports(conn, "fba_report")
+        if already_pending:
+            run_id = store.start_sync_log(conn, "fba", from_date, to_date)
+            result = {"status": "skipped", "reason": "already_pending", "pending_count": len(already_pending)}
+            store.finish_sync_log(conn, run_id, "skipped", result)
+            logger.info(
+                "sync_ship_dates skipped -- %d fba_report(s) already in flight, resume_fba_reports will catch up",
+                len(already_pending),
+            )
+            return result
+
         run_id = store.start_sync_log(conn, "fba", from_date, to_date)
         try:
             totals = {"parsed": 0, "updated": 0}
