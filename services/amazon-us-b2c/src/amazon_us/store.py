@@ -82,12 +82,36 @@ def get_order_stage_and_status(conn: psycopg.Connection, amazon_order_id: str) -
     return (row[0], row[1]) if row else None
 
 
+def _lines_total(lines: list[dict[str, Any]]) -> float:
+    return round(
+        sum(
+            float(l.get("item_price_amount") or 0)
+            + float(l.get("item_tax_amount") or 0)
+            + float(l.get("shipping_price_amount") or 0)
+            + float(l.get("shipping_tax_amount") or 0)
+            for l in lines
+        ),
+        2,
+    )
+
+
 def upsert_order(conn: psycopg.Connection, fields: dict[str, Any], lines: list[dict[str, Any]]) -> str:
     """Insert or refresh one staged order + its lines.
 
     Returns 'created' | 'updated' | 'refreshed' (refreshed = order is
     POSTING/POSTED; only status + raw payload were touched, lines and
-    stage left alone)."""
+    stage left alone).
+
+    order_total_amount is always recomputed from `lines` (when given) --
+    never trusted from the caller's fields dict. Confirmed live 2026-08-28:
+    the report-fetch path and the Orders-API path can each touch this
+    order's header and lines at different times, and whichever call last
+    set order_total_amount doesn't necessarily agree with the lines
+    currently on file (1487 of ~10.3k August orders drifted, always
+    undercounting -- SAP's own DocTotal, built fresh from live line data
+    at post time, was correct throughout). Deriving the header from its
+    own lines here makes drift structurally impossible instead of
+    depending on every caller to keep them in sync."""
     oid = fields["amazon_order_id"]
     existing_stage = get_order_stage(conn, oid)
 
@@ -118,7 +142,7 @@ def upsert_order(conn: psycopg.Connection, fields: dict[str, Any], lines: list[d
         "purchase_date_utc": fields.get("purchase_date_utc"),
         "actual_ship_date": fields.get("actual_ship_date"),
         "fulfillment_channel": fields.get("fulfillment_channel", ""),
-        "order_total_amount": fields.get("order_total_amount", 0),
+        "order_total_amount": _lines_total(lines) if lines else fields.get("order_total_amount", 0),
         "ship_city": fields.get("ship_city", ""),
         "ship_state": fields.get("ship_state", ""),
         "ship_postal_code": fields.get("ship_postal_code", ""),
@@ -379,6 +403,37 @@ def promote_fetched_orders(conn: psycopg.Connection, mapping: dict[str, str]) ->
                 promoted += cur.rowcount
     conn.commit()
     return promoted
+
+
+def backfill_order_totals(conn: psycopg.Connection, amazon_order_ids: list[str]) -> int:
+    """One-off correction for order_total_amount drift that predates
+    upsert_order always deriving it from lines (see that function's
+    docstring for the 2026-08-28 finding: 1487 of ~10.3k August orders
+    had a stale header total while their lines and SAP's own DocTotal
+    agreed). Recomputes the header from each order's own current lines,
+    same formula upsert_order now uses going forward. Scoped to the
+    given id list -- never sweeps every order in the table."""
+    if not amazon_order_ids:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE amazon_us_orders o SET
+              order_total_amount = sub.total, updated_at = now()
+            FROM (
+              SELECT amazon_order_id,
+                     SUM(item_price_amount + item_tax_amount + shipping_price_amount + shipping_tax_amount) AS total
+              FROM amazon_us_order_lines
+              WHERE amazon_order_id = ANY(%s)
+              GROUP BY amazon_order_id
+            ) sub
+            WHERE o.amazon_order_id = sub.amazon_order_id
+            """,
+            (amazon_order_ids,),
+        )
+        updated = cur.rowcount
+    conn.commit()
+    return updated
 
 
 # ── Invoice / CN audit logs ──────────────────────────────────────────────

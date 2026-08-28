@@ -310,6 +310,15 @@ def post_invoices_handler(event, context):
                 mapping = store.get_sku_mapping(conn)
                 promoted = store.promote_fetched_orders(conn, mapping)
             return {"status": "done", "overrides_set": len(mappings), "promoted": promoted}
+        if ev.get("mode") == "backfill_order_totals":
+            # One-off correction for the order_total_amount drift found
+            # 2026-08-28 (see store.upsert_order / backfill_order_totals
+            # docstrings). Recomputes exactly the given order ids' header
+            # total from their own current lines.
+            order_ids = ev.get("amazon_order_ids") or []
+            with store.connect() as conn:
+                updated = store.backfill_order_totals(conn, order_ids)
+            return {"status": "done", "updated": updated}
         if ev.get("mode") == "debug_sku_check":
             from amazon_us.hana_access import fetch_amazon_sku_map
             raw = fetch_amazon_sku_map()
