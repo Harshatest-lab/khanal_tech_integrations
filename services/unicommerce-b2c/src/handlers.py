@@ -212,15 +212,23 @@ def post_invoices_handler(event, context):
     ~200-row cross-channel backlog with headroom; cost scales with actual
     eligible rows, not this ceiling, and the 900s Lambda timeout has
     plenty of margin against the 30-min cron cadence.
-    start_date defaults to a rolling last-14-days window when omitted --
-    same idea as flex_refunds_handler's 45-day default below. Confirmed
-    live 2026-08-24: the backlog regrew past 300 rows again (chronically
-    stuck pre-cutoff orders that never pass order_ready_for_invoice sit at
-    the head of the oldest-first scan forever), so every cron cycle was
-    re-examining the same dead rows and never reaching that day's actual
-    new orders. The old backlog still gets swept by any manual Ops Center
-    run with an explicit start_date -- this only changes the unscoped
-    scheduled-cron default.
+    start_date/end_date are unset by default (no date filter) as of
+    2026-08-28 -- they used to default to a rolling last-14-days window
+    to fight promote_fetched_to_ready's oldest-first starvation (see
+    2026-08-21/2026-08-24 history below), but that only capped the
+    symptom: confirmed live 2026-08-28 that with the 14-day default, 405
+    'fetched' rows sat inside the window against the 300-row limit, so
+    the ~105 newest never got scanned at all, on top of anything older
+    than 14 days being dropped from the sweep forever as the window slid
+    forward. The actual starvation cause -- ordering by order_date ASC,
+    so a chronically-stuck row permanently occupies the front of the
+    queue -- is fixed at the root in get_fetched_orders/
+    promote_fetched_to_ready (ordered by last_checked_live_at instead, so
+    a row that keeps failing cycles to the back after each live recheck).
+    With that fixed, narrowing the default window no longer serves a
+    purpose and only hid real backlog from the scheduled cron; still
+    accept both as optional overrides for a manually scoped Ops Center
+    rerun.
     {"uniware_id": str, "force": bool?} — manual single-order retry,
     bypassing the limit. Enforces POSTING_CUTOFF_DATE same as the
     scheduled cron unless force=true is explicitly passed (see
@@ -245,9 +253,7 @@ def post_invoices_handler(event, context):
     -- the caller must persist that as the only remaining record, since
     this is irreversible and nothing else keeps a copy once it commits."""
     ev = event or {}
-    start_date = ev.get("start_date") or (
-        datetime.now(timezone.utc) - timedelta(days=14)
-    ).strftime("%Y-%m-%d")
+    start_date = ev.get("start_date")
 
     def _go():
         with store.connect() as conn:

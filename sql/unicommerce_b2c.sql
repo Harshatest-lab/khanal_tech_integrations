@@ -81,7 +81,14 @@ CREATE TABLE IF NOT EXISTS unicommerce_orders (
   attempt_count                    integer     NOT NULL DEFAULT 0,
   last_error                       text,
   created_at                       timestamptz NOT NULL DEFAULT now(),
-  updated_at                       timestamptz NOT NULL DEFAULT now()
+  updated_at                       timestamptz NOT NULL DEFAULT now(),
+  -- Last time this row was actually re-verified against live Unicommerce
+  -- (get_order_detail), NOT the last time it was merely examined against
+  -- its own cached order_json. Deliberately separate from updated_at --
+  -- see store.defer_fetched's docstring (2026-08-28 fix) for why
+  -- conflating the two let a 'fetched' row's cached status go stale
+  -- forever despite being re-checked every cron cycle.
+  last_checked_live_at             timestamptz
 );
 
 CREATE INDEX IF NOT EXISTS idx_unicommerce_orders_pipeline_status

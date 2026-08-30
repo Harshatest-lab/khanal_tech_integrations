@@ -209,7 +209,18 @@ def promote_fetched_to_ready(
     That "later cycle re-checks" claim only holds if something actually
     re-fetches from Uniware -- otherwise this just re-evaluates the same
     cached order_json forever. For a row stuck past
-    STALE_FETCHED_RECHECK_MINUTES, do one live re-fetch before deciding.
+    STALE_FETCHED_RECHECK_MINUTES since its last LIVE check (not its last
+    defer -- see store.defer_fetched's docstring for why those must be
+    different clocks), do one live re-fetch before deciding.
+
+    get_fetched_orders orders by last_checked_live_at ASC NULLS FIRST
+    (least-recently-verified first, not order_date), so a row that keeps
+    failing eligibility naturally cycles to the back of the queue after
+    each live recheck instead of permanently occupying the front and
+    starving every row behind it -- confirmed live 2026-08-28: with the
+    old order_date-first ordering, 405 'fetched' rows sat inside the
+    caller's date window against a 300-row limit, so the ~105 newest
+    never got examined at all.
     """
     rows = store.get_fetched_orders(conn, limit=limit, start_date=start_date, end_date=end_date)
     moved = deferred = refetched = 0
@@ -219,8 +230,8 @@ def promote_fetched_to_ready(
         raw = row["order_json"]
         order = raw if isinstance(raw, dict) else (json.loads(raw) if raw else {})
         is_ready, reason = order_ready_for_invoice(order)
-        row_updated_at = row.get("updated_at")
-        if not is_ready and row_updated_at and row_updated_at < stale_cutoff:
+        last_checked_live_at = row.get("last_checked_live_at")
+        if not is_ready and (last_checked_live_at is None or last_checked_live_at < stale_cutoff):
             if uc is None:
                 uc = UcClient(get_uc_credentials())
                 uc.login()
@@ -229,6 +240,7 @@ def promote_fetched_to_ready(
             except Exception as exc:
                 fresh = None
                 logger.warning("promote_fetched_to_ready: re-fetch failed for %s: %s", row["uniware_id"], exc)
+            store.mark_live_checked(conn, row["uniware_id"])
             if fresh:
                 store.upsert_order(conn, row["uniware_id"], fresh)
                 refetched += 1

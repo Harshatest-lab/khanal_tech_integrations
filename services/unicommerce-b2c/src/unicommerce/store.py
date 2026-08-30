@@ -291,10 +291,10 @@ def get_fetched_orders(
         where.append("order_date <= %s")
         params.append(end_date)
     sql = f"""
-        SELECT uniware_id, order_json, updated_at
+        SELECT uniware_id, order_json, updated_at, last_checked_live_at
         FROM unicommerce_orders
         WHERE {' AND '.join(where)}
-        ORDER BY order_date ASC, created_at ASC
+        ORDER BY last_checked_live_at ASC NULLS FIRST, order_date ASC, created_at ASC
     """
     if limit is not None:
         sql += " LIMIT %s"
@@ -322,12 +322,38 @@ def mark_ready(conn: psycopg.Connection, uniware_id: str) -> bool:
 
 def defer_fetched(conn: psycopg.Connection, uniware_id: str, reason: str) -> None:
     """Record why an order wasn't promoted, leaving it at 'fetched' so a
-    later run re-checks it once the order completes upstream in UC."""
+    later run re-checks it once the order completes upstream in UC.
+
+    Deliberately does NOT touch last_checked_live_at -- that column tracks
+    when this order was last verified against live Unicommerce, not when
+    it was last examined against our own cached order_json. Every
+    promote_fetched_to_ready cycle re-examines (and re-defers) every
+    reachable row regardless of whether anything changed, so if this
+    function bumped the same clock the live-recheck gate reads, a row
+    re-examined every cron cycle could never accumulate enough staleness
+    to ever trigger that recheck -- confirmed live 2026-08-28: 348 orders
+    stuck at 'fetched' with a stale cached status (e.g. "PROCESSING")
+    that had already gone COMPLETE in Unicommerce days earlier, because
+    the old code gated the recheck on updated_at, which this same defer
+    call reset every 30 minutes."""
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE unicommerce_orders SET last_error = %s, updated_at = now() "
             "WHERE uniware_id = %s AND pipeline_status = 'fetched'",
             (reason[:2000], uniware_id),
+        )
+    conn.commit()
+
+
+def mark_live_checked(conn: psycopg.Connection, uniware_id: str) -> None:
+    """Record that this order was just re-verified against live
+    Unicommerce (get_order_detail), independent of whatever
+    defer_fetched/mark_ready do to updated_at. See defer_fetched's
+    docstring for why this needs to be a separate column."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE unicommerce_orders SET last_checked_live_at = now() WHERE uniware_id = %s",
+            (uniware_id,),
         )
     conn.commit()
 

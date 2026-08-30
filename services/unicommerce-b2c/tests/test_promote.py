@@ -24,6 +24,7 @@ class _FakeStore:
         self._fetched = fetched
         self.marked_ready: list[str] = []
         self.deferred: list[tuple[str, str]] = []
+        self.live_checked: list[str] = []
 
     def get_fetched_orders(self, conn, limit=None, start_date=None, end_date=None):
         return self._fetched
@@ -35,6 +36,12 @@ class _FakeStore:
     def defer_fetched(self, conn, uniware_id, reason):
         self.deferred.append((uniware_id, reason))
 
+    def mark_live_checked(self, conn, uniware_id):
+        self.live_checked.append(uniware_id)
+
+    def upsert_order(self, conn, uniware_id, order):
+        pass
+
 
 def _order(status, items):
     return json.dumps({"status": status, "saleOrderItems": items})
@@ -44,10 +51,15 @@ _ITEM_OK = {"statusCode": "COMPLETE", "quantity": 1}
 
 
 def test_promotes_only_complete_orders_with_eligible_items(monkeypatch):
+    # last_checked_live_at recent on the not-ready rows -- this test is
+    # about the eligibility logic itself, not the live-recheck path (that
+    # has its own dedicated tests below), so it must not fall through to
+    # a real UcClient/get_uc_credentials call.
+    recent_ts = datetime.now(timezone.utc) - timedelta(minutes=5)
     fetched = [
         {"uniware_id": "A", "order_json": _order("COMPLETE", [_ITEM_OK])},   # ready
-        {"uniware_id": "B", "order_json": _order("PROCESSING", [_ITEM_OK])},  # not complete
-        {"uniware_id": "C", "order_json": _order("COMPLETE", [])},            # no line items
+        {"uniware_id": "B", "order_json": _order("PROCESSING", [_ITEM_OK]), "last_checked_live_at": recent_ts},  # not complete
+        {"uniware_id": "C", "order_json": _order("COMPLETE", []), "last_checked_live_at": recent_ts},            # no line items
     ]
     fake = _FakeStore(fetched)
     monkeypatch.setattr(fetch_sync, "store", fake)
@@ -114,7 +126,7 @@ def test_stale_fetched_row_triggers_live_refetch_and_upsert(monkeypatch):
     # ever re-reads the same stale order_json. Past the staleness cutoff,
     # promote must do one live re-fetch before deciding.
     old_ts = datetime.now(timezone.utc) - timedelta(minutes=120)
-    fetched = [{"uniware_id": "A", "order_json": _order("PROCESSING", [_ITEM_OK]), "updated_at": old_ts}]
+    fetched = [{"uniware_id": "A", "order_json": _order("PROCESSING", [_ITEM_OK]), "last_checked_live_at": old_ts}]
     fake = _FakeStore(fetched)
     fake.upserted: list[tuple] = []
     fake.upsert_order = lambda conn, uniware_id, order: fake.upserted.append((uniware_id, order))
@@ -126,15 +138,32 @@ def test_stale_fetched_row_triggers_live_refetch_and_upsert(monkeypatch):
 
     assert result == {"moved_to_ready": 1, "deferred": 0, "refetched": 1}
     assert fake.marked_ready == ["A"]
+    assert fake.live_checked == ["A"]
     assert fake.upserted[0][0] == "A"
     assert fake.upserted[0][1]["status"] == "COMPLETE"
+
+
+def test_never_live_checked_row_triggers_immediate_refetch(monkeypatch):
+    # A row with no last_checked_live_at at all (NULL -- pre-fix rows, or
+    # a brand-new 'fetched' row) must be treated as maximally stale, not
+    # skipped -- get_fetched_orders' NULLS FIRST ordering relies on this.
+    fetched = [{"uniware_id": "A", "order_json": _order("PROCESSING", [_ITEM_OK]), "last_checked_live_at": None}]
+    fake = _FakeStore(fetched)
+    monkeypatch.setattr(fetch_sync, "store", fake)
+    monkeypatch.setattr(fetch_sync, "UcClient", _FakeUcClient)
+    monkeypatch.setattr(fetch_sync, "get_uc_credentials", lambda: None)
+
+    result = fetch_sync.promote_fetched_to_ready(conn=None)
+
+    assert result == {"moved_to_ready": 1, "deferred": 0, "refetched": 1}
+    assert fake.live_checked == ["A"]
 
 
 def test_fresh_fetched_row_is_not_refetched(monkeypatch):
     # A row still well within the staleness window must not trigger a
     # live API call -- it's plausibly still genuinely in-flight upstream.
     recent_ts = datetime.now(timezone.utc) - timedelta(minutes=5)
-    fetched = [{"uniware_id": "B", "order_json": _order("PROCESSING", [_ITEM_OK]), "updated_at": recent_ts}]
+    fetched = [{"uniware_id": "B", "order_json": _order("PROCESSING", [_ITEM_OK]), "last_checked_live_at": recent_ts}]
     fake = _FakeStore(fetched)
 
     def _must_not_construct(*a, **k):
@@ -151,7 +180,7 @@ def test_fresh_fetched_row_is_not_refetched(monkeypatch):
 
 def test_stale_row_refetch_failure_falls_back_to_defer(monkeypatch):
     old_ts = datetime.now(timezone.utc) - timedelta(minutes=120)
-    fetched = [{"uniware_id": "A", "order_json": _order("PROCESSING", [_ITEM_OK]), "updated_at": old_ts}]
+    fetched = [{"uniware_id": "A", "order_json": _order("PROCESSING", [_ITEM_OK]), "last_checked_live_at": old_ts}]
     fake = _FakeStore(fetched)
 
     class _BoomUcClient(_FakeUcClient):
@@ -166,3 +195,8 @@ def test_stale_row_refetch_failure_falls_back_to_defer(monkeypatch):
 
     assert result == {"moved_to_ready": 0, "deferred": 1, "refetched": 0}
     assert fake.deferred[0][0] == "A"
+    # Even on a failed re-fetch, the live-check clock must still advance --
+    # otherwise a permanently-erroring order would get hammered with a live
+    # API call on every single cron cycle forever instead of respecting the
+    # normal 60-min cooldown.
+    assert fake.live_checked == ["A"]
