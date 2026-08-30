@@ -36,6 +36,54 @@ def build_sap_cookie_opener() -> Any:
     return opener
 
 
+def _escape_raw_controls_in_json_strings(text: str) -> str:
+    """Escape raw U+0000–U+001F chars inside JSON strings.
+
+    SAP B1 Service Layer sometimes returns Address (and similar) fields with a
+    literal CR/LF between state and country, e.g. ``"Address":"MS\\rUSA"`` where
+    ``\\r`` is an unescaped 0x0D. Strict ``json.loads`` rejects that even though
+    the document was created successfully.
+    """
+    out: list[str] = []
+    in_string = False
+    escape = False
+    for ch in text:
+        if escape:
+            out.append(ch)
+            escape = False
+            continue
+        if in_string and ch == "\\":
+            out.append(ch)
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            out.append(ch)
+            continue
+        if in_string:
+            code = ord(ch)
+            if code < 0x20:
+                if ch == "\r":
+                    out.append("\\r")
+                elif ch == "\n":
+                    out.append("\\n")
+                elif ch == "\t":
+                    out.append("\\t")
+                else:
+                    out.append(f"\\u{code:04x}")
+                continue
+        out.append(ch)
+    return "".join(out)
+
+
+def loads_sap_json(text: str) -> Any:
+    """Parse SAP SL JSON; tolerate unescaped control characters in string values."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return json.loads(_escape_raw_controls_in_json_strings(text))
+
+
 def sap_sl_request_json(
     opener: Any,
     method: str,
@@ -54,13 +102,13 @@ def sap_sl_request_json(
             out = resp.read()
             if not out:
                 return status, None
-            return status, json.loads(out.decode("utf-8"))
+            return status, loads_sap_json(out.decode("utf-8"))
     except HTTPError as e:
         err_raw = e.read()
         if not err_raw:
             return e.code, None
         try:
-            return e.code, json.loads(err_raw.decode("utf-8"))
+            return e.code, loads_sap_json(err_raw.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError):
             return e.code, {"raw": err_raw.decode("utf-8", errors="replace")[:800]}
 

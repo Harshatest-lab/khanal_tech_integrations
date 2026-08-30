@@ -185,6 +185,7 @@ def _order_filter_clauses(
     status_date_to: str | None = None,
     updated_from: str | None = None,
     updated_to: str | None = None,
+    has_return: str | None = None,
 ) -> tuple[list[str], list[Any]]:
     clauses: list[str] = []
     params: list[Any] = []
@@ -439,6 +440,12 @@ def _order_filter_clauses(
             """
         )
 
+    has_ret = (has_return or "").strip().lower()
+    if has_ret in {"yes", "true", "1"}:
+        clauses.append("h.has_return = true")
+    elif has_ret in {"no", "false", "0"}:
+        clauses.append("h.has_return = false")
+
     return clauses, params
 
 
@@ -505,6 +512,7 @@ def _group_rows_by_po(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "ship_node_type": row.get("ship_node_type"),
                 "order_date_ms": row.get("order_date_ms"),
                 "has_shipping_charges": row.get("has_shipping_charges"),
+                "has_return": bool(row.get("has_return")),
                 "ship_to_state": row.get("ship_to_state"),
                 "status_date": row.get("status_date"),
                 "updated_at": row.get("header_updated_at") or row.get("updated_at"),
@@ -557,6 +565,7 @@ def fetch_orders(
     status_date_to: str | None = None,
     updated_from: str | None = None,
     updated_to: str | None = None,
+    has_return: str | None = None,
     sort_by: str | None = None,
     sort_dir: str | None = None,
 ) -> dict[str, Any]:
@@ -582,6 +591,7 @@ def fetch_orders(
         status_date_to=status_date_to,
         updated_from=updated_from,
         updated_to=updated_to,
+        has_return=has_return,
     )
     where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
@@ -591,6 +601,20 @@ def fetch_orders(
             params,
         )
         total = int(cur.fetchone()[0])
+
+        cur.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM walmart_order_lines l
+            WHERE l.purchase_order_id IN (
+                SELECT h.purchase_order_id
+                FROM walmart_order_headers h
+                {where_sql}
+            )
+            """,
+            params,
+        )
+        total_lines = int(cur.fetchone()[0])
 
         data_params = [*params, limit, offset]
         sql = f"""
@@ -640,6 +664,7 @@ def fetch_orders(
                 h.ship_node_type,
                 h.order_date_ms,
                 h.has_shipping_charges,
+                h.has_return,
                 h.ship_to_state,
                 h.raw_payload,
                 h.updated_at AS header_updated_at,
@@ -675,6 +700,7 @@ def fetch_orders(
         "items": items,
         "count": len(items),
         "total": total,
+        "total_lines": total_lines,
         "offset": offset,
         "limit": limit,
         "sort_by": sort_key,
@@ -800,6 +826,7 @@ def fetch_order_detail(conn: psycopg.Connection, purchase_order_id: str) -> dict
                 h.ship_node_type,
                 h.order_date_ms,
                 h.has_shipping_charges,
+                h.has_return,
                 h.ship_to_state,
                 h.raw_payload,
                 h.updated_at AS header_updated_at,
@@ -873,6 +900,7 @@ def fetch_order_detail(conn: psycopg.Connection, purchase_order_id: str) -> dict
         ship_to_state = order_shipping_state(order_json.get("order") or {})
 
     sap_sync = fetch_sap_invoice_sync_detail(conn, purchase_order_id)
+    linked_returns = fetch_returns_for_purchase_order(conn, purchase_order_id)
 
     result = {
         "purchase_order_id": purchase_order_id,
@@ -880,12 +908,14 @@ def fetch_order_detail(conn: psycopg.Connection, purchase_order_id: str) -> dict
         "ship_node_type": header.get("ship_node_type"),
         "order_date_ms": header.get("order_date_ms"),
         "has_shipping_charges": header.get("has_shipping_charges"),
+        "has_return": bool(header.get("has_return")),
         "ship_to_state": ship_to_state,
         "line_count": len(lines),
         "lines": lines,
         "raw_payload": header.get("raw_payload"),
         "order_json": order_json,
         "sap_sync": sap_sync,
+        "returns": linked_returns,
     }
     return result
 
@@ -926,6 +956,59 @@ def fetch_sap_invoice_sync_detail(
         "sap_doc_num",
         "error_message",
         "error_phase",
+        "sap_payload",
+        "sap_response",
+        "attempt_count",
+        "created_at",
+        "updated_at",
+    ]
+    detail = dict(zip(columns, row))
+    for key in ("created_at", "updated_at"):
+        if detail.get(key) is not None:
+            detail[key] = detail[key].isoformat()
+    return detail
+
+
+def fetch_sap_cn_sync_detail(
+    conn: psycopg.Connection, return_order_id: str
+) -> dict[str, Any] | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+              return_order_id,
+              customer_order_id,
+              status,
+              sap_doc_entry,
+              sap_doc_num,
+              base_doc_entry,
+              error_message,
+              error_phase,
+              skip_reason,
+              sap_payload,
+              sap_response,
+              attempt_count,
+              created_at,
+              updated_at
+            FROM walmart_sap_cn_log
+            WHERE return_order_id = %s
+            """,
+            (return_order_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+
+    columns = [
+        "return_order_id",
+        "customer_order_id",
+        "status",
+        "sap_doc_entry",
+        "sap_doc_num",
+        "base_doc_entry",
+        "error_message",
+        "error_phase",
+        "skip_reason",
         "sap_payload",
         "sap_response",
         "attempt_count",
@@ -985,6 +1068,327 @@ def fetch_sync_log(conn: psycopg.Connection, *, limit: int) -> list[dict[str, An
             (limit,),
         )
         return _rows_to_dicts(cur)
+
+
+def _serialize_dt(value: Any) -> Any:
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return value
+
+
+def _return_lines_from_raw(raw_json: Any) -> list[dict[str, Any]]:
+    parsed = _parse_raw_payload(raw_json)
+    if not parsed:
+        return []
+    raw_lines = parsed.get("returnOrderLines") or []
+    if not isinstance(raw_lines, list):
+        raw_lines = [raw_lines] if raw_lines else []
+
+    lines: list[dict[str, Any]] = []
+    for line in raw_lines:
+        if not isinstance(line, dict):
+            continue
+        item = line.get("item") or {}
+        qty = line.get("quantity") or {}
+        unit_price = line.get("unitPrice") or {}
+        lines.append(
+            {
+                "return_order_line_number": line.get("returnOrderLineNumber"),
+                "purchase_order_id": line.get("purchaseOrderId"),
+                "sku": item.get("sku"),
+                "product_name": item.get("productName"),
+                "return_reason": line.get("returnReason"),
+                "quantity": qty.get("measurementValue"),
+                "unit_price": unit_price.get("currencyAmount"),
+                "unit_price_currency": unit_price.get("currencyUnit"),
+                "status": line.get("status"),
+                "status_time": line.get("statusTime"),
+                "current_delivery_status": line.get("currentDeliveryStatus"),
+                "current_refund_status": line.get("currentRefundStatus"),
+            }
+        )
+    return lines
+
+
+def _return_row_public(row: dict[str, Any], *, include_raw: bool = False) -> dict[str, Any]:
+    out = {
+        "return_order_id": row.get("return_order_id"),
+        "customer_order_id": row.get("customer_order_id"),
+        "return_order_date": _serialize_dt(row.get("return_order_date")),
+        "refund_mode": row.get("refund_mode"),
+        "total_refund_amount": row.get("total_refund_amount"),
+        "total_refund_currency": row.get("total_refund_currency"),
+        "purchase_order_ids": row.get("purchase_order_ids"),
+        "return_reasons": row.get("return_reasons"),
+        "status": row.get("status"),
+        "status_time": _serialize_dt(row.get("status_time")),
+        "current_delivery_status": row.get("current_delivery_status"),
+        "current_refund_status": row.get("current_refund_status"),
+        "credit_note_status": row.get("credit_note_status"),
+        "ar_invoice_posted": bool(row.get("ar_invoice_posted")),
+        "fetched_at": _serialize_dt(row.get("fetched_at")),
+        "created_at": _serialize_dt(row.get("created_at")),
+        "updated_at": _serialize_dt(row.get("updated_at")),
+    }
+    if include_raw:
+        out["raw_json"] = row.get("raw_json")
+        out["return_order_lines"] = _return_lines_from_raw(row.get("raw_json"))
+    return out
+
+
+def _returns_filter_clauses(
+    *,
+    return_order_id: str | None = None,
+    purchase_order_id: str | None = None,
+    status: str | None = None,
+    current_refund_status: str | None = None,
+    current_delivery_status: str | None = None,
+    credit_note_status: str | None = None,
+    return_date_from: str | None = None,
+    return_date_to: str | None = None,
+) -> tuple[list[str], list[Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+
+    if return_order_id and return_order_id.strip():
+        clauses.append("r.return_order_id ILIKE %s")
+        params.append(f"%{return_order_id.strip()}%")
+
+    if purchase_order_id and purchase_order_id.strip():
+        clauses.append("r.purchase_order_ids ILIKE %s")
+        params.append(f"%{purchase_order_id.strip()}%")
+
+    if status and status.strip():
+        clauses.append("r.status = %s")
+        params.append(status.strip())
+
+    if current_refund_status and current_refund_status.strip():
+        clauses.append("r.current_refund_status = %s")
+        params.append(current_refund_status.strip())
+
+    if current_delivery_status and current_delivery_status.strip():
+        clauses.append("r.current_delivery_status = %s")
+        params.append(current_delivery_status.strip())
+
+    if credit_note_status and credit_note_status.strip():
+        clauses.append("r.credit_note_status = %s")
+        params.append(credit_note_status.strip())
+
+    if return_date_from and return_date_from.strip():
+        clauses.append("r.return_order_date >= %s")
+        params.append(_utc_day_start_ts(return_date_from.strip()))
+
+    if return_date_to and return_date_to.strip():
+        clauses.append("r.return_order_date < %s")
+        params.append(_utc_day_end_exclusive_ts(return_date_to.strip()))
+
+    return clauses, params
+
+
+def fetch_returns(
+    conn: psycopg.Connection,
+    *,
+    limit: int,
+    offset: int = 0,
+    return_order_id: str | None = None,
+    purchase_order_id: str | None = None,
+    status: str | None = None,
+    current_refund_status: str | None = None,
+    current_delivery_status: str | None = None,
+    credit_note_status: str | None = None,
+    return_date_from: str | None = None,
+    return_date_to: str | None = None,
+) -> dict[str, Any]:
+    clauses, params = _returns_filter_clauses(
+        return_order_id=return_order_id,
+        purchase_order_id=purchase_order_id,
+        status=status,
+        current_refund_status=current_refund_status,
+        current_delivery_status=current_delivery_status,
+        credit_note_status=credit_note_status,
+        return_date_from=return_date_from,
+        return_date_to=return_date_to,
+    )
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT COUNT(*)::int FROM walmart_returns r {where_sql}",
+            params,
+        )
+        total = int(cur.fetchone()[0])
+
+        cur.execute(
+            f"""
+            SELECT
+              COUNT(*) FILTER (WHERE r.status = 'INITIATED')::int AS initiated_count,
+              COUNT(*) FILTER (WHERE r.status = 'COMPLETED')::int AS completed_count
+            FROM walmart_returns r
+            {where_sql}
+            """,
+            params,
+        )
+        status_row = cur.fetchone() or (0, 0)
+        initiated_count = int(status_row[0] or 0)
+        completed_count = int(status_row[1] or 0)
+
+        cur.execute(
+            f"""
+            SELECT
+              r.return_order_id,
+              r.customer_order_id,
+              r.return_order_date,
+              r.refund_mode,
+              r.total_refund_amount,
+              r.total_refund_currency,
+              r.purchase_order_ids,
+              r.return_reasons,
+              r.status,
+              r.status_time,
+              r.current_delivery_status,
+              r.current_refund_status,
+              r.credit_note_status,
+              r.fetched_at,
+              r.created_at,
+              r.updated_at,
+              EXISTS (
+                SELECT 1
+                FROM walmart_sap_invoice_log s
+                INNER JOIN walmart_order_headers h
+                  ON h.purchase_order_id = s.purchase_order_id
+                WHERE h.customer_order_id = r.customer_order_id
+                  AND s.status = 'posted'
+              ) AS ar_invoice_posted
+            FROM walmart_returns r
+            {where_sql}
+            ORDER BY r.return_order_date DESC NULLS LAST, r.return_order_id ASC
+            LIMIT %s OFFSET %s
+            """,
+            [*params, limit, offset],
+        )
+        rows = _rows_to_dicts(cur)
+
+    items = [_return_row_public(row) for row in rows]
+    return {
+        "items": items,
+        "count": len(items),
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "initiated_count": initiated_count,
+        "completed_count": completed_count,
+    }
+
+
+def fetch_return_detail(
+    conn: psycopg.Connection, return_order_id: str
+) -> dict[str, Any] | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+              r.return_order_id,
+              r.customer_order_id,
+              r.return_order_date,
+              r.refund_mode,
+              r.total_refund_amount,
+              r.total_refund_currency,
+              r.purchase_order_ids,
+              r.return_reasons,
+              r.status,
+              r.status_time,
+              r.current_delivery_status,
+              r.current_refund_status,
+              r.credit_note_status,
+              r.raw_json,
+              r.fetched_at,
+              r.created_at,
+              r.updated_at,
+              EXISTS (
+                SELECT 1
+                FROM walmart_sap_invoice_log s
+                INNER JOIN walmart_order_headers h
+                  ON h.purchase_order_id = s.purchase_order_id
+                WHERE h.customer_order_id = r.customer_order_id
+                  AND s.status = 'posted'
+              ) AS ar_invoice_posted
+            FROM walmart_returns r
+            WHERE r.return_order_id = %s
+            """,
+            (return_order_id,),
+        )
+        rows = _rows_to_dicts(cur)
+    if not rows:
+        return None
+    detail = _return_row_public(rows[0], include_raw=True)
+    detail["cn_sync"] = fetch_sap_cn_sync_detail(conn, return_order_id)
+    return detail
+
+
+def fetch_returns_for_purchase_order(
+    conn: psycopg.Connection, purchase_order_id: str
+) -> list[dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+              return_order_id,
+              customer_order_id,
+              return_order_date,
+              refund_mode,
+              total_refund_amount,
+              total_refund_currency,
+              purchase_order_ids,
+              return_reasons,
+              status,
+              status_time,
+              current_delivery_status,
+              current_refund_status,
+              credit_note_status,
+              fetched_at,
+              created_at,
+              updated_at
+            FROM walmart_returns
+            WHERE purchase_order_ids ILIKE %s
+            ORDER BY return_order_date DESC NULLS LAST, return_order_id ASC
+            """,
+            (f"%{purchase_order_id}%",),
+        )
+        rows = _rows_to_dicts(cur)
+    return [_return_row_public(row) for row in rows]
+
+
+def fetch_returns_sync_log(
+    conn: psycopg.Connection, *, limit: int
+) -> list[dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+              id,
+              status,
+              sync_mode,
+              from_date,
+              to_date,
+              record_count,
+              max_status_time_ms,
+              next_last_modified_start,
+              message,
+              created_at
+            FROM walmart_return_sync_log
+            ORDER BY id DESC
+            LIMIT %s
+            """,
+            (limit,),
+        )
+        rows = _rows_to_dicts(cur)
+    for row in rows:
+        row["from_date"] = _serialize_dt(row.get("from_date"))
+        row["to_date"] = _serialize_dt(row.get("to_date"))
+        row["created_at"] = _serialize_dt(row.get("created_at"))
+    return rows
 
 
 from walmart.http_response import json_response
