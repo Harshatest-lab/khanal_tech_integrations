@@ -97,7 +97,7 @@ CREATE TABLE IF NOT EXISTS amazon_us_cn_log (
   refund_id       text        PRIMARY KEY,
   amazon_order_id text        NOT NULL,
   posted_date     date,
-  status          text        NOT NULL,   -- posted | skipped | failed | failed_permanent
+  status          text        NOT NULL,   -- posted | skipped | failed
   skip_reason     text,
   sap_doc_entry   integer,
   sap_doc_num     integer,
@@ -133,7 +133,7 @@ CREATE TABLE IF NOT EXISTS amazon_us_sync_log (
   mode             text        NOT NULL,   -- incremental | report | backfill | fba | post | cn | recon | sku_refresh
   started_at       timestamptz NOT NULL DEFAULT now(),
   finished_at      timestamptz,
-  status           text        NOT NULL DEFAULT 'running',   -- running | success | error | throttled | partial
+  status           text        NOT NULL DEFAULT 'running',   -- running | success | error
   window_from      text,
   window_to        text,
   counts           jsonb       NOT NULL DEFAULT '{}'::jsonb,
@@ -148,25 +148,3 @@ CREATE TABLE IF NOT EXISTS amazon_us_watermarks (
   value      text        NOT NULL,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
-
--- Reports API jobs whose synchronous poll_report() call hit its bounded
--- budget before Amazon's report queue finished (createReport shares one
--- global ~1/min quota across every report type, and generation itself can
--- take minutes under load -- see reliability-architecture doc). A pending
--- row is resumed on the next scheduled check instead of re-requesting a
--- brand new report (wasteful) or blocking one Lambda invocation for the
--- full 840s (what this replaces). Also created defensively by
--- store.py's pending-report helpers on first use, so no separate prod
--- migration step is required to pick this up.
-CREATE TABLE IF NOT EXISTS amazon_us_pending_reports (
-  id           bigserial   PRIMARY KEY,
-  purpose      text        NOT NULL,   -- orders_report | fba_report
-  report_id    text        NOT NULL,
-  requested_at timestamptz NOT NULL DEFAULT now(),
-  context      jsonb       NOT NULL DEFAULT '{}'::jsonb,
-  status       text        NOT NULL DEFAULT 'pending',   -- pending | done | failed
-  updated_at   timestamptz NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_amazon_us_pending_reports_purpose
-  ON amazon_us_pending_reports (purpose, status);

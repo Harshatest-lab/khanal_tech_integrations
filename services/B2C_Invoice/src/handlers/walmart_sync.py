@@ -21,11 +21,18 @@ from khanal_shared.logging import configure_logging, log_json
 from walmart.credentials import DATABASE_URL, WM_BASIC_AUTH
 from walmart.order_creation import DEFAULT_LIMIT, DEFAULT_SHIP_NODE_TYPE, run_creation_sync
 from walmart.order_updation import run_updation_sync
+from walmart.returns_fetch import run_returns_backfill, run_returns_sync
 from walmart.sap_invoice_sync import (
     DEFAULT_RETRY_LIMIT,
     DEFAULT_SAP_POST_LIMIT,
     run_sap_invoice_post_sync,
     run_sap_invoice_retry_sync,
+)
+from walmart.sap_credit_note_sync import (
+    DEFAULT_CN_POST_LIMIT,
+    DEFAULT_CN_RETRY_LIMIT,
+    run_sap_cn_post_sync,
+    run_sap_cn_retry_sync,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,7 +55,7 @@ def _limit(event: dict[str, Any]) -> int:
 def _validate_config(mode: str) -> None:
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL is not set")
-    if mode in ("updation", "creation") and not WM_BASIC_AUTH:
+    if mode in ("updation", "creation", "returns_backfill", "returns_sync") and not WM_BASIC_AUTH:
         raise RuntimeError("WM_BASIC_AUTH is not set")
 
 
@@ -66,6 +73,43 @@ def handler(event: dict[str, Any] | None, context: object) -> dict[str, Any]:
     store = not bool(payload.get("no_store"))
 
     try:
+        if mode == "sap_cn_retry":
+            retry_limit = int(payload.get("limit") or DEFAULT_CN_RETRY_LIMIT)
+            output = run_sap_cn_retry_sync(
+                return_order_id=(payload.get("return_order_id") or "").strip() or None,
+                limit=retry_limit,
+                post_to_sap=not bool(payload.get("no_post")),
+            )
+            log_json(
+                logger,
+                logging.INFO,
+                "walmart_sap_cn_retry_complete",
+                mode=mode,
+                candidates=output.get("candidates"),
+                posted=output.get("posted"),
+                failed=output.get("failed"),
+                skipped=output.get("skipped"),
+            )
+            return {"ok": True, "mode": mode, **output}
+        if mode == "sap_cn_post":
+            post_limit = int(payload.get("limit") or DEFAULT_CN_POST_LIMIT)
+            output = run_sap_cn_post_sync(
+                return_order_id=(payload.get("return_order_id") or "").strip() or None,
+                limit=post_limit,
+                post_to_sap=not bool(payload.get("no_post")),
+            )
+            log_json(
+                logger,
+                logging.INFO,
+                "walmart_sap_cn_post_complete",
+                mode=mode,
+                candidates=output.get("candidates"),
+                posted=output.get("posted"),
+                prepared=output.get("prepared"),
+                failed=output.get("failed"),
+                skipped=output.get("skipped"),
+            )
+            return {"ok": True, "mode": mode, **output}
         if mode == "sap_retry":
             retry_limit = int(payload.get("limit") or DEFAULT_RETRY_LIMIT)
             output = run_sap_invoice_retry_sync(
@@ -125,10 +169,43 @@ def handler(event: dict[str, Any] | None, context: object) -> dict[str, Any]:
                 limit=limit,
                 store=store,
             )
+        elif mode == "returns_backfill":
+            start = payload.get("start_date")
+            end = payload.get("end_date")
+            if not start or not end:
+                raise ValueError(
+                    "returns_backfill mode requires start_date and end_date in the event"
+                )
+            output = run_returns_backfill(
+                start_date=str(start),
+                end_date=str(end),
+                store=store,
+            )
+        elif mode == "returns_sync":
+            output = run_returns_sync(
+                start_date=(payload.get("start_date") or "").strip() or None,
+                end_date=(payload.get("end_date") or "").strip() or None,
+                store=store,
+            )
         else:
             raise ValueError(
-                f"Unknown mode: {mode!r} (use 'updation', 'creation', 'sap_post', or 'sap_retry')"
+                f"Unknown mode: {mode!r} "
+                "(use 'updation', 'creation', 'sap_post', 'sap_retry', "
+                "'sap_cn_post', 'sap_cn_retry', 'returns_backfill', or 'returns_sync')"
             )
+
+        if mode in ("returns_backfill", "returns_sync"):
+            log_json(
+                logger,
+                logging.INFO,
+                "walmart_returns_sync_complete",
+                mode=mode,
+                total_returns=output.get("total_returns"),
+                inserted=output.get("inserted"),
+                updated=output.get("updated"),
+                skipped=output.get("skipped"),
+            )
+            return {"ok": True, "mode": mode, **output}
 
         log_json(
             logger,

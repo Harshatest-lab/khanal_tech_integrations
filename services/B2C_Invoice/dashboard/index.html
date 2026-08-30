@@ -55,6 +55,10 @@
           <span class="nav-icon">↻</span>
           Sync history
         </a>
+        <a class="nav-item" href="#" id="nav-returns">
+          <span class="nav-icon">↩</span>
+          Returns
+        </a>
         <a class="nav-item" href="#" id="nav-sap">
           <span class="nav-icon">◇</span>
           SAP FG items
@@ -85,6 +89,14 @@
               title="Retry failed SAP posts (same as daily 08:00 IST sap_retry job)"
             >
               Retry SAP failures
+            </button>
+            <button
+              type="button"
+              class="btn-export-filtered"
+              id="orders-export-btn"
+              title="Download orders matching current filters as CSV"
+            >
+              Export filtered
             </button>
             <button
               type="button"
@@ -221,6 +233,14 @@
                 <option value="pending">Not synced</option>
               </select>
             </label>
+            <label class="filter-field">
+              <span class="filter-label">Has return</span>
+              <select id="has-return-filter">
+                <option value="">All orders</option>
+                <option value="yes">With return</option>
+                <option value="no">No return</option>
+              </select>
+            </label>
           </div>
           <div class="filter-card-actions">
             <button type="button" class="btn-ghost" id="clear-filters-btn">Clear filters</button>
@@ -314,6 +334,115 @@
         </div>
       </section>
 
+      <section id="returns-panel" class="panel hidden">
+        <div class="returns-filter-card filter-card">
+          <div class="filter-card-grid filter-card-grid--wide">
+            <label class="filter-field">
+              <span class="filter-label">Return Order ID</span>
+              <input type="search" id="return-id-filter" placeholder="Search return ID…" autocomplete="off" spellcheck="false" />
+            </label>
+            <label class="filter-field">
+              <span class="filter-label">PO number</span>
+              <input type="search" id="return-po-filter" placeholder="Search PO…" autocomplete="off" spellcheck="false" />
+            </label>
+            <label class="filter-field">
+              <span class="filter-label">Status</span>
+              <select id="return-status-filter">
+                <option value="">All</option>
+                <option value="INITIATED">INITIATED</option>
+                <option value="COMPLETED">COMPLETED</option>
+              </select>
+            </label>
+            <label class="filter-field">
+              <span class="filter-label">Refund status</span>
+              <select id="return-refund-filter">
+                <option value="">All</option>
+                <option value="NOT_REFUNDED">NOT_REFUNDED</option>
+                <option value="REFUND_INITIATED">REFUND_INITIATED</option>
+                <option value="REFUND_COMPLETED">REFUND_COMPLETED</option>
+                <option value="CANCELLED">CANCELLED</option>
+              </select>
+            </label>
+            <label class="filter-field">
+              <span class="filter-label">Delivery status</span>
+              <select id="return-delivery-filter">
+                <option value="">All</option>
+                <option value="NOT_SHIPPED">NOT_SHIPPED</option>
+                <option value="IN_TRANSIT">IN_TRANSIT</option>
+                <option value="DELIVERED_TO_RC">DELIVERED_TO_RC</option>
+              </select>
+            </label>
+            <label class="filter-field">
+              <span class="filter-label">Credit note</span>
+              <select id="return-credit-filter">
+                <option value="">All</option>
+                <option value="Not Posted">Not Posted</option>
+                <option value="Posted">Posted</option>
+                <option value="Posted (Manual)">Posted (Manual)</option>
+                <option value="Failed">Failed</option>
+                <option value="Not Applicable">Not Applicable</option>
+              </select>
+            </label>
+            <label class="filter-field">
+              <span class="filter-label">Return from</span>
+              <input type="date" id="return-date-from" />
+            </label>
+            <label class="filter-field">
+              <span class="filter-label">Return to</span>
+              <input type="date" id="return-date-to" />
+            </label>
+          </div>
+          <div class="filter-card-actions">
+            <button type="button" class="btn-ghost" id="clear-returns-filters-btn">Clear filters</button>
+            <button type="button" class="btn-primary" id="refresh-returns-btn">Refresh</button>
+          </div>
+        </div>
+
+        <div class="returns-stats" id="returns-stats">
+          <span class="stat-chip stat-chip--muted">Loading returns…</span>
+        </div>
+
+        <div class="table-scroll">
+          <table class="report-table" id="returns-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Return Order ID</th>
+                <th>Customer Order</th>
+                <th>PO IDs</th>
+                <th>Return Date</th>
+                <th>Status</th>
+                <th>Delivery</th>
+                <th>Refund Status</th>
+                <th>Refund Amount</th>
+                <th>Reasons</th>
+                <th>Credit Note</th>
+                <th>Updated</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="returns-body">
+              <tr><td colspan="13" class="loading-cell">Loading returns…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="pagination" id="returns-pagination">
+          <span class="pagination-info" id="returns-pagination-info">—</span>
+          <div class="pagination-actions">
+            <label class="filter-inline">
+              Per page
+              <select id="returns-page-size">
+                <option value="50">50</option>
+                <option value="100" selected>100</option>
+                <option value="200">200</option>
+              </select>
+            </label>
+            <button type="button" class="btn-outline" id="returns-prev-page" disabled>Previous</button>
+            <button type="button" class="btn-outline" id="returns-next-page" disabled>Next</button>
+          </div>
+        </div>
+      </section>
+
       <section id="sync-panel" class="panel hidden">
         <div class="table-scroll">
           <table class="report-table" id="sync-table">
@@ -329,6 +458,30 @@
             </thead>
             <tbody id="sync-body"></tbody>
           </table>
+        </div>
+
+        <div class="panel-section" id="returns-sync-section">
+          <div class="panel-section-head">
+            <h2 class="panel-section-title">Returns sync log</h2>
+          </div>
+          <div class="table-scroll">
+            <table class="report-table" id="returns-sync-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Status</th>
+                  <th>Mode</th>
+                  <th>From</th>
+                  <th>To</th>
+                  <th>Records</th>
+                  <th>Created at</th>
+                </tr>
+              </thead>
+              <tbody id="returns-sync-body">
+                <tr><td colspan="7" class="loading-cell">Loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
         </div>
 
         <div class="panel-section" id="sap-items-section">

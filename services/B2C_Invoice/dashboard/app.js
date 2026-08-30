@@ -1,5 +1,5 @@
 /** Hardcoded API — dev account 699013266218 / ap-south-1 */
-const API_BASE = "https://5e4ry5m7f7.execute-api.ap-south-1.amazonaws.com";
+const API_BASE = "https://8ueklras0j.execute-api.ap-south-1.amazonaws.com";
 
 const AUTH_STORAGE_KEY = "walmart_dashboard_auth";
 
@@ -180,6 +180,7 @@ const COLSPAN = 14;
 let currentOffset = 0;
 let pageTotal = 0;
 let lastDashboardStats = null;
+let lastFilteredTotals = null;
 let sortBy = "order_date";
 let sortDir = "desc";
 
@@ -200,6 +201,7 @@ const countySurchargeFilter = document.getElementById("county-surcharge-filter")
 const promotionDiscountFilter = document.getElementById("promotion-discount-filter");
 const lineCountFilter = document.getElementById("line-count-filter");
 const sapSyncFilter = document.getElementById("sap-sync-filter");
+const hasReturnFilter = document.getElementById("has-return-filter");
 const clearFiltersBtn = document.getElementById("clear-filters-btn");
 const pageSizeSelect = document.getElementById("page-size");
 const lastSyncMeta = document.getElementById("last-sync-meta");
@@ -232,6 +234,31 @@ const sapAlertPanelCount = document.getElementById("sap-alert-panel-count");
 const sapAlertViewAll = document.getElementById("sap-alert-view-all");
 const sapRetryBtn = document.getElementById("sap-retry-btn");
 const sapExportFailedBtn = document.getElementById("sap-export-failed-btn");
+const ordersExportBtn = document.getElementById("orders-export-btn");
+
+function hasActiveOrderFilters() {
+  const hasText = (el) => Boolean(String(el?.value || "").trim());
+  return (
+    hasText(poFilter) ||
+    hasText(orderFilter) ||
+    hasText(statusFilter) ||
+    hasText(skuFilter) ||
+    hasText(itemFilter) ||
+    hasText(qtyFilter) ||
+    hasText(orderDateFrom) ||
+    hasText(orderDateTo) ||
+    hasText(statusDateFrom) ||
+    hasText(statusDateTo) ||
+    hasText(updatedFrom) ||
+    hasText(updatedTo) ||
+    hasText(shippingFilter) ||
+    hasText(countySurchargeFilter) ||
+    hasText(promotionDiscountFilter) ||
+    hasText(lineCountFilter) ||
+    hasText(sapSyncFilter) ||
+    hasText(hasReturnFilter)
+  );
+}
 
 function buildOrdersQueryParams(limit, offset) {
   const params = new URLSearchParams();
@@ -262,6 +289,7 @@ function buildOrdersQueryParams(limit, offset) {
   add("promotion_discount", promotionDiscountFilter?.value);
   add("line_count", lineCountFilter?.value);
   add("sap_sync", sapSyncFilter?.value);
+  add("has_return", hasReturnFilter?.value);
 
   return params.toString();
 }
@@ -504,7 +532,7 @@ function setPageTitleRecords(countText) {
   pageTitle.innerHTML = `Records <span class="page-title-muted">(<span id="record-count">${escapeHtml(countText)}</span>)</span>`;
 }
 
-function renderStatChips(stats) {
+function renderStatChips(stats, filteredTotals = null) {
   if (!statChips) return;
   const sync = stats?.last_sync;
   const failed = stats?.sap_sync?.failed ?? 0;
@@ -516,9 +544,17 @@ function renderStatChips(stats) {
     ? `Last sync #${sync.id} · ${sync.status}`
     : "No sync runs yet";
 
+  const ordersCount = filteredTotals
+    ? filteredTotals.orders
+    : stats?.total_orders ?? 0;
+  const linesCount = filteredTotals
+    ? filteredTotals.lines
+    : stats?.total_lines ?? 0;
+  const filteredSuffix = filteredTotals ? " (filtered)" : "";
+
   statChips.innerHTML = `
-    <span class="stat-chip">${escapeHtml(String(stats?.total_orders ?? 0))} orders</span>
-    <span class="stat-chip">${escapeHtml(String(stats?.total_lines ?? 0))} lines</span>
+    <span class="stat-chip">${escapeHtml(String(ordersCount))} orders${filteredSuffix}</span>
+    <span class="stat-chip">${escapeHtml(String(linesCount))} lines${filteredSuffix}</span>
     <span class="stat-chip stat-chip--success">${escapeHtml(String(posted))} SAP posted</span>
     <span class="stat-chip ${failed > 0 ? "stat-chip--danger" : "stat-chip--muted"}">${escapeHtml(String(failed))} SAP failed</span>
     <span class="stat-chip stat-chip--muted">${escapeHtml(syncLabel)} · ${escapeHtml(finished)}</span>
@@ -529,6 +565,7 @@ function setOrdersChromeVisible(visible) {
   ordersFilterCard?.classList.toggle("hidden", !visible);
   statChips?.classList.toggle("hidden", !visible);
   sapRetryBtn?.classList.toggle("hidden", !visible);
+  ordersExportBtn?.classList.toggle("hidden", !visible);
   sapExportFailedBtn?.classList.toggle("hidden", !visible);
   sapAlertWrap?.classList.toggle("hidden", !visible);
 }
@@ -753,6 +790,33 @@ function downloadCsv(filename, headers, rows) {
   URL.revokeObjectURL(url);
 }
 
+async function fetchAllFilteredOrders() {
+  const all = [];
+  let offset = 0;
+  let total = null;
+  let totalLines = null;
+
+  while (total == null || offset < total) {
+    const page = await apiGet(
+      `/v1/walmart/orders?${buildOrdersQueryParams(EXPORT_PAGE_SIZE, offset)}`
+    );
+    const items = normalizeOrderItems(page.items || []);
+    total = Number(page.total ?? 0);
+    if (page.total_lines != null) totalLines = Number(page.total_lines);
+    all.push(...items);
+
+    if (!items.length) break;
+    offset += items.length;
+    if (offset >= total) break;
+  }
+
+  return {
+    orders: all,
+    total: total ?? all.length,
+    total_lines: totalLines,
+  };
+}
+
 async function fetchAllSapFailedOrders() {
   const all = [];
   let offset = 0;
@@ -777,6 +841,47 @@ async function fetchAllSapFailedOrders() {
   }
 
   return { orders: all, total: total ?? all.length };
+}
+
+async function exportFilteredOrders(btn) {
+  const button = btn || ordersExportBtn;
+  if (!button) return;
+
+  button.disabled = true;
+  const originalLabel = button.textContent;
+  button.textContent = "Exporting…";
+
+  try {
+    hideError();
+    const { orders, total } = await fetchAllFilteredOrders();
+    if (!orders.length) {
+      window.alert("No orders match the current filters.");
+      return;
+    }
+
+    const rows = buildSapFailedExportRows(orders);
+    const stamp = new Date().toISOString().slice(0, 10);
+    const filterTag = hasActiveOrderFilters() ? "filtered" : "all";
+    downloadCsv(
+      `walmart-orders-${filterTag}-${stamp}.csv`,
+      SAP_FAILED_EXPORT_HEADERS,
+      rows
+    );
+    button.textContent = `Exported ${total}`;
+    window.setTimeout(() => {
+      if (button.textContent.startsWith("Exported")) {
+        button.textContent = originalLabel;
+      }
+    }, 2000);
+  } catch (err) {
+    showError(`Export failed: ${err.message}`);
+    button.textContent = originalLabel;
+  } finally {
+    button.disabled = false;
+    if (button.textContent === "Exporting…") {
+      button.textContent = originalLabel;
+    }
+  }
 }
 
 async function exportSapFailures(btn) {
@@ -819,9 +924,14 @@ async function exportSapFailures(btn) {
   }
 }
 
-function setRecordCount(shown, total) {
+function setRecordCount(shownOnPage, total, filtered = false) {
   const el = document.getElementById("record-count");
-  if (el) el.textContent = `${shown} of ${total}`;
+  if (!el) return;
+  if (filtered) {
+    el.textContent = `${shownOnPage} on page · ${total} matching`;
+    return;
+  }
+  el.textContent = `${shownOnPage} of ${total}`;
 }
 
 function updatePagination(offset, total, itemCount) {
@@ -1124,16 +1234,16 @@ if (sapErrorClose) {
   sapErrorClose.addEventListener("click", closeSapErrorModal);
 }
 
-function renderOrders(items, offset, total) {
+function renderOrders(items, offset, total, filtered = false) {
   if (!items.length) {
     ordersBody.innerHTML =
       `<tr><td colspan="${COLSPAN}" class="loading-cell">No orders found.</td></tr>`;
-    setRecordCount(0, total);
+    setRecordCount(0, total, filtered);
     updatePagination(offset, total, 0);
     return;
   }
 
-  setRecordCount(items.length, total);
+  setRecordCount(items.length, total, filtered);
   updatePagination(offset, total, items.length);
 
   ordersBody.innerHTML = items
@@ -1142,6 +1252,7 @@ function renderOrders(items, offset, total) {
       const lineCount = lines.length;
       const poMetaParts = [];
       if (lineCount > 1) poMetaParts.push(`<span class="po-line-count">${lineCount} lines</span>`);
+      if (row.has_return) poMetaParts.push('<span class="badge badge-acknowledged" style="font-size:10px">Return</span>');
       if (row.has_shipping_charges === true || row.has_shipping_charges === false) {
         poMetaParts.push(shippingLabel(row.has_shipping_charges));
       }
@@ -1568,6 +1679,19 @@ function hasSapPayload(sapSync) {
   return false;
 }
 
+function hasSapResponse(sapSync) {
+  const resp = sapSync?.sap_response;
+  if (resp == null) return false;
+  if (typeof resp === "string") {
+    const trimmed = resp.trim();
+    return trimmed !== "" && trimmed !== "{}" && trimmed !== "null";
+  }
+  if (typeof resp === "object") {
+    return Object.keys(resp).length > 0;
+  }
+  return false;
+}
+
 function isSapPayloadPreview(payload) {
   if (!payload || typeof payload !== "object") return false;
   return payload._meta?.preview === true;
@@ -1758,7 +1882,9 @@ async function toggleOrderDetail(btn, po) {
 
   try {
     const data = await fetchOrderDetail(po);
-    detailTr.querySelector("td").innerHTML = renderTracePanel(data, null);
+    detailTr.querySelector("td").innerHTML = (typeof renderTracePanelWithReturns === "function")
+      ? renderTracePanelWithReturns(data, null)
+      : renderTracePanel(data, null);
     detailTr.querySelector(".btn-hide-trace")?.addEventListener("click", () => {
       detailTr.remove();
       btn.textContent = "View";
@@ -1917,14 +2043,16 @@ function setSapAlertHint(stats) {
   sapAlertHint.textContent = "";
 }
 
-function setLastSyncMeta(stats) {
+function setLastSyncMeta(stats, filteredTotals = null) {
   lastDashboardStats = stats;
   const sync = stats?.last_sync;
   updateSapAlertBell(stats);
   setSapAlertHint(stats);
-  renderStatChips(stats);
+  renderStatChips(stats, filteredTotals);
   if (!sync) {
-    lastSyncMeta.textContent = "No sync runs recorded yet.";
+    lastSyncMeta.textContent = filteredTotals
+      ? `Filtered: ${filteredTotals.orders} orders (${filteredTotals.lines} lines). No sync runs recorded yet.`
+      : "No sync runs recorded yet.";
     return;
   }
   const finished = sync.sync_finished_at
@@ -1932,6 +2060,10 @@ function setLastSyncMeta(stats) {
     : "—";
   const sapFailed = stats?.sap_sync?.failed ?? 0;
   const sapPart = sapFailed > 0 ? ` · SAP failed: ${sapFailed}` : "";
+  if (filteredTotals) {
+    lastSyncMeta.textContent = `Filtered: ${filteredTotals.orders} orders (${filteredTotals.lines} lines) · Database total: ${stats.total_orders ?? 0} orders · Last sync #${sync.id} (${sync.status}) at ${finished}${sapPart}`;
+    return;
+  }
   lastSyncMeta.textContent = `Total in database: ${stats.total_orders ?? 0} orders (${stats.total_lines ?? 0} lines) · Last sync #${sync.id} (${sync.status}) at ${finished}${sapPart}`;
 }
 
@@ -1954,7 +2086,6 @@ async function loadOrders(resetPage = false) {
   try {
     stats = await apiGet("/v1/walmart/stats");
     populateStatusFilter(stats.by_status);
-    setLastSyncMeta(stats);
   } catch (err) {
     showError(`Stats failed: ${err.message}`);
     ordersBody.innerHTML =
@@ -1970,11 +2101,20 @@ async function loadOrders(resetPage = false) {
     if (orders.sort_by) sortBy = orders.sort_by;
     if (orders.sort_dir) sortDir = orders.sort_dir;
     updateSortIndicators();
+    const filtersActive = hasActiveOrderFilters();
     const status = statusFilter.value;
     const total =
       orders.total ?? filteredTotal(stats, status) ?? orders.items?.length ?? 0;
+    const filteredTotals = filtersActive
+      ? {
+          orders: total,
+          lines: Number(orders.total_lines ?? 0),
+        }
+      : null;
+    lastFilteredTotals = filteredTotals;
+    setLastSyncMeta(stats, filteredTotals);
     const groupedItems = normalizeOrderItems(orders.items || []);
-    renderOrders(groupedItems, orders.offset ?? currentOffset, total);
+    renderOrders(groupedItems, orders.offset ?? currentOffset, total, filtersActive);
   } catch (err) {
     let hint = err.message;
     if (String(err.message).includes("has_shipping_charges")) {
@@ -2043,6 +2183,7 @@ function showOrdersPanel() {
   document.querySelectorAll(".nav-item").forEach((el) => el.classList.remove("active"));
   document.querySelector('.nav-item[href="#"]').classList.add("active");
   ordersPanel.classList.remove("hidden");
+  document.getElementById("returns-panel")?.classList.add("hidden");
   syncPanel.classList.add("hidden");
   setOrdersChromeVisible(true);
   if (pageEyebrow) pageEyebrow.textContent = "Orders report";
@@ -2054,6 +2195,7 @@ function showSyncPanel(scrollToSap = false) {
   document.querySelectorAll(".nav-item").forEach((el) => el.classList.remove("active"));
   document.getElementById("nav-sync").classList.add("active");
   ordersPanel.classList.add("hidden");
+  document.getElementById("returns-panel")?.classList.add("hidden");
   syncPanel.classList.remove("hidden");
   setOrdersChromeVisible(false);
   if (pageEyebrow) pageEyebrow.textContent = scrollToSap ? "SAP catalog" : "Sync history";
@@ -2071,6 +2213,7 @@ function showSapPanel() {
   document.querySelectorAll(".nav-item").forEach((el) => el.classList.remove("active"));
   document.getElementById("nav-sap").classList.add("active");
   ordersPanel.classList.add("hidden");
+  document.getElementById("returns-panel")?.classList.add("hidden");
   syncPanel.classList.remove("hidden");
   setOrdersChromeVisible(false);
   if (pageEyebrow) pageEyebrow.textContent = "SAP catalog";
@@ -2168,6 +2311,12 @@ if (sapSyncFilter) {
   });
 }
 
+if (hasReturnFilter) {
+  hasReturnFilter.addEventListener("change", () => {
+    loadOrders(true).catch((e) => showError(e.message));
+  });
+}
+
 bindTextFilter(poFilter);
 bindTextFilter(orderFilter);
 bindTextFilter(skuFilter);
@@ -2200,6 +2349,7 @@ clearFiltersBtn.addEventListener("click", () => {
   if (promotionDiscountFilter) promotionDiscountFilter.value = "";
   if (lineCountFilter) lineCountFilter.value = "";
   if (sapSyncFilter) sapSyncFilter.value = "";
+  if (hasReturnFilter) hasReturnFilter.value = "";
   sortBy = "order_date";
   sortDir = "desc";
   updateSortIndicators();
@@ -2237,6 +2387,12 @@ if (sapRetryBtn) {
 if (sapExportFailedBtn) {
   sapExportFailedBtn.addEventListener("click", () => {
     exportSapFailures(sapExportFailedBtn).catch((e) => showError(e.message));
+  });
+}
+
+if (ordersExportBtn) {
+  ordersExportBtn.addEventListener("click", () => {
+    exportFilteredOrders(ordersExportBtn).catch((e) => showError(e.message));
   });
 }
 
@@ -2313,6 +2469,688 @@ if (logoutBtn) {
     showLoginScreen();
   });
 }
+
+// ---------------------------------------------------------------------------
+// Returns panel
+// ---------------------------------------------------------------------------
+
+const returnsPanel = document.getElementById("returns-panel");
+const returnsBody = document.getElementById("returns-body");
+const returnsStats = document.getElementById("returns-stats");
+const returnsPaginationInfo = document.getElementById("returns-pagination-info");
+const returnsPrevPage = document.getElementById("returns-prev-page");
+const returnsNextPage = document.getElementById("returns-next-page");
+const returnsPageSize = document.getElementById("returns-page-size");
+const returnIdFilter = document.getElementById("return-id-filter");
+const returnPoFilter = document.getElementById("return-po-filter");
+const returnStatusFilter = document.getElementById("return-status-filter");
+const returnRefundFilter = document.getElementById("return-refund-filter");
+const returnDeliveryFilter = document.getElementById("return-delivery-filter");
+const returnCreditFilter = document.getElementById("return-credit-filter");
+const returnDateFrom = document.getElementById("return-date-from");
+const returnDateTo = document.getElementById("return-date-to");
+const returnsSyncBody = document.getElementById("returns-sync-body");
+
+let returnsOffset = 0;
+let returnsTotal = 0;
+
+function returnsPageSizeVal() {
+  return parseInt(returnsPageSize?.value, 10) || 100;
+}
+
+function buildReturnsQueryParams(limit, offset) {
+  const params = new URLSearchParams();
+  params.set("limit", String(limit));
+  params.set("offset", String(offset));
+
+  const add = (key, value) => {
+    const trimmed = String(value || "").trim();
+    if (trimmed) params.set(key, trimmed);
+  };
+
+  add("return_order_id", returnIdFilter?.value);
+  add("purchase_order_id", returnPoFilter?.value);
+  add("status", returnStatusFilter?.value);
+  add("current_refund_status", returnRefundFilter?.value);
+  add("current_delivery_status", returnDeliveryFilter?.value);
+  add("credit_note_status", returnCreditFilter?.value);
+  add("return_date_from", returnDateFrom?.value);
+  add("return_date_to", returnDateTo?.value);
+
+  return params.toString();
+}
+
+function returnStatusBadge(status) {
+  const key = String(status || "").toLowerCase();
+  const map = {
+    initiated: "badge-acknowledged",
+    completed: "badge-delivered",
+  };
+  const cls = map[key] || "badge-default";
+  return `<span class="badge ${cls}">${escapeHtml(status || "—")}</span>`;
+}
+
+function returnDeliveryBadge(status) {
+  const key = String(status || "").toLowerCase();
+  const map = {
+    not_shipped: "badge-created",
+    in_transit: "badge-shipped",
+    delivered_to_rc: "badge-delivered",
+  };
+  const cls = map[key] || "badge-default";
+  return `<span class="badge ${cls}">${escapeHtml(status || "—")}</span>`;
+}
+
+function returnRefundBadge(status) {
+  const key = String(status || "").toLowerCase();
+  const map = {
+    not_refunded: "badge-created",
+    refund_initiated: "badge-running",
+    refund_completed: "badge-success",
+    cancelled: "badge-failed",
+  };
+  const cls = map[key] || "badge-default";
+  return `<span class="badge ${cls}">${escapeHtml(status || "—")}</span>`;
+}
+
+function creditNoteBadge(status) {
+  const key = String(status || "").toLowerCase();
+  const map = {
+    "not posted": "badge-acknowledged",
+    posted: "badge-success",
+    "posted (manual)": "badge-success",
+    failed: "badge-failed",
+    "not applicable": "badge-default",
+  };
+  const cls = map[key] || "badge-default";
+  return `<span class="badge ${cls}">${escapeHtml(status || "—")}</span>`;
+}
+
+function canShowPostCn(row) {
+  const refund = String(row.current_refund_status || "").toUpperCase();
+  const cn = String(row.credit_note_status || "").trim();
+  if (refund !== "REFUND_COMPLETED") return false;
+  if (!row.ar_invoice_posted) return false;
+  if (["Posted", "Posted (Manual)", "Not Applicable"].includes(cn)) return false;
+  return true;
+}
+
+function canShowCancelCn(row) {
+  return String(row.credit_note_status || "").trim() === "Posted";
+}
+
+function renderPostCnButton(row) {
+  if (!canShowPostCn(row)) return "";
+  return '<button type="button" class="btn-post-sap btn-post-cn" title="Post credit note to SAP (AR Invoice already posted)">Post CN</button>';
+}
+
+function renderCnActionButtons(row) {
+  const parts = [renderPostCnButton(row)];
+  if (canShowCancelCn(row)) {
+    parts.push(
+      '<button type="button" class="btn-outline btn-cn-cancel" title="Cancel credit note in SAP">Cancel</button>'
+    );
+  }
+  return parts.filter(Boolean).join(" ");
+}
+
+async function postReturnCreditNote(returnOrderId, btn) {
+  if (
+    !window.confirm(
+      `CN Post for return ${returnOrderId}?\n\nRequires REFUND_COMPLETED and a posted AR Invoice for the customer order.`
+    )
+  ) {
+    return;
+  }
+
+  btn.disabled = true;
+  const originalLabel = btn.textContent;
+  btn.textContent = "Posting…";
+
+  try {
+    const result = await apiPost(
+      `/v1/walmart/sap-cn-post?return_order_id=${encodeURIComponent(returnOrderId)}`
+    );
+    await loadReturns(false);
+    hideError();
+    if (result?.status === "skipped") {
+      showError(`CN post skipped for ${returnOrderId}: ${result.skip_reason || result.error_message || "unknown"}`);
+    } else if (result?.status === "posted") {
+      // refreshed table shows Posted
+    }
+  } catch (err) {
+    showError(`CN post failed for ${returnOrderId}: ${err.message}`);
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+  }
+}
+
+async function cancelReturnCn(returnOrderId, btn) {
+  if (
+    !window.confirm(
+      `Cancel the SAP credit note for return ${returnOrderId}?\n\nThis calls POST CreditNotes(DocEntry)/Cancel and resets status to Not Posted.`
+    )
+  ) {
+    return;
+  }
+  btn.disabled = true;
+  const originalLabel = btn.textContent;
+  btn.textContent = "Cancelling…";
+  try {
+    await apiPost(`/v1/walmart/sap-cn-cancel?return_order_id=${encodeURIComponent(returnOrderId)}`);
+    await loadReturns(false);
+    hideError();
+  } catch (err) {
+    showError(`CN cancel failed for ${returnOrderId}: ${err.message}`);
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+  }
+}
+
+async function previewReturnCn(returnOrderId, containerEl) {
+  const target =
+    containerEl?.querySelector?.(".cn-preview-result") ||
+    document.querySelector(`[data-cn-preview-for="${CSS.escape(returnOrderId)}"]`);
+
+  if (target) {
+    target.innerHTML = `<p class="muted">Building credit-note payload…</p>`;
+  }
+
+  try {
+    const result = await apiGet(
+      `/v1/walmart/sap-cn-preview?return_order_id=${encodeURIComponent(returnOrderId)}`
+    );
+    hideError();
+    const payload = result.payload || result;
+    const jsonText = formatJson(payload);
+    if (target) {
+      target.innerHTML = `
+        <details class="trace-section json-collapse" open>
+          <summary class="trace-section-title">Preview payload (fresh rebuild — not posted)</summary>
+          <p class="muted sap-payload-hint">
+            Live rebuild from return <code>raw_json</code> + SAP AR Invoice
+            ${result.base_doc_entry != null ? `(BaseEntry <code>${escapeHtml(String(result.base_doc_entry))}</code>)` : ""}.
+            Copy into Postman for <code>POST /CreditNotes</code>.
+          </p>
+          <pre class="json-pre">${escapeHtml(jsonText)}</pre>
+        </details>`;
+    } else {
+      showError(`CN preview OK for ${returnOrderId} — open return detail to view inline.`);
+    }
+  } catch (err) {
+    if (target) {
+      target.innerHTML = `<p class="sap-trace-fail"><strong>Preview failed:</strong> ${escapeHtml(err.message)}</p>`;
+    }
+    showError(`CN preview failed for ${returnOrderId}: ${err.message}`);
+  }
+}
+
+function updateReturnsPagination(offset, total, itemCount) {
+  returnsTotal = total;
+  const start = total === 0 ? 0 : offset + 1;
+  const end = offset + itemCount;
+  if (returnsPaginationInfo) returnsPaginationInfo.textContent = `Showing ${start}–${end} of ${total}`;
+  if (returnsPrevPage) returnsPrevPage.disabled = offset <= 0;
+  if (returnsNextPage) returnsNextPage.disabled = end >= total;
+}
+
+function renderReturns(items, offset, total) {
+  if (!items.length) {
+    returnsBody.innerHTML = '<tr><td colspan="13" class="loading-cell">No returns found.</td></tr>';
+    updateReturnsPagination(offset, total, 0);
+    return;
+  }
+
+  updateReturnsPagination(offset, total, items.length);
+
+  returnsBody.innerHTML = items
+    .map((row, i) => `
+    <tr class="data-row" data-return-id="${escapeHtml(row.return_order_id)}">
+      <td class="cell-center cell-muted">${offset + i + 1}</td>
+      <td class="cell-mono">${escapeHtml(row.return_order_id || "—")}</td>
+      <td class="cell-mono">${escapeHtml(row.customer_order_id || "—")}</td>
+      <td class="cell-mono">${escapeHtml(row.purchase_order_ids || "—")}</td>
+      <td>${formatDateStack(row.return_order_date)}</td>
+      <td>${returnStatusBadge(row.status)}</td>
+      <td>${returnDeliveryBadge(row.current_delivery_status)}</td>
+      <td>${returnRefundBadge(row.current_refund_status)}</td>
+      <td class="cell-mono">${row.total_refund_amount != null ? formatMoney(row.total_refund_amount, row.total_refund_currency || "USD") : "—"}</td>
+      <td>${escapeHtml(row.return_reasons || "—")}</td>
+      <td>${creditNoteBadge(row.credit_note_status)}</td>
+      <td>${formatDateStack(row.updated_at)}</td>
+      <td class="cell-center cell-actions">
+        <button type="button" class="btn-view btn-return-view">View</button>
+        ${renderCnActionButtons(row)}
+      </td>
+    </tr>`)
+    .join("");
+
+  returnsBody.querySelectorAll(".btn-return-view").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const row = btn.closest(".data-row");
+      toggleReturnDetail(btn, row.getAttribute("data-return-id"));
+    });
+  });
+
+  returnsBody.querySelectorAll(".btn-post-cn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const row = btn.closest(".data-row");
+      postReturnCreditNote(row.getAttribute("data-return-id"), btn);
+    });
+  });
+
+  returnsBody.querySelectorAll(".btn-cn-cancel").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const row = btn.closest(".data-row");
+      cancelReturnCn(row.getAttribute("data-return-id"), btn);
+    });
+  });
+}
+
+function renderCnSyncSection(cnSync, returnOrderId) {
+  let summaryHtml = "";
+  if (!cnSync) {
+    summaryHtml = `<p class="muted">No credit-note sync attempt recorded yet.</p>`;
+  } else if (cnSync.status === "posted") {
+    summaryHtml = `
+      <div class="sap-trace-summary sap-trace-ok">
+        <span class="badge badge-success">Posted to SAP</span>
+        <dl class="detail-dl sap-trace-dl">
+          <div><dt>DocEntry</dt><dd class="cell-mono">${escapeHtml(String(cnSync.sap_doc_entry ?? "—"))}</dd></div>
+          <div><dt>DocNum</dt><dd class="cell-mono">${escapeHtml(String(cnSync.sap_doc_num ?? "—"))}</dd></div>
+          <div><dt>Base invoice</dt><dd class="cell-mono">${escapeHtml(String(cnSync.base_doc_entry ?? "—"))}</dd></div>
+          ${cnSync.attempt_count > 0 ? `<div><dt>Attempts</dt><dd>${escapeHtml(String(cnSync.attempt_count))}</dd></div>` : ""}
+          ${cnSync.updated_at ? `<div><dt>Updated</dt><dd>${formatDateStack(cnSync.updated_at)}</dd></div>` : ""}
+        </dl>
+      </div>`;
+  } else if (cnSync.status === "failed") {
+    summaryHtml = `
+      <div class="sap-trace-summary sap-trace-fail">
+        <span class="badge badge-failed">Failed</span>
+        ${cnSync.error_phase ? `<p class="sap-trace-phase">Phase: <strong>${escapeHtml(cnSync.error_phase)}</strong></p>` : ""}
+        ${cnSync.attempt_count > 0 ? `<p class="sap-trace-phase">Attempts: <strong>${escapeHtml(String(cnSync.attempt_count))}</strong></p>` : ""}
+        <pre class="sap-error-inline">${escapeHtml(cnSync.error_message || "Unknown error")}</pre>
+      </div>`;
+  } else {
+    summaryHtml = `
+      <div class="sap-trace-summary">
+        <span class="badge badge-acknowledged">${escapeHtml(cnSync.status || "—")}</span>
+        ${cnSync.skip_reason ? `<p class="muted">${escapeHtml(cnSync.skip_reason)}</p>` : ""}
+      </div>`;
+  }
+
+  const payloadHtml = hasSapPayload(cnSync)
+    ? `<details class="trace-section json-collapse" open>
+         <summary class="trace-section-title">CN request payload (JSON) — saved from last post</summary>
+         <p class="muted sap-payload-hint">Body sent to SAP Service Layer (<code>POST /CreditNotes</code>). Use <strong>Preview payload</strong> for a fresh rebuild.</p>
+         <pre class="json-pre">${escapeHtml(formatJson(cnSync.sap_payload))}</pre>
+       </details>`
+    : `<p class="muted">No saved CN payload in log — click <strong>Preview payload</strong> to rebuild live.</p>`;
+
+  const responseHtml = hasSapResponse(cnSync)
+    ? `<details class="trace-section json-collapse" open>
+         <summary class="trace-section-title">SAP response (JSON)</summary>
+         <p class="muted sap-payload-hint">Full body returned by SAP after <code>POST /CreditNotes</code> (DocEntry, lines, Address, etc.).</p>
+         <pre class="json-pre">${escapeHtml(formatJson(cnSync.sap_response))}</pre>
+       </details>`
+    : cnSync?.status === "posted"
+      ? `<p class="muted">No SAP response body stored for this credit note.</p>`
+      : "";
+
+  return `
+    <div class="order-detail-box cn-sap-box">
+      <div class="order-detail-box-title">
+        Credit note / SAP
+        <button type="button" class="btn-outline btn-cn-preview" data-return-id="${escapeHtml(returnOrderId)}" style="margin-left:0.75rem">Preview payload</button>
+      </div>
+      ${summaryHtml}
+      ${payloadHtml}
+      ${responseHtml}
+      <div class="cn-preview-result" data-cn-preview-for="${escapeHtml(returnOrderId)}"></div>
+    </div>`;
+}
+
+function renderReturnDetailPanel(ret) {
+  const lines = ret.return_order_lines || [];
+  const linesHtml = lines.length
+    ? lines.map((line, i) => `
+      <div class="line-item-box">
+        <div class="line-item-head">
+          <span class="line-item-num">Line ${i + 1}</span>
+          ${returnStatusBadge(line.status)}
+          <span class="line-item-meta cell-mono">${escapeHtml(line.sku || "—")}</span>
+        </div>
+        <p class="line-item-product">${escapeHtml(line.product_name || "—")}</p>
+        <dl class="detail-dl">
+          <div><dt>PO #</dt><dd class="cell-mono">${escapeHtml(line.purchase_order_id || "—")}</dd></div>
+          <div><dt>Return reason</dt><dd>${escapeHtml(line.return_reason || "—")}</dd></div>
+          <div><dt>Qty</dt><dd>${line.quantity != null ? line.quantity : "—"}</dd></div>
+          <div><dt>Unit price</dt><dd>${line.unit_price != null ? formatMoney(line.unit_price, line.unit_price_currency || "USD") : "—"}</dd></div>
+          <div><dt>Status</dt><dd>${returnStatusBadge(line.status)}</dd></div>
+          <div><dt>Status time</dt><dd>${formatDateStack(line.status_time)}</dd></div>
+          <div><dt>Delivery</dt><dd>${returnDeliveryBadge(line.current_delivery_status)}</dd></div>
+          <div><dt>Refund</dt><dd>${returnRefundBadge(line.current_refund_status)}</dd></div>
+        </dl>
+      </div>`).join("")
+    : '<p class="muted">No line details available.</p>';
+
+  return `
+    <div class="trace-panel">
+      <div class="trace-header">
+        <div>
+          <div class="trace-title">Return detail</div>
+          <div class="trace-sub">
+            Return ${escapeHtml(ret.return_order_id)} · Customer ${escapeHtml(ret.customer_order_id || "—")}
+            · Refund mode: ${escapeHtml(ret.refund_mode || "—")}
+          </div>
+        </div>
+        <button type="button" class="btn-outline btn-hide-return-trace">Hide</button>
+      </div>
+
+      <div class="trace-cards">
+        <div class="trace-card"><span class="trace-card-label">Return date</span><span class="trace-card-value">${escapeHtml(ret.return_order_date ? new Date(ret.return_order_date).toLocaleString() : "—")}</span></div>
+        <div class="trace-card"><span class="trace-card-label">Refund</span><span class="trace-card-value">${ret.total_refund_amount != null ? formatMoney(ret.total_refund_amount, ret.total_refund_currency || "USD") : "—"}</span></div>
+        <div class="trace-card"><span class="trace-card-label">Status</span><span class="trace-card-value">${escapeHtml(ret.status || "—")}</span></div>
+        <div class="trace-card"><span class="trace-card-label">Delivery</span><span class="trace-card-value">${escapeHtml(ret.current_delivery_status || "—")}</span></div>
+        <div class="trace-card"><span class="trace-card-label">Refund status</span><span class="trace-card-value">${escapeHtml(ret.current_refund_status || "—")}</span></div>
+        <div class="trace-card"><span class="trace-card-label">Credit note</span><span class="trace-card-value">${escapeHtml(ret.credit_note_status || "—")}</span></div>
+        <div class="trace-card"><span class="trace-card-label">Reasons</span><span class="trace-card-value">${escapeHtml(ret.return_reasons || "—")}</span></div>
+        <div class="trace-card"><span class="trace-card-label">PO IDs</span><span class="trace-card-value">${escapeHtml(ret.purchase_order_ids || "—")}</span></div>
+      </div>
+
+      <div class="order-detail-box">
+        <div class="order-detail-box-title">Return lines</div>
+        <div class="line-items-stack">${linesHtml}</div>
+      </div>
+
+      ${renderCnSyncSection(ret.cn_sync, ret.return_order_id)}
+
+      <details class="trace-section json-collapse">
+        <summary class="trace-section-title">Raw JSON</summary>
+        <pre class="json-pre">${escapeHtml(formatJson(ret.raw_json))}</pre>
+      </details>
+    </div>`;
+}
+
+async function toggleReturnDetail(btn, returnOrderId) {
+  const parentTr = btn.closest("tr");
+  const next = parentTr.nextElementSibling;
+  if (next?.classList.contains("detail-row")) {
+    next.remove();
+    btn.textContent = "View";
+    btn.classList.remove("active");
+    return;
+  }
+
+  // Close other open detail rows in returns
+  returnsBody.querySelectorAll(".detail-row").forEach((row) => row.remove());
+  returnsBody.querySelectorAll(".btn-return-view").forEach((b) => {
+    b.textContent = "View";
+    b.classList.remove("active");
+  });
+
+  const detailTr = document.createElement("tr");
+  detailTr.className = "detail-row";
+  detailTr.innerHTML = '<td colspan="13"><div class="trace-panel trace-loading">Loading return detail…</div></td>';
+  parentTr.after(detailTr);
+  btn.textContent = "Hide";
+  btn.classList.add("active");
+
+  try {
+    const data = await apiGet(`/v1/walmart/returns/${encodeURIComponent(returnOrderId)}`);
+    detailTr.querySelector("td").innerHTML = renderReturnDetailPanel(data);
+    detailTr.querySelector(".btn-hide-return-trace")?.addEventListener("click", () => {
+      detailTr.remove();
+      btn.textContent = "View";
+      btn.classList.remove("active");
+    });
+    detailTr.querySelector(".btn-cn-preview")?.addEventListener("click", () => {
+      const box = detailTr.querySelector(".order-detail-box");
+      previewReturnCn(returnOrderId, box);
+    });
+  } catch (err) {
+    detailTr.querySelector("td").innerHTML = `<div class="trace-panel trace-error">${escapeHtml(err.message)}</div>`;
+  }
+}
+
+async function loadReturns(resetPage = false) {
+  if (resetPage) returnsOffset = 0;
+  returnsBody.innerHTML = '<tr><td colspan="13" class="loading-cell">Loading returns…</td></tr>';
+
+  const limit = returnsPageSizeVal();
+
+  try {
+    const data = await apiGet(`/v1/walmart/returns?${buildReturnsQueryParams(limit, returnsOffset)}`);
+    const items = data.items || [];
+    const total = data.total ?? items.length;
+
+    if (returnsStats) {
+      const initiated = data.initiated_count ?? "—";
+      const completed = data.completed_count ?? "—";
+      returnsStats.innerHTML = `
+        <span class="stat-chip">${escapeHtml(String(total))} returns</span>
+        <span class="stat-chip stat-chip--muted">INITIATED: ${escapeHtml(String(initiated))}</span>
+        <span class="stat-chip stat-chip--success">COMPLETED: ${escapeHtml(String(completed))}</span>
+      `;
+    }
+
+    renderReturns(items, data.offset ?? returnsOffset, total);
+  } catch (err) {
+    showError(`Returns failed: ${err.message}`);
+    returnsBody.innerHTML = '<tr><td colspan="13" class="loading-cell">Failed to load returns.</td></tr>';
+  }
+}
+
+function showReturnsPanel() {
+  document.querySelectorAll(".nav-item").forEach((el) => el.classList.remove("active"));
+  document.getElementById("nav-returns").classList.add("active");
+  ordersPanel.classList.add("hidden");
+  syncPanel.classList.add("hidden");
+  returnsPanel.classList.remove("hidden");
+  setOrdersChromeVisible(false);
+  if (pageEyebrow) pageEyebrow.textContent = "Returns";
+  if (pageTitle) pageTitle.textContent = "Returns";
+  loadReturns(true).catch((e) => showError(e.message));
+}
+
+document.getElementById("nav-returns").addEventListener("click", (e) => {
+  e.preventDefault();
+  showReturnsPanel();
+});
+
+// Returns filter bindings
+let returnsFilterTimer = null;
+function scheduleReturnsFilterSearch() {
+  clearTimeout(returnsFilterTimer);
+  returnsFilterTimer = setTimeout(() => {
+    loadReturns(true).catch((e) => showError(e.message));
+  }, 400);
+}
+
+[returnIdFilter, returnPoFilter].forEach((el) => {
+  if (!el) return;
+  el.addEventListener("input", scheduleReturnsFilterSearch);
+  el.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      clearTimeout(returnsFilterTimer);
+      loadReturns(true).catch((err) => showError(err.message));
+    }
+  });
+});
+
+[returnStatusFilter, returnRefundFilter, returnDeliveryFilter, returnCreditFilter, returnDateFrom, returnDateTo].forEach((el) => {
+  if (!el) return;
+  el.addEventListener("change", () => {
+    loadReturns(true).catch((e) => showError(e.message));
+  });
+});
+
+document.getElementById("clear-returns-filters-btn")?.addEventListener("click", () => {
+  if (returnIdFilter) returnIdFilter.value = "";
+  if (returnPoFilter) returnPoFilter.value = "";
+  if (returnStatusFilter) returnStatusFilter.value = "";
+  if (returnRefundFilter) returnRefundFilter.value = "";
+  if (returnDeliveryFilter) returnDeliveryFilter.value = "";
+  if (returnCreditFilter) returnCreditFilter.value = "";
+  if (returnDateFrom) returnDateFrom.value = "";
+  if (returnDateTo) returnDateTo.value = "";
+  loadReturns(true).catch((e) => showError(e.message));
+});
+
+document.getElementById("refresh-returns-btn")?.addEventListener("click", () => {
+  loadReturns(false).catch((e) => showError(e.message));
+});
+
+if (returnsPageSize) {
+  returnsPageSize.addEventListener("change", () => {
+    loadReturns(true).catch((e) => showError(e.message));
+  });
+}
+
+if (returnsPrevPage) {
+  returnsPrevPage.addEventListener("click", () => {
+    returnsOffset = Math.max(0, returnsOffset - returnsPageSizeVal());
+    loadReturns(false).catch((e) => showError(e.message));
+  });
+}
+
+if (returnsNextPage) {
+  returnsNextPage.addEventListener("click", () => {
+    if (returnsOffset + returnsPageSizeVal() < returnsTotal) {
+      returnsOffset += returnsPageSizeVal();
+      loadReturns(false).catch((e) => showError(e.message));
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Returns sync log (shown in Sync History panel)
+// ---------------------------------------------------------------------------
+
+function renderReturnsSyncLog(items) {
+  if (!returnsSyncBody) return;
+  if (!items?.length) {
+    returnsSyncBody.innerHTML = '<tr><td colspan="7" class="loading-cell">No returns sync runs yet.</td></tr>';
+    return;
+  }
+  returnsSyncBody.innerHTML = items
+    .map((row, i) => `
+    <tr>
+      <td>${row.id ?? i + 1}</td>
+      <td>${statusBadge(row.status)}</td>
+      <td>${escapeHtml(row.sync_mode || "—")}</td>
+      <td>${formatDateStack(row.from_date)}</td>
+      <td>${formatDateStack(row.to_date)}</td>
+      <td>${row.record_count ?? "—"}</td>
+      <td>${formatDateStack(row.created_at)}</td>
+    </tr>`)
+    .join("");
+}
+
+// Patch loadSyncLog to also load returns sync log
+const _originalLoadSyncLog = loadSyncLog;
+async function loadSyncLogWithReturns() {
+  await _originalLoadSyncLog();
+  try {
+    const data = await apiGet("/v1/walmart/returns/sync-log?limit=25");
+    renderReturnsSyncLog(data.items || []);
+  } catch {
+    if (returnsSyncBody) {
+      returnsSyncBody.innerHTML = '<tr><td colspan="7" class="loading-cell">Failed to load returns sync log.</td></tr>';
+    }
+  }
+}
+
+// Override the nav to use the patched version
+document.getElementById("nav-sync").removeEventListener("click", () => {});
+document.getElementById("nav-sync").addEventListener("click", (e) => {
+  e.preventDefault();
+  document.querySelectorAll(".nav-item").forEach((el) => el.classList.remove("active"));
+  document.getElementById("nav-sync").classList.add("active");
+  ordersPanel.classList.add("hidden");
+  returnsPanel?.classList.add("hidden");
+  syncPanel.classList.remove("hidden");
+  setOrdersChromeVisible(false);
+  if (pageEyebrow) pageEyebrow.textContent = "Sync history";
+  if (pageTitle) pageTitle.textContent = "Sync history";
+  loadSyncLogWithReturns().catch((e) => showError(e.message));
+});
+
+// Patch the Orders nav and SAP nav to also hide returns panel
+const _origShowOrdersPanel = showOrdersPanel;
+function showOrdersPanelPatched() {
+  returnsPanel?.classList.add("hidden");
+  _origShowOrdersPanel();
+}
+document.querySelector('.nav-item[href="#"]').removeEventListener("click", () => {});
+document.querySelector('.nav-item[href="#"]').addEventListener("click", (e) => {
+  e.preventDefault();
+  showOrdersPanelPatched();
+});
+
+// ---------------------------------------------------------------------------
+// Return info inside order detail panel
+// ---------------------------------------------------------------------------
+
+const _originalRenderTracePanel = renderTracePanel;
+function renderTracePanelWithReturns(detail, highlightLine) {
+  let html = _originalRenderTracePanel(detail, highlightLine);
+
+  if (detail.has_return && detail.returns?.length) {
+    const returnsSection = `
+      <details class="trace-section json-collapse" open>
+        <summary class="trace-section-title">Returns (${detail.returns.length})</summary>
+        <div class="line-items-stack">
+          ${detail.returns.map((ret) => `
+            <div class="line-item-box">
+              <div class="line-item-head">
+                <span class="line-item-num">${escapeHtml(ret.return_order_id)}</span>
+                ${returnStatusBadge(ret.status)}
+                ${returnRefundBadge(ret.current_refund_status)}
+              </div>
+              <dl class="detail-dl">
+                <div><dt>Return date</dt><dd>${formatDateStack(ret.return_order_date)}</dd></div>
+                <div><dt>Refund</dt><dd>${ret.total_refund_amount != null ? formatMoney(ret.total_refund_amount, ret.total_refund_currency || "USD") : "—"}</dd></div>
+                <div><dt>Reason(s)</dt><dd>${escapeHtml(ret.return_reasons || "—")}</dd></div>
+                <div><dt>Delivery</dt><dd>${returnDeliveryBadge(ret.current_delivery_status)}</dd></div>
+                <div><dt>Credit note</dt><dd>${creditNoteBadge(ret.credit_note_status)}</dd></div>
+              </dl>
+            </div>`).join("")}
+        </div>
+      </details>`;
+
+    // Insert before the Walmart raw payload section
+    const insertBefore = 'class="trace-section json-collapse">\n        <summary class="trace-section-title">Walmart raw payload';
+    const idx = html.indexOf("Walmart raw payload");
+    if (idx > -1) {
+      const detailsIdx = html.lastIndexOf("<details", idx);
+      html = html.slice(0, detailsIdx) + returnsSection + html.slice(detailsIdx);
+    } else {
+      html = html.replace("</div><!-- trace-panel-end -->", returnsSection + "</div>");
+      // Fallback: append before closing trace-panel div
+      const lastDiv = html.lastIndexOf("</div>");
+      html = html.slice(0, lastDiv) + returnsSection + html.slice(lastDiv);
+    }
+  } else if (detail.has_return) {
+    const hint = `
+      <details class="trace-section json-collapse">
+        <summary class="trace-section-title">Returns</summary>
+        <p class="muted">This order has return(s) — view in the Returns tab.</p>
+      </details>`;
+    const idx = html.indexOf("Walmart raw payload");
+    if (idx > -1) {
+      const detailsIdx = html.lastIndexOf("<details", idx);
+      html = html.slice(0, detailsIdx) + hint + html.slice(detailsIdx);
+    }
+  }
+
+  return html;
+}
+
+// Override renderTracePanel globally
+// (toggleOrderDetail calls renderTracePanel to build the HTML)
 
 bootstrapApp().catch((e) => {
   showLoginScreen(e.message);

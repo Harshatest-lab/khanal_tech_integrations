@@ -343,7 +343,8 @@ body {
   cursor: not-allowed;
 }
 
-.btn-export-failed {
+.btn-export-failed,
+.btn-export-filtered {
   padding: 0.55rem 1rem;
   border: 1px solid #cbd5e1;
   border-radius: 10px;
@@ -356,13 +357,25 @@ body {
   transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
 }
 
-.btn-export-failed:hover:not(:disabled) {
+.btn-export-filtered {
+  border-color: #93c5fd;
+  color: #1d4ed8;
+}
+
+.btn-export-failed:hover:not(:disabled),
+.btn-export-filtered:hover:not(:disabled) {
   background: #f8fafc;
   border-color: #94a3b8;
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
 }
 
-.btn-export-failed:disabled {
+.btn-export-filtered:hover:not(:disabled) {
+  background: #eff6ff;
+  border-color: #60a5fa;
+}
+
+.btn-export-failed:disabled,
+.btn-export-filtered:disabled {
   opacity: 0.65;
   cursor: not-allowed;
 }
@@ -958,6 +971,7 @@ body {
 
 .table-scroll {
   overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .report-table {
@@ -965,6 +979,37 @@ body {
   border-collapse: collapse;
   font-size: 0.8125rem;
   table-layout: fixed;
+}
+
+#returns-table {
+  table-layout: auto;
+  min-width: 1280px;
+}
+
+#returns-table th,
+#returns-table td {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 14rem;
+  vertical-align: middle;
+}
+
+#returns-table td.cell-mono {
+  max-width: 11rem;
+}
+
+#returns-table td.cell-actions {
+  max-width: none;
+  overflow: visible;
+  white-space: normal;
+}
+
+#returns-table .cell-actions {
+  flex-wrap: wrap;
+  flex-direction: row;
+  justify-content: flex-start;
+  gap: 0.35rem;
 }
 
 .report-table thead th {
@@ -1426,8 +1471,49 @@ body {
 .sap-trace-dl {
   margin-top: 0.65rem;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: 0.5rem 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0.65rem 1.25rem;
+}
+
+.cn-sap-box .sap-trace-summary {
+  margin-bottom: 1rem;
+  padding: 0.85rem 1rem;
+  border-radius: 10px;
+  border: 1px solid var(--border-light);
+  background: #f8fafc;
+}
+
+.cn-sap-box .sap-trace-ok {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+}
+
+.cn-sap-box .sap-trace-fail {
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+
+.cn-sap-box .sap-trace-dl > div {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+  justify-content: flex-start;
+}
+
+.cn-sap-box .sap-trace-dl dt {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.cn-sap-box .sap-trace-dl dd {
+  text-align: left;
+  font-size: 0.9rem;
+}
+
+.cn-preview-result {
+  margin-top: 0.75rem;
 }
 
 .sap-trace-phase {

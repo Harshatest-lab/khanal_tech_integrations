@@ -1,0 +1,10 @@
+{
+  "name": "b2b-so",
+  "version": "1.0.0",
+  "private": true,
+  "description": "B2B sales-order intake (Blinkit first): IMAP -> RDS -> SAP Orders + ops dashboard",
+  "devDependencies": {
+    "serverless": "^3.38.0",
+    "serverless-python-requirements": "^6.1.2"
+  }
+}

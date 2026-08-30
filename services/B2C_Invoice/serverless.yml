@@ -137,6 +137,24 @@ functions:
           enabled: true
           input:
             mode: sap_retry
+      - schedule:
+          # Daily returns sync. 21:00 UTC = 02:30 IST.
+          rate: cron(0 21 * * ? *)
+          enabled: true
+          input:
+            mode: returns_sync
+      - schedule:
+          # Daily credit-note posting after returns sync. 21:30 UTC = 03:00 IST.
+          rate: cron(30 21 * * ? *)
+          enabled: true
+          input:
+            mode: sap_cn_post
+      - schedule:
+          # Daily credit-note retry. 03:00 UTC = 08:30 IST.
+          rate: cron(0 3 * * ? *)
+          enabled: true
+          input:
+            mode: sap_cn_retry
 
   walmartDashboardApi:
     handler: src.handlers.walmart_api.handler
@@ -194,6 +212,46 @@ functions:
       - httpApi:
           path: /v1/walmart/sap-items
           method: get
+          authorizer:
+            name: dashboardCognitoJwt
+      - httpApi:
+          path: /v1/walmart/returns
+          method: get
+          authorizer:
+            name: dashboardCognitoJwt
+      - httpApi:
+          path: /v1/walmart/returns/sync-log
+          method: get
+          authorizer:
+            name: dashboardCognitoJwt
+      - httpApi:
+          path: /v1/walmart/returns/{returnOrderId}
+          method: get
+          authorizer:
+            name: dashboardCognitoJwt
+      - httpApi:
+          path: /v1/walmart/sap-cn-post
+          method: post
+          authorizer:
+            name: dashboardCognitoJwt
+      - httpApi:
+          path: /v1/walmart/sap-cn-preview
+          method: get
+          authorizer:
+            name: dashboardCognitoJwt
+      - httpApi:
+          path: /v1/walmart/sap-cn-mark-manual
+          method: post
+          authorizer:
+            name: dashboardCognitoJwt
+      - httpApi:
+          path: /v1/walmart/sap-cn-unmark
+          method: post
+          authorizer:
+            name: dashboardCognitoJwt
+      - httpApi:
+          path: /v1/walmart/sap-cn-cancel
+          method: post
           authorizer:
             name: dashboardCognitoJwt
 

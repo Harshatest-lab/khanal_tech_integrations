@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Khanal B2B · PO automation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css?v=20260829b" />
+</head>
+<body>
+  <div id="login-screen" class="login-page">
+    <div class="login-stage">
+      <div class="login-bg-dots" aria-hidden="true"></div>
+      <div class="login-layout">
+        <section class="login-hero" aria-label="Product overview">
+          <div class="login-brand">
+            <span class="login-brand-mark" aria-hidden="true"></span>
+            <span class="login-brand-name">Khanal Foods</span>
+          </div>
+          <h1>B2B SO automation</h1>
+          <p class="login-lead">Inbox to SAP for every channel: Blinkit, Zepto, Instamart, Bigbasket, and more.</p>
+          <div class="channel-pills login-chips">
+            <span class="chip blinkit"><span class="chip-ico" aria-hidden="true">🛍</span>Blinkit</span>
+            <span class="chip zepto"><span class="chip-ico" aria-hidden="true">Z</span>Zepto</span>
+            <span class="chip instamart"><span class="chip-ico" aria-hidden="true">🛒</span>Instamart</span>
+            <span class="chip bigbasket"><span class="chip-ico" aria-hidden="true">b</span>Bigbasket</span>
+            <span class="chip more"><span class="chip-ico" aria-hidden="true">▦</span>More</span>
+          </div>
+          <div class="login-how">
+            <h2>How It Works</h2>
+            <div class="how-steps">
+              <article class="how-step">
+                <span class="how-num">1</span>
+                <span class="how-ico" aria-hidden="true">✉</span>
+                <strong>Email Received</strong>
+                <p>Purchase order emails arrive in the mailbox.</p>
+              </article>
+              <span class="how-arrow" aria-hidden="true">→</span>
+              <article class="how-step">
+                <span class="how-num">2</span>
+                <span class="how-ico" aria-hidden="true">📄</span>
+                <strong>Order Extracted</strong>
+                <p>Our system reads the email and extracts order details automatically.</p>
+              </article>
+              <span class="how-arrow" aria-hidden="true">→</span>
+              <article class="how-step">
+                <span class="how-num">3</span>
+                <span class="how-ico" aria-hidden="true">✓</span>
+                <strong>Order Validated</strong>
+                <p>The order data is checked and prepared as per business rules.</p>
+              </article>
+              <span class="how-arrow" aria-hidden="true">→</span>
+              <article class="how-step">
+                <span class="how-num">4</span>
+                <span class="how-ico how-ico-sap" aria-hidden="true">SAP</span>
+                <strong>Posted to SAP</strong>
+                <p>The order is created in SAP automatically with full accuracy.</p>
+              </article>
+            </div>
+          </div>
+          <div class="login-values">
+            <div class="login-value">
+              <span class="value-ico" aria-hidden="true">🛡</span>
+              <div><strong>Accurate</strong><p>Minimize manual errors with automation.</p></div>
+            </div>
+            <div class="login-value">
+              <span class="value-ico" aria-hidden="true">⏱</span>
+              <div><strong>Faster</strong><p>Reduce order processing time significantly.</p></div>
+            </div>
+            <div class="login-value">
+              <span class="value-ico" aria-hidden="true">📊</span>
+              <div><strong>Reliable</strong><p>Track status and logs with full visibility.</p></div>
+            </div>
+          </div>
+        </section>
+        <div class="login-panel">
+          <form id="login-form" class="login-card" autocomplete="on">
+            <h2>Welcome Back!</h2>
+            <p class="muted">Please enter your email and password</p>
+            <label>Email
+              <span class="login-field">
+                <span class="login-field-icon" aria-hidden="true">✉</span>
+                <input id="login-email" type="email" required autocomplete="username" placeholder="Enter your email address" />
+              </span>
+            </label>
+            <label>Password
+              <span class="login-field">
+                <span class="login-field-icon" aria-hidden="true">🔒</span>
+                <input id="login-password" type="password" required autocomplete="current-password" placeholder="Enter your password" />
+                <button class="pw-toggle" id="pw-toggle" type="button" aria-label="Show password">Show</button>
+              </span>
+            </label>
+            <p class="login-links"><button class="link-btn" id="forgot-open" type="button">Forgot password?</button></p>
+            <p id="login-error" class="error hidden"></p>
+            <button class="btn login-go" type="submit">Login <span aria-hidden="true">→</span></button>
+          </form>
+          <form id="forgot-form" class="login-card hidden" autocomplete="on">
+            <h2>Reset password</h2>
+            <p id="forgot-lead" class="muted">Enter your email and we will send a verification code.</p>
+            <div id="forgot-step-request">
+              <label>Email
+                <span class="login-field">
+                  <span class="login-field-icon" aria-hidden="true">✉</span>
+                  <input id="forgot-email" type="email" required autocomplete="username" placeholder="Your dashboard email" />
+                </span>
+              </label>
+              <p id="forgot-error" class="error hidden"></p>
+              <button class="btn login-go" id="forgot-send" type="submit">Send code <span aria-hidden="true">→</span></button>
+            </div>
+            <div id="forgot-step-confirm" class="hidden">
+              <label>Verification code
+                <span class="login-field">
+                  <input id="forgot-code" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code from email" />
+                </span>
+              </label>
+              <label>New password
+                <span class="login-field">
+                  <span class="login-field-icon" aria-hidden="true">🔒</span>
+                  <input id="forgot-password" type="password" autocomplete="new-password" placeholder="New password" />
+                  <button class="pw-toggle" id="forgot-pw-toggle" type="button" aria-label="Show password">Show</button>
+                </span>
+              </label>
+              <label>Confirm password
+                <span class="login-field">
+                  <span class="login-field-icon" aria-hidden="true">🔒</span>
+                  <input id="forgot-password2" type="password" autocomplete="new-password" placeholder="Re-enter new password" />
+                </span>
+              </label>
+              <p class="muted small">Use at least 10 characters with uppercase, lowercase, and a number.</p>
+              <p id="forgot-confirm-error" class="error hidden"></p>
+              <button class="btn login-go" id="forgot-reset" type="submit">Set new password <span aria-hidden="true">→</span></button>
+              <button class="btn login-secondary" id="forgot-resend" type="button">Resend code</button>
+            </div>
+            <p class="login-links"><button class="link-btn" id="forgot-back" type="button">← Back to login</button></p>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="app-shell" class="app hidden">
+    <aside class="rail" id="sidebar">
+      <div class="brand"><span class="brand-mark">K</span><div><strong>Khanal B2B</strong><small>PO automation</small></div></div>
+      <p class="nav-label">Channels</p>
+      <nav id="channel-nav" class="channel-nav"></nav>
+      <button class="nav-btn hidden" data-view="users" data-admin type="button">Team</button>
+      <button class="nav-btn hidden" data-view="logs" data-admin type="button">Activity log</button>
+      <div class="rail-foot">
+        <div class="notice-mini" id="nav-alerts"></div>
+        <div id="who" class="who-card"></div>
+        <button class="btn ghost full" id="change-password-btn" type="button">Change password</button>
+        <button class="btn ghost full" id="logout-btn" type="button">Sign out</button>
+      </div>
+    </aside>
+
+    <div class="stage">
+      <header class="topbar">
+        <button class="burger" id="menu-btn" type="button" aria-label="Menu">☰</button>
+        <div>
+          <p class="eyebrow" id="page-kicker">Overview</p>
+          <h1 id="page-title">Pipeline health</h1>
+        </div>
+        <span id="channel-pill" class="chip blinkit">Blinkit</span>
+        <div class="topbar-actions">
+          <div class="theme-wrap">
+            <button class="btn icon" id="theme-btn" type="button" title="Theme" aria-label="Theme">🎨</button>
+            <div id="theme-panel" class="theme-panel hidden">
+              <label class="theme-field">Theme
+                <select id="theme-select" title="Theme color">
+                  <option value="navy">Navy</option>
+                  <option value="purple">Purple</option>
+                  <option value="midnight">Midnight</option>
+                  <option value="light">Light</option>
+                </select>
+              </label>
+              <label class="theme-field">Text
+                <select id="text-select" title="Text color">
+                  <option value="default">Default</option>
+                  <option value="white">White</option>
+                  <option value="warm">Warm</option>
+                  <option value="soft">Soft gray</option>
+                  <option value="custom">Custom</option>
+                </select>
+              </label>
+              <label class="theme-field">Page color
+                <input id="bg-color" type="color" value="#050a1f" title="Page background" />
+              </label>
+              <label class="theme-field">Text color
+                <input id="ink-color" type="color" value="#e2e8f0" title="Text color" />
+              </label>
+            </div>
+          </div>
+          <div class="bell-wrap">
+            <button class="btn icon" id="bell-btn" type="button" title="Notifications" aria-label="Notifications">🔔<span id="bell-count" class="bell-count hidden"></span></button>
+            <div id="bell-panel" class="bell-panel hidden"></div>
+          </div>
+          <button class="btn primary" id="fetch-btn" type="button" title="Fetch mailbox">↻ Fetch</button>
+        </div>
+      </header>
+      <p id="toast" class="toast hidden"></p>
+      <p id="channel-soon" class="soon hidden">This channel is wired in the desk. Mail fetch and POs for it will go live next — Blinkit is live today.</p>
+
+      <section id="view-home" class="view">
+        <div class="kpis" id="kpi-row"></div>
+        <div class="split">
+          <article class="card">
+            <h3>Pipeline mix</h3>
+            <div class="chart-box"><canvas id="status-chart"></canvas></div>
+          </article>
+          <article class="card">
+            <h3>Value by status</h3>
+            <div id="value-bars" class="bars"></div>
+          </article>
+        </div>
+        <article class="card">
+          <h3>Needs attention</h3>
+          <div class="sheet">
+            <div class="table-scroll">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>PO number</th>
+                    <th>Status</th>
+                    <th>SO status</th>
+                    <th>SO Docnum</th>
+                    <th>Amount</th>
+                    <th>Items</th>
+                    <th>When</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="home-queue"></tbody>
+              </table>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section id="view-orders" class="view hidden">
+        <div class="filters orders-filters">
+          <select id="status-filter" title="Pipeline status">
+            <option value="">All statuses</option>
+            <option value="needs_review">Needs review</option>
+            <option value="failed">Extract failed</option>
+            <option value="parsed">Parsed</option>
+            <option value="ready">Pending approval</option>
+            <option value="rejected">Rejected</option>
+            <option value="posted">Posted</option>
+            <option value="cancelled">Cancelled</option>
+          </select>
+          <input id="po-search" type="search" placeholder="PO number" />
+          <input id="sap-docnum-filter" type="search" placeholder="SO Docnum" inputmode="numeric" />
+          <input id="sap-docentry-filter" type="search" placeholder="DocEntry" inputmode="numeric" />
+          <input id="created-from-filter" type="date" title="Created from" />
+          <input id="created-to-filter" type="date" title="Created to" />
+          <button class="btn ghost" id="orders-clear-filters" type="button">Clear</button>
+        </div>
+        <p class="hint">Each row is one purchase order. If extract fails, the mail stays in the mailbox and on this list — it does not go to SAP. Click a row to open it.</p>
+        <div class="sheet">
+          <div class="sheet-bar">
+            <span>Purchase orders</span>
+            <span id="orders-count" class="muted"></span>
+          </div>
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th><button class="th-sort" type="button" data-sort="po_number">PO number <span class="sort-ind" data-sort-ind="po_number"></span></button></th>
+                  <th><button class="th-sort" type="button" data-sort="status">Status <span class="sort-ind" data-sort-ind="status"></span></button></th>
+                  <th><button class="th-sort" type="button" data-sort="sap_status">SO status <span class="sort-ind" data-sort-ind="sap_status"></span></button></th>
+                  <th><button class="th-sort" type="button" data-sort="sap_docnum">SO Docnum <span class="sort-ind" data-sort-ind="sap_docnum"></span></button></th>
+                  <th><button class="th-sort" type="button" data-sort="amount">Amount <span class="sort-ind" data-sort-ind="amount"></span></button></th>
+                  <th><button class="th-sort" type="button" data-sort="items">Items <span class="sort-ind" data-sort-ind="items"></span></button></th>
+                  <th><button class="th-sort" type="button" data-sort="created_at">When <span class="sort-ind" data-sort-ind="created_at"></span></button></th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="orders-list"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-maps" class="view hidden">
+        <article class="card">
+          <h3>Item → SAP item</h3>
+          <p class="muted">Type a channel item and SAP item, then Submit. Use Edit or Delete on a row to change it.</p>
+          <div class="editor" id="sku-form">
+            <label>Channel item<input id="sku-item" placeholder="Channel item code" /></label>
+            <label>SAP item<input id="sku-sap" placeholder="SAP item code" /></label>
+            <div class="editor-actions">
+              <button class="btn primary" id="sku-save" type="button">Submit</button>
+            </div>
+          </div>
+          <div class="table-wrap"><table><thead><tr><th>Channel item</th><th>SAP</th><th></th></tr></thead><tbody id="sku-body"></tbody></table></div>
+        </article>
+      </section>
+
+      <section id="view-addresses" class="view hidden">
+        <article class="card">
+          <h3>Ship-to aliases</h3>
+          <p class="muted">Type the SAP name and PO text, then Submit. Use Edit or Delete on a row to change it.</p>
+          <div class="editor" id="addr-form">
+            <label>SAP name<input id="addr-id" placeholder="SAP address name" /></label>
+            <label>PO text<input id="addr-entry" placeholder="Text as it appears on the PO" /></label>
+            <div class="editor-actions">
+              <button class="btn primary" id="addr-save" type="button">Submit</button>
+            </div>
+          </div>
+          <div class="table-wrap"><table><thead><tr><th>SAP name</th><th>PO text</th><th></th></tr></thead><tbody id="addr-body"></tbody></table></div>
+        </article>
+      </section>
+
+      <section id="view-inbox" class="view hidden">
+        <p class="hint">Alerts from mail extract and mapping. Mark read clears the highlight; delete removes the alert. Posted POs are marked read automatically.</p>
+        <div class="filters"><button class="btn ghost" id="mark-all-read" type="button">Mark all read</button></div>
+        <div id="inbox-list" class="stack"></div>
+      </section>
+
+      <section id="view-users" class="view hidden">
+        <article class="card">
+          <h3>Team</h3>
+          <p class="muted">Assign channels and per-area access: purchase orders, item map, and ship-to (view / edit / delete).</p>
+          <div class="filters">
+            <input id="user-email" placeholder="email" />
+            <input id="user-name" placeholder="name" />
+            <select id="user-role"><option>admin</option><option>reviewer</option><option>viewer</option></select>
+            <input id="user-slp" placeholder="SAP salesperson code" />
+            <input id="user-password" type="password" placeholder="password (needed for new login)" autocomplete="new-password" />
+            <button class="btn primary" id="user-save" type="button">Save user</button>
+          </div>
+          <div class="filters perm-picks">
+            <label>Purchase orders
+              <select id="perm-orders">
+                <option value="">Role default</option>
+                <option value="none">No access</option>
+                <option value="view">View</option>
+                <option value="edit">Edit</option>
+                <option value="delete">Delete</option>
+              </select>
+            </label>
+            <label>Item map
+              <select id="perm-sku-map">
+                <option value="">Role default</option>
+                <option value="none">No access</option>
+                <option value="view">View</option>
+                <option value="edit">Edit</option>
+                <option value="delete">Delete</option>
+              </select>
+            </label>
+            <label>Ship-to
+              <select id="perm-ship-to">
+                <option value="">Role default</option>
+                <option value="none">No access</option>
+                <option value="view">View</option>
+                <option value="edit">Edit</option>
+                <option value="delete">Delete</option>
+              </select>
+            </label>
+          </div>
+          <div id="user-channel-picks" class="channel-picks"></div>
+          <div class="table-wrap"><table><thead><tr><th>Email</th><th>Role</th><th>Access</th><th>Channels</th><th>SAP code</th><th>Active</th><th></th></tr></thead><tbody id="user-body"></tbody></table></div>
+        </article>
+      </section>
+
+      <section id="view-logs" class="view hidden">
+        <article class="card">
+          <h3>Activity log</h3>
+          <p class="muted">Who created, edited, approved or posted. Admin only.</p>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>When</th><th>Who</th><th>Action</th><th>Channel</th><th>PO</th><th>Detail</th></tr></thead>
+              <tbody id="logs-body"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+    </div>
+  </div>
+
+  <div id="notice-stack" class="notice-stack" aria-live="polite"></div>
+
+  <div id="drawer" class="drawer hidden">
+    <div class="drawer-panel">
+      <header>
+        <div>
+          <p class="eyebrow">Purchase order</p>
+          <h2 id="d-title">PO</h2>
+          <p id="d-sub" class="muted"></p>
+        </div>
+        <button class="btn ghost" id="drawer-wide" type="button">Widen</button>
+        <button class="btn-x" id="drawer-close" type="button" aria-label="Close">×</button>
+      </header>
+      <div id="drawer-body"></div>
+    </div>
+  </div>
+
+  <div id="preview-modal" class="drawer hidden">
+    <div class="drawer-panel preview-panel">
+      <header>
+        <div>
+          <p class="eyebrow">Preview</p>
+          <h2 id="preview-title">Preview</h2>
+        </div>
+        <button class="btn-x" id="preview-close" type="button" aria-label="Close">×</button>
+      </header>
+      <div id="preview-body"></div>
+    </div>
+  </div>
+
+  <div id="password-modal" class="modal-overlay hidden">
+    <div class="modal-card password-card" role="dialog" aria-labelledby="password-modal-title">
+      <header class="modal-head">
+        <div>
+          <p class="eyebrow">Account</p>
+          <h2 id="password-modal-title">Change password</h2>
+          <p class="muted">Update your sign-in password for this dashboard.</p>
+        </div>
+        <button class="btn-x" id="password-close" type="button" aria-label="Close">×</button>
+      </header>
+      <form id="password-form" class="password-form">
+        <label>Current password
+          <span class="pw-wrap modal-pw">
+            <input id="pw-current" type="password" autocomplete="current-password" required placeholder="Enter current password" />
+            <button class="pw-toggle" id="pw-current-toggle" type="button" aria-label="Show password">Show</button>
+          </span>
+        </label>
+        <label>New password
+          <span class="pw-wrap modal-pw">
+            <input id="pw-new" type="password" autocomplete="new-password" required placeholder="New password" />
+            <button class="pw-toggle" id="pw-new-toggle" type="button" aria-label="Show password">Show</button>
+          </span>
+        </label>
+        <label>Confirm new password
+          <input id="pw-new2" type="password" autocomplete="new-password" required placeholder="Re-enter new password" />
+        </label>
+        <p class="hint">At least 10 characters with uppercase, lowercase, and a number.</p>
+        <p id="password-form-error" class="error hidden"></p>
+        <button class="btn primary full" type="submit">Update password</button>
+      </form>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="app.js?v=20260829b"></script>
+</body>
+</html>

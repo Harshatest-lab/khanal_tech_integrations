@@ -4,7 +4,7 @@ Parameters (SecureString, Standard tier)::
 
     /sap/sl_config     — JSON: ``sap_b1_url``, ``companydb``
     /sap/credentials   — JSON: ``username``, ``password``
-    /sap/b1_session    — JSON: ``b1session``, ``routeid``, ``expires_on``, ``is_locked``, ``locked_at``
+    /sap/b1_session    — JSON: ``b1session``, ``routeid``, ``expires_on``, ``is_locked``
 
 Set env ``SAP_SL_USE_SSM`` to ``1`` / ``true`` / ``yes`` to use SSM + SAP Login in-process on each
 caller that imports this package. Otherwise callers can use ``SAP_SL_*`` environment variables only
@@ -33,27 +33,7 @@ from khanal_shared.sap_sl.http import (
 logger = logging.getLogger(__name__)
 
 _LOCK_WAIT_SEC = 2.0
-# A lock holder that dies mid-renewal (Lambda hard timeout, OOM kill) never
-# reaches the except-block cleanup that flips is_locked back to False --
-# there's nothing tying this SSM flag to the holder's process lifetime, so
-# without a TTL it stays locked forever. sap_sl_request_json's own timeout
-# is 90s, so 150s gives a real in-flight renewal room to finish before a
-# waiter decides the lock is abandoned and steals it. Confirmed live
-# 2026-08-18: a timed-out amazonPostInvoices run left is_locked=True for
-# 20+ minutes, wedging every subsequent SAP call behind "exceeded max
-# waits" until manually cleared.
-_STALE_LOCK_SEC = 150
-# _MAX_LOCK_WAITS * _LOCK_WAIT_SEC must clear _STALE_LOCK_SEC with margin --
-# a waiter that gives up before a locked-but-abandoned session crosses the
-# staleness threshold can NEVER reach the steal branch above, no matter how
-# old the lock gets. At the old value (30 -> 60s total) every waiter timed
-# out at 60s while the steal check only fires past 150s, so the TTL logic
-# was unreachable dead code. Confirmed live 2026-08-19: is_locked stuck for
-# 3+ hours, every amazonPostInvoices/amazonPostCreditNotes call failing
-# "exceeded max waits" without a single renew attempt ever being logged --
-# no waiter's budget ever lasted long enough to see the lock as stale.
-# 90 -> 180s total gives 30s/15 checks of margin past the 150s mark.
-_MAX_LOCK_WAITS = 90
+_MAX_LOCK_WAITS = 30
 
 
 def sap_sl_ssm_prefix() -> str:
@@ -246,36 +226,14 @@ def _resolve_session_tokens() -> tuple[str, str, str]:
         expires_on_str = session_data.get("expires_on") or ""
 
         if is_locked:
-            locked_at = _parse_expires(str(session_data.get("locked_at") or ""))
-            lock_age = (datetime.now(timezone.utc) - locked_at).total_seconds() if locked_at else None
-            # A missing/unparseable locked_at is NOT evidence the lock is
-            # recent -- it means we have no liveness signal at all, most
-            # commonly a lock left over from before this field existed (or
-            # any other write that set is_locked without it). Treating that
-            # as "never provably stale, so wait forever" is exactly the
-            # deadlock this whole mechanism exists to prevent. Confirmed
-            # live 2026-08-19: a pre-locked_at zombie lock from the original
-            # 2026-08-18 incident survived both the TTL fix and a wait-
-            # budget fix untouched, because lock_age was always None and
-            # `lock_age is not None and ...` can never be true for it.
-            if lock_age is None or lock_age > _STALE_LOCK_SEC:
-                log_json(
-                    logger,
-                    logging.WARNING,
-                    "sap_sl_ssm_stale_lock_stolen",
-                    lock_age_sec=lock_age,
-                )
-                # Fall through and steal it -- the holder that set this is
-                # presumed dead (hard timeout/OOM), not just slow.
-            else:
-                log_json(
-                    logger,
-                    logging.DEBUG,
-                    "sap_sl_ssm_wait_lock",
-                    wait_sec=_LOCK_WAIT_SEC,
-                )
-                time.sleep(_LOCK_WAIT_SEC)
-                continue
+            log_json(
+                logger,
+                logging.DEBUG,
+                "sap_sl_ssm_wait_lock",
+                wait_sec=_LOCK_WAIT_SEC,
+            )
+            time.sleep(_LOCK_WAIT_SEC)
+            continue
 
         now = datetime.now(timezone.utc)
         exp = _parse_expires(str(expires_on_str))
@@ -288,7 +246,6 @@ def _resolve_session_tokens() -> tuple[str, str, str]:
 
         try:
             session_data["is_locked"] = True
-            session_data["locked_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             _put_param_json(param_b1_session(), session_data)
         except Exception:
             log_json(
@@ -317,7 +274,6 @@ def _resolve_session_tokens() -> tuple[str, str, str]:
             try:
                 cur = _get_param_json(param_b1_session())
                 cur["is_locked"] = False
-                cur["locked_at"] = ""
                 _put_param_json(param_b1_session(), cur)
             except Exception:
                 log_json(

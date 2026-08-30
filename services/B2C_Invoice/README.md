@@ -47,6 +47,7 @@ PYTHONPATH=src:../../layers/build/python python -m walmart.order_updation
 
 # SAP FG items: HANA → Postgres (local only; create table first)
 # psql "$DATABASE_URL" -f ../../sql/sap_fg_items.sql
+# psql "$DATABASE_URL" -f ../../sql/sap_wm_sku_aliases.sql   # temp duplicate Walmart SKUs
 # export HANA_USE_SSM=1
 # PYTHONPATH=src:../../layers/build/python python scripts/load_sap_fg_items.py
 ```

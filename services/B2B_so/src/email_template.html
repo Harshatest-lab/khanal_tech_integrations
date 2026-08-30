@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>B2B Blinkit notification</title>
+</head>
+<body style="font-family:Arial,sans-serif;background:#eaeff1;padding:24px;">
+  <div style="max-width:600px;margin:0 auto;background:#fff;border-radius:10px;padding:24px;">
+    <h2 style="text-align:center;color:#2c3e50;">Notification from KFL IT</h2>
+    <p>Dear {{ recipient_name }},</p>
+    <p>Message regarding the <strong>{{ channel_name }}</strong> channel.</p>
+    <p><strong>PO Number:</strong> {{ po_number or "N/A" }}</p>
+    <p><strong>Details:</strong> {{ error_message or "No details provided." }}</p>
+    <p><strong>PO file:</strong> {{ po_link_html }}</p>
+    <p style="color:#888;font-size:12px;text-align:center;">Automated message — do not reply.</p>
+  </div>
+</body>
+</html>
