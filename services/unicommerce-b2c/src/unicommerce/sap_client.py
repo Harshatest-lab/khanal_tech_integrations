@@ -304,57 +304,6 @@ def get_invoice_by_doc_entry(doc_entry: int) -> dict:
     return body
 
 
-def patch_invoice_note(doc_entry: int, header_suffix: str, item_notes: dict[str, str]) -> dict:
-    """Append informational text to a POSTED invoice -- Comments (header)
-    and DocumentLines[].FreeText (per line) are the only fields SAP B1
-    still allows editing after Add; UnitPrice/Qty/Tax stay locked once
-    the document has generated GL entries. Idempotent on Comments (won't
-    duplicate header_suffix if already present); FreeText is overwritten
-    each call, so re-running with the same item_notes is also safe.
-
-    item_notes is keyed by ItemCode (SKU), not raw SAP LineNum -- a
-    caller can't know a posted invoice's actual LineNum ordering without
-    an extra round trip, and guessing risks writing the note onto the
-    wrong line. Matched here against the DocumentLines this call already
-    fetches -- by ItemCode AND near-zero UnitPrice, not ItemCode alone:
-    confirmed live that a batch-split item (same SKU, multiple batches)
-    can appear as several separate DocumentLines on one invoice, most of
-    them paid at full price -- matching by SKU only would silently pick
-    an arbitrary one of those, possibly a paid line instead of the free
-    one. Applies to every zero-price line matching a given SKU (there
-    can legitimately be more than one, e.g. the free unit itself split
-    across batches). Raises if a requested SKU has no zero-price line on
-    the invoice, rather than silently skipping it -- a caller-side data
-    mismatch (wrong doc_entry, item since remapped, or the SKU wasn't
-    actually free on this invoice) should surface, not vanish."""
-    current = get_invoice_by_doc_entry(doc_entry)
-    comments = str(current.get("Comments") or "")
-    if header_suffix not in comments:
-        comments = f"{comments} | {header_suffix}" if comments else header_suffix
-
-    body: dict[str, Any] = {"Comments": comments[:254]}
-    if item_notes:
-        lines = current.get("DocumentLines") or []
-        doc_lines: list[dict[str, Any]] = []
-        missing = []
-        for sku, text in item_notes.items():
-            zero_price_lines = [
-                ln.get("LineNum")
-                for ln in lines
-                if ln.get("ItemCode") == sku and abs(float(ln.get("UnitPrice") or 0)) < 0.01
-            ]
-            if not zero_price_lines:
-                missing.append(sku)
-                continue
-            doc_lines.extend({"LineNum": ln_num, "FreeText": text[:254]} for ln_num in zero_price_lines)
-        if missing:
-            raise SapPostError(f"DocEntry={doc_entry}: no zero-price line found for SKU(s): {missing}")
-        body["DocumentLines"] = doc_lines
-
-    status, resp = _request("PATCH", f"Invoices({int(doc_entry)})", body=body)
-    if status not in (200, 204):
-        raise SapPostError(f"Invoice note patch failed for DocEntry={doc_entry}: HTTP {status}: {str(resp)[:500]}")
-    return {"doc_entry": doc_entry, "status": status, "comments": comments}
 
 
 # ── Credit notes ──────────────────────────────────────────────────────
