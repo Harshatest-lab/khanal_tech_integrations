@@ -8,7 +8,7 @@ on:
         required: true
         default: dev
       service:
-        description: "Service folder: delivery-api | B2C_Invoice | amazon-us-b2c | dogseeus-invoice | unicommerce-b2c | safexpress"
+        description: "Service folder: delivery-api | B2C_Invoice | amazon-us-b2c | dogseeus-invoice | unicommerce-b2c | safexpress | B2B_so"
         required: true
         default: delivery-api
 
@@ -127,6 +127,12 @@ jobs:
           # database (safexpress_prod), not the shared DATABASE_URL every
           # other service/stage still reads. Only used when stage=prod.
           SAFEXPRESS_PROD_DATABASE_URL: ${{ secrets.SAFEXPRESS_PROD_DATABASE_URL }}
+          # B2B_so only — falls back to serverless.yml defaults if unset.
+          B2B_DOCS_BUCKET: ${{ secrets.B2B_DOCS_BUCKET }}
+          B2B_ALERT_ADMIN_EMAIL: ${{ secrets.B2B_ALERT_ADMIN_EMAIL }}
+          B2B_ALERT_FROM_EMAIL: ${{ secrets.B2B_ALERT_FROM_EMAIL }}
+          B2B_SES_REGION: ${{ secrets.B2B_SES_REGION }}
+          HANA_USE_SSM: ${{ secrets.HANA_USE_SSM }}
         run: |
           npm install
           npx serverless deploy --stage ${{ inputs.stage }} --region ${{ secrets.AWS_REGION }}
