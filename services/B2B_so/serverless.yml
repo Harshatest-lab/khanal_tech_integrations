@@ -96,7 +96,9 @@ provider:
       Ref: B2BDashboardUserPool
 
 custom:
-  docsBucket: ${env:B2B_DOCS_BUCKET, 'khanal-b2b-so-${self:provider.stage}'}
+  # Use service-scoped names (b2b-so-dev-docs). Avoids ResourceExistenceCheck when
+  # khanal-b2b-so-dev or similar was created manually or by a rolled-back stack.
+  docsBucket: ${env:B2B_DOCS_BUCKET, '${self:service}-${self:provider.stage}-docs'}
   pythonRequirements:
     dockerizePip: false
     slim: true
