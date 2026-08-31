@@ -62,3 +62,17 @@ Dashboard **Fetch** runs per channel (passes `channel` to Lambda). Legacy top-le
 No `/b2b/blinkit/customer` param.
 
 Also: `DATABASE_URL`, SES from/to emails, seed SKU + ship-to maps.
+
+## Deploy (GitHub Actions)
+
+Workflow: **Actions → Deploy**. Service folder must be **`B2B_so`** (exact case).
+
+Default S3 docs bucket: `b2b-so-{stage}-docs` (override with env / secret `B2B_DOCS_BUCKET`).
+
+### `ResourceExistenceCheck` failed
+
+CloudFormation blocks create when a **fixed bucket name already exists** in the account (common after a rolled-back first deploy). B2B_so creates S3 buckets; most other services do not.
+
+1. AWS Console → **CloudFormation** → delete stack `b2b-so-dev` if status is `ROLLBACK_COMPLETE`.
+2. S3 → delete **empty** orphaned buckets only: `khanal-b2b-so-dev`, `b2b-so-dev-docs`, `b2b-so-dev-dashboard-site`.
+3. Re-run Deploy, or set GitHub secret `B2B_DOCS_BUCKET` to a unique name.
