@@ -57,13 +57,14 @@ def test_ship_to_fuzzy_match():
     assert result["address_id"] == "BLR-WF"
 
 
-def test_ship_to_match_accepts_store_keys():
+def test_ship_to_fuzzy_match_multiline_warehouse():
     aliases = [
-        {"address_id": "BLR-WF", "address_entry": "Blinkit DC Whitefield Bangalore 560066"},
+        {"address_id": "BB-BLR2", "address_entry": "Bangalore-2-FV-FMCG-DC\nInnovative Retail Concepts Private Limited ,  No 48 and 49\nHoskate Rural,Koralur Village\nBengaluru Urban Karnataka-560067"},
     ]
-    result = match_ship_to("Blinkit DC Whitefield Bangalore 560066 GST", aliases)
+    delivered = "Warehouse Address\nBangalore-2-FV-FMCG-DC\nInnovative Retail Concepts Private Limited ,  No 48 and 49\nHoskate Rural,Koralur Village\nBengaluru Urban Karnataka-560067"
+    result = match_ship_to(delivered, aliases)
     assert result["ok"] is True
-    assert result["address_id"] == "BLR-WF"
+    assert result["address_id"] == "BB-BLR2"
 
 
 def test_processed_folder_name():
@@ -77,3 +78,36 @@ def test_move_processed_flag():
     assert _move_processed() is True
     os.environ["B2B_MOVE_PROCESSED_MAIL"] = "false"
     assert _move_processed() is False
+
+
+def test_folder_for_channel_from_folders(monkeypatch):
+    import blinkit
+
+    monkeypatch.setattr(
+        blinkit,
+        "_load_imap_config",
+        lambda: {
+            "folders": {
+                "blinkit": "Blinkit",
+                "zepto": "Zepto",
+            },
+            "card_codes": {"blinkit": "C03570", "zepto": "C99999"},
+        },
+    )
+    blinkit._imap_config_cache = None
+    assert blinkit.folder_for_channel("zepto") == "Zepto"
+    assert blinkit.card_code_for_channel("zepto") == "C99999"
+    assert blinkit.list_fetch_channels() == ["blinkit", "zepto"]
+
+
+def test_folder_for_channel_legacy_top_level_folder(monkeypatch):
+    import blinkit
+
+    monkeypatch.setattr(
+        blinkit,
+        "_load_imap_config",
+        lambda: {"folder": "Blinkit"},
+    )
+    blinkit._imap_config_cache = None
+    assert blinkit.folder_for_channel("blinkit") == "Blinkit"
+    assert blinkit.list_fetch_channels() == ["blinkit"]

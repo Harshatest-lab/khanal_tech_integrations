@@ -1,9 +1,10 @@
-"""SAP Service Layer: lookup + post/patch Orders (Frappe Blink_SAP.py)."""
+"""B2B SAP posting via Service Layer — create/update/cancel Sales Orders (all channels)."""
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any
 from urllib.parse import quote
 
@@ -17,6 +18,23 @@ logger = logging.getLogger(__name__)
 
 class SapError(Exception):
     pass
+
+
+# Per-channel DocumentLines pricing (Frappe B2B *_SAP.py). Instamart: flip on with B2B_INSTAMART_SEND_PRICES=1.
+_CHANNEL_LINE_PRICING: dict[str, dict[str, bool]] = {
+    "blinkit": {"price": True, "unit_price": True},
+    "bigbasket": {"price": True, "unit_price": True},
+    "zepto": {"price": False, "unit_price": True},
+    "instamart": {"price": False, "unit_price": False},
+    "more": {"price": False, "unit_price": True},
+}
+
+
+def line_pricing_flags(channel: str) -> dict[str, bool]:
+    ch = (channel or store.CHANNEL_BLINKIT).strip().lower()
+    if ch == "instamart" and os.environ.get("B2B_INSTAMART_SEND_PRICES", "").strip().lower() in {"1", "true", "yes"}:
+        return {"price": True, "unit_price": True}
+    return dict(_CHANNEL_LINE_PRICING.get(ch, {"price": True, "unit_price": True}))
 
 
 def _invalidate_session() -> None:
@@ -137,7 +155,15 @@ def _slim_sap_response(body: dict[str, Any] | None, extra: dict[str, Any] | None
     return out
 
 
-def _record_post_failure(conn, po_number: str, header: dict[str, Any], message: str, actor: str = "") -> dict[str, Any]:
+def _record_post_failure(
+    conn,
+    po_number: str,
+    header: dict[str, Any],
+    message: str,
+    actor: str = "",
+    channel: str = "",
+) -> dict[str, Any]:
+    ch = str(channel or header.get("channel") or store.CHANNEL_BLINKIT).strip().lower()
     current = header.get("pipeline_status") or store.STATUS_APPROVED
     if current == store.STATUS_POSTED:
         current = store.STATUS_APPROVED
@@ -145,12 +171,13 @@ def _record_post_failure(conn, po_number: str, header: dict[str, Any], message: 
         conn,
         po_number,
         current,
+        channel=ch,
         sap_status="POST FAILED",
         last_error=message,
         sap_response={"status": "error", "message": message},
     )
     try:
-        store.add_audit(conn, actor=actor, action="sap_post_failed", po_number=po_number, detail=message[:500])
+        store.add_audit(conn, actor=actor, action="sap_post_failed", po_number=po_number, detail=message[:500], channel=ch)
     except Exception:
         logger.warning("Could not write sap_post_failed audit", exc_info=True)
     conn.commit()
@@ -191,8 +218,8 @@ def _finish_post(
     store.mark_notifications_read(conn, po_number=po_number, channel=channel)
     with conn.cursor() as cur:
         cur.execute(
-            "UPDATE b2b.purchase_orders SET salesperson_code = %s WHERE po_number = %s",
-            (salesperson_code, po_number),
+            "UPDATE b2b.purchase_orders SET salesperson_code = %s WHERE channel = %s AND po_number = %s",
+            (salesperson_code, channel, po_number),
         )
     conn.commit()
     return {
@@ -216,7 +243,83 @@ def _po_file_url(header: dict[str, Any]) -> str:
     return url
 
 
-def build_order_payload(header: dict[str, Any], lines: list[dict[str, Any]], salesperson_code: str) -> dict[str, Any]:
+def _matched_state_for_tax(header: dict[str, Any]) -> str:
+    import blinkit as _blinkit
+
+    return _blinkit.matched_state_for_tax(header)
+
+
+def _resolve_line_tax_code(line: dict[str, Any], header: dict[str, Any]) -> str:
+    import blinkit as _blinkit
+
+    return _blinkit.resolve_line_tax_code(line, header=header)
+
+
+def _lines_missing_tax_code(lines: list[dict[str, Any]], header: dict[str, Any]) -> list[str]:
+    import blinkit as _blinkit
+
+    return _blinkit.tax_code_gap_sap_codes(lines, header=header)
+
+
+def _build_document_line(line: dict[str, Any], header: dict[str, Any], pricing: dict[str, bool]) -> dict[str, Any]:
+    item_code = _pick(line, "sap_code", "sap_code")
+    tax_code = _resolve_line_tax_code(line, header)
+    row: dict[str, Any] = {
+        "ItemCode": item_code,
+        "Quantity": float(line.get("quantity") or 0),
+        "TaxCode": tax_code,
+    }
+    price = float(_pick(line, "basic_cost_price", "basic_cost_price") or 0)
+    if pricing["price"]:
+        row["Price"] = price
+    if pricing["unit_price"]:
+        row["UnitPrice"] = price
+    return row
+
+
+def _stored_lines_tax_error(header: dict[str, Any], lines: list[dict[str, Any]]) -> str:
+    import blinkit as _blinkit
+
+    gaps = _blinkit.tax_code_gap_sap_codes(lines, header=header)
+    if not gaps:
+        return ""
+    return f"Missing tax code on PO lines for: {', '.join(gaps)}. Click Refetch first."
+
+
+def _sap_post_precheck(header: dict[str, Any], payload: dict[str, Any]) -> str:
+    """Block SAP create/update when mandatory header fields are empty."""
+    due = str(payload.get("DocDueDate") or "").strip()
+    if not due:
+        return "PO expiry date (SAP DocDueDate) is empty. Set Doc due date and Save before posting."
+    ship = str(payload.get("ShipToCode") or "").strip()
+    if not ship:
+        return "SAP ship-to is empty. Map the address and Refetch, or set SAP ship-to and Save before posting."
+    lines = payload.get("DocumentLines") or []
+    if not lines:
+        return "PO has no SAP document lines to post."
+    blank_items = [str(l.get("ItemCode") or "") for l in lines if not str(l.get("ItemCode") or "").strip()]
+    if blank_items:
+        return "One or more lines are missing SAP item codes."
+    blank_tax = [str(l.get("ItemCode") or "") for l in lines if not str(l.get("TaxCode") or "").strip()]
+    if blank_tax:
+        return f"Missing TaxCode for SAP items: {', '.join(blank_tax)}"
+    return ""
+
+
+def build_order_payload(
+    header: dict[str, Any],
+    lines: list[dict[str, Any]],
+    salesperson_code: str,
+    *,
+    skip_enrich: bool = False,
+) -> dict[str, Any]:
+    import blinkit as _blinkit
+
+    if not skip_enrich:
+        state = _matched_state_for_tax(header)
+        lines = _blinkit.enrich_lines_from_item_master(lines, state)
+    channel = str(_pick(header, "channel", "channel") or store.CHANNEL_BLINKIT).strip().lower()
+    pricing = line_pricing_flags(channel)
     due = _pick(header, "po_expiry_date", "po_expiry_date")
     if str(due) in {"Not Found", "Invalid Date Format"}:
         due = ""
@@ -225,16 +328,7 @@ def build_order_payload(header: dict[str, Any], lines: list[dict[str, Any]], sal
         item_code = _pick(line, "sap_code", "sap_code")
         if not item_code:
             continue
-        price = float(_pick(line, "basic_cost_price", "basic_cost_price") or 0)
-        sap_lines.append(
-            {
-                "ItemCode": item_code,
-                "Quantity": float(line.get("quantity") or 0),
-                "Price": price,
-                "TaxCode": line.get("taxcode") or line.get("taxcode") or "",
-                "UnitPrice": price,
-            }
-        )
+        sap_lines.append(_build_document_line(line, header, pricing))
     return {
         "CardCode": _pick(header, "customer_code", "customer_code") or "C03570",
         "CardName": _pick(header, "company_name", "company_name"),
@@ -251,17 +345,24 @@ def build_order_payload(header: dict[str, Any], lines: list[dict[str, Any]], sal
     }
 
 
-def post_purchase_order(conn, po_number: str, actor: str = "", salesperson_code: str = "") -> dict[str, Any]:
-    detail = store.get_po(conn, po_number)
+def post_purchase_order(
+    conn,
+    po_number: str,
+    actor: str = "",
+    salesperson_code: str = "",
+    channel: str = store.CHANNEL_BLINKIT,
+) -> dict[str, Any]:
+    ch = str(channel or store.CHANNEL_BLINKIT).strip().lower()
+    detail = store.get_po(conn, po_number, channel=ch)
     if not detail:
         return {"status": "error", "message": f"PO {po_number} not found"}
     header = detail["header"]
     lines = detail["lines"]
-    channel = str(header.get("channel") or store.CHANNEL_BLINKIT)
+    channel = str(header.get("channel") or ch).strip().lower()
     if not lines:
-        return _record_post_failure(conn, po_number, header, "PO has no lines", actor)
+        return _record_post_failure(conn, po_number, header, "PO has no lines", actor, channel=channel)
     if not salesperson_code:
-        return _record_post_failure(conn, po_number, header, "Logged-in user has no SAP salesperson code", actor)
+        return _record_post_failure(conn, po_number, header, "Logged-in user has no SAP salesperson code", actor, channel=channel)
     if not header.get("po_url") or "X-Amz-" in str(header.get("po_url") or ""):
         try:
             import blinkit as _blinkit
@@ -270,7 +371,17 @@ def post_purchase_order(conn, po_number: str, actor: str = "", salesperson_code:
         except Exception:
             header["po_url"] = header.get("pdf_s3_key") or header.get("pdf_s3_key") or ""
     try:
-        payload = build_order_payload(header, lines, salesperson_code)
+        tax_err = _stored_lines_tax_error(header, lines)
+        if tax_err:
+            return _record_post_failure(conn, po_number, header, tax_err, actor, channel=channel)
+        payload = build_order_payload(header, lines, salesperson_code, skip_enrich=True)
+        precheck = _sap_post_precheck(header, payload)
+        if precheck:
+            return _record_post_failure(conn, po_number, header, precheck, actor, channel=channel)
+        blank_tax = [str(l.get("ItemCode") or "") for l in payload["DocumentLines"] if not str(l.get("TaxCode") or "").strip()]
+        if blank_tax:
+            msg = f"Missing TaxCode for SAP items: {', '.join(blank_tax)}"
+            return _record_post_failure(conn, po_number, header, msg, actor, channel=channel)
         existing = find_order_by_num_at_card(po_number)
         # Frappe: PATCH only if this doc already has DocEntry. Do not PATCH just because
         # NumAtCard exists (Postman/create already posted it) — that sent DocDueDate into
@@ -334,17 +445,24 @@ def post_purchase_order(conn, po_number: str, actor: str = "", salesperson_code:
         )
     except Exception as exc:
         logger.exception("SAP post failed for PO %s", po_number)
-        return _record_post_failure(conn, po_number, header, str(exc), actor)
+        return _record_post_failure(conn, po_number, header, str(exc), actor, channel=channel)
 
 
-def update_posted_order(conn, po_number: str, actor: str = "", salesperson_code: str = "") -> dict[str, Any]:
+def update_posted_order(
+    conn,
+    po_number: str,
+    actor: str = "",
+    salesperson_code: str = "",
+    channel: str = store.CHANNEL_BLINKIT,
+) -> dict[str, Any]:
     """PATCH an existing open SAP sales order from the current PO snapshot."""
-    detail = store.get_po(conn, po_number)
+    ch = str(channel or store.CHANNEL_BLINKIT).strip().lower()
+    detail = store.get_po(conn, po_number, channel=ch)
     if not detail:
         return {"status": "error", "message": f"PO {po_number} not found"}
     header = detail["header"]
     lines = detail["lines"]
-    channel = str(header.get("channel") or store.CHANNEL_BLINKIT)
+    channel = str(header.get("channel") or ch).strip().lower()
     if header.get("pipeline_status") != store.STATUS_POSTED:
         return {"status": "error", "message": "Only posted POs can be updated in SAP"}
     doc_entry = header.get("sap_docentry")
@@ -358,7 +476,14 @@ def update_posted_order(conn, po_number: str, actor: str = "", salesperson_code:
         live = get_order(int(doc_entry))
         if not is_open_document_status(live.get("DocumentStatus")):
             return {"status": "error", "message": "SAP order is not open — update not allowed"}
-        payload = build_order_payload(header, lines, salesperson_code)
+        tax_err = _stored_lines_tax_error(header, lines)
+        if tax_err:
+            return {"status": "error", "message": tax_err, "last_error": tax_err}
+        payload = build_order_payload(header, lines, salesperson_code, skip_enrich=True)
+        blank_tax = [str(l.get("ItemCode") or "") for l in payload["DocumentLines"] if not str(l.get("TaxCode") or "").strip()]
+        if blank_tax:
+            msg = f"Missing TaxCode for SAP items: {', '.join(blank_tax)}"
+            return {"status": "error", "message": msg, "last_error": msg}
         update_order(
             int(doc_entry),
             {"DocumentLines": payload["DocumentLines"], "DocDueDate": payload["DocDueDate"]},
@@ -398,11 +523,12 @@ def update_posted_order(conn, po_number: str, actor: str = "", salesperson_code:
 
 def cancel_posted_order(conn, po_number: str, actor: str = "", channel: str = store.CHANNEL_BLINKIT) -> dict[str, Any]:
     """Cancel an open SAP sales order via Service Layer."""
-    detail = store.get_po(conn, po_number)
+    ch = str(channel or store.CHANNEL_BLINKIT).strip().lower()
+    detail = store.get_po(conn, po_number, channel=ch)
     if not detail:
         return {"status": "error", "message": f"PO {po_number} not found"}
     header = detail["header"]
-    ch = str(header.get("channel") or channel)
+    ch = str(header.get("channel") or ch).strip().lower()
     if header.get("pipeline_status") not in {store.STATUS_POSTED, store.STATUS_CANCELLED}:
         return {"status": "error", "message": "Only posted POs can be cancelled in SAP"}
     if header.get("pipeline_status") == store.STATUS_CANCELLED:

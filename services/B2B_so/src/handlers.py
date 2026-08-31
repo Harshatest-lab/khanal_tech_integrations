@@ -17,7 +17,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 import blinkit
-import blinkit_sap
+import b2b_sappost
 import cognito_admin
 import permissions
 import sap_hana_sync
@@ -102,7 +102,11 @@ def _invoke_fetch(payload: dict[str, Any]) -> dict[str, Any]:
 
 def fetch_handler(event, context):
     ev = event or {}
-    return _run("blinkit_fetch", lambda: blinkit.run_fetch(max_messages=ev.get("max_messages")))
+    channel = str(ev.get("channel") or store.CHANNEL_BLINKIT).strip().lower()
+    return _run(
+        f"{channel}_fetch",
+        lambda: blinkit.run_fetch(channel=channel, max_messages=ev.get("max_messages")),
+    )
 
 
 def _json(status: int, body: Any) -> dict[str, Any]:
@@ -190,16 +194,25 @@ def dashboard_handler(event, context):
             profile = _profile(conn, actor, groups)
 
             if path.endswith("/v1/b2b/me") and method == "GET":
+                try:
+                    fetch_channels = blinkit.list_fetch_channels()
+                except Exception:
+                    logger.warning("Could not load fetch channels from IMAP config", exc_info=True)
+                    fetch_channels = [store.CHANNEL_BLINKIT]
                 return _json(200, {
                     **profile,
                     "groups": groups,
                     "card_code": blinkit.BLINKIT_CARD_CODE,
                     "all_channels": store.ALL_CHANNELS,
+                    "fetch_channels": fetch_channels,
                 })
 
             if path.endswith("/v1/b2b/fetch") and method == "POST":
                 body = _body(event)
-                payload: dict[str, Any] = {"trigger": "manual"}
+                channel = str(body.get("channel") or q.get("channel") or store.CHANNEL_BLINKIT).strip().lower()
+                if channel not in store.FETCH_CHANNELS:
+                    return _json(400, {"error": f"Unknown fetch channel: {channel}"})
+                payload: dict[str, Any] = {"trigger": "manual", "channel": channel}
                 if body.get("max_messages") is not None:
                     payload["max_messages"] = body.get("max_messages")
                 return _json(202, _invoke_fetch(payload))
@@ -267,6 +280,7 @@ def dashboard_handler(event, context):
                         logger.warning("Could not load live SAP row for PO %s", po, exc_info=True)
                 post_resp = header.get("sap_response")
                 amend_history = store.list_po_amend_history(conn, po, channel=ch, include_record_data=True)
+                activity_log = store.list_po_audit(conn, po, channel=ch)
                 return _json(
                     200,
                     {
@@ -275,6 +289,7 @@ def dashboard_handler(event, context):
                         "sap_live": sap_live,
                         "sap_post_response": post_resp,
                         "amend_history": amend_history,
+                        "activity_log": activity_log,
                     },
                 )
             if path.endswith("/v1/b2b/amend-history") and method == "GET":
@@ -317,24 +332,36 @@ def dashboard_handler(event, context):
                 code = (profile.get("sap_salesperson_code") or "").strip()
                 if not code:
                     return _json(400, {"error": "Your user has no SAP salesperson code. Ask admin to set it."})
-                try:
-                    result = blinkit.rematch_po(conn, po, channel=ch)
-                except ValueError as exc:
-                    return _json(400, {"error": str(exc)})
-                if not result.get("ok"):
-                    conn.commit()
+                detail = store.get_po(conn, po, channel=ch)
+                if not detail:
+                    return _json(404, {"error": "PO not found", "po_number": po})
+                header = detail["header"]
+                postable = {store.STATUS_READY, store.STATUS_APPROVED}
+                if header.get("pipeline_status") not in postable:
                     return _json(400, {
-                        "error": "Still blocked. Update maps, then click Refetch. " + (result.get("last_error") or ""),
-                        "last_error": result.get("last_error"),
+                        "error": f"PO is not ready for posting (status={header.get('pipeline_status')}). Click Refetch first.",
+                    })
+                if (header.get("last_error") or "").strip():
+                    return _json(400, {
+                        "error": "Still blocked. Update maps, then click Refetch. " + header["last_error"],
+                        "last_error": header["last_error"],
+                    })
+                tax_gaps = blinkit.tax_code_gap_sap_codes(detail["lines"], header=header)
+                if tax_gaps:
+                    return _json(400, {
+                        "error": "Missing tax code on PO lines for: "
+                        + ", ".join(tax_gaps)
+                        + ". Click Refetch first.",
+                        "last_error": header.get("last_error") or "",
                     })
                 try:
-                    post_result = blinkit_sap.post_purchase_order(conn, po, actor=actor, salesperson_code=code)
+                    post_result = b2b_sappost.post_purchase_order(conn, po, actor=actor, salesperson_code=code, channel=ch)
                 except Exception as exc:
                     logger.exception("approve/post-sap failed for %s", po)
                     msg = _scrub(str(exc))
                     detail = store.get_po(conn, po, channel=ch)
                     if detail:
-                        blinkit_sap._record_post_failure(conn, po, detail["header"], msg, actor)
+                        b2b_sappost._record_post_failure(conn, po, detail["header"], msg, actor)
                     return _json(200, {"status": "error", "message": msg, "last_error": msg})
                 if post_result.get("status") == "success":
                     store.add_audit(conn, actor=actor, action="approve_post", po_number=po, channel=ch, detail=str(post_result.get("docentry") or ""))
@@ -363,20 +390,21 @@ def dashboard_handler(event, context):
                     return _json(403, {"error": "Not allowed for your role"})
                 code = (profile.get("sap_salesperson_code") or "").strip()
                 po = (_body(event).get("po_number") or q.get("po_number") or "").strip()
+                ch = str(_body(event).get("channel") or q.get("channel") or store.CHANNEL_BLINKIT)
                 if not code:
                     msg = "Your user has no SAP salesperson code. Ask admin to set it."
-                    detail = store.get_po(conn, po) if po else None
+                    detail = store.get_po(conn, po, channel=ch) if po else None
                     if detail:
-                        blinkit_sap._record_post_failure(conn, po, detail["header"], msg, actor)
+                        b2b_sappost._record_post_failure(conn, po, detail["header"], msg, actor, channel=ch)
                     return _json(200, {"status": "error", "message": msg, "last_error": msg})
                 try:
-                    result = blinkit_sap.post_purchase_order(conn, po, actor=actor, salesperson_code=code)
+                    result = b2b_sappost.post_purchase_order(conn, po, actor=actor, salesperson_code=code, channel=ch)
                 except Exception as exc:
                     logger.exception("post-sap failed for %s", po)
                     msg = _scrub(str(exc))
-                    detail = store.get_po(conn, po) if po else None
+                    detail = store.get_po(conn, po, channel=ch) if po else None
                     if detail:
-                        blinkit_sap._record_post_failure(conn, po, detail["header"], msg, actor)
+                        b2b_sappost._record_post_failure(conn, po, detail["header"], msg, actor, channel=ch)
                     return _json(200, {"status": "error", "message": msg, "last_error": msg})
                 return _json(200, result)
             if path.endswith("/v1/b2b/update-sap") and method == "POST":
@@ -386,13 +414,13 @@ def dashboard_handler(event, context):
                     return _json(403, {"error": "Not allowed for your role"})
                 body = _body(event)
                 po = (body.get("po_number") or q.get("po_number") or "").strip()
+                ch = str(body.get("channel") or q.get("channel") or store.CHANNEL_BLINKIT)
                 code = (profile.get("sap_salesperson_code") or "").strip()
                 if not code:
                     return _json(400, {"error": "Your user has no SAP salesperson code. Ask admin to set it."})
-                result = blinkit_sap.update_posted_order(conn, po, actor=actor, salesperson_code=code)
+                result = b2b_sappost.update_posted_order(conn, po, actor=actor, salesperson_code=code, channel=ch)
                 if result.get("status") == "success":
                     try:
-                        ch = str(body.get("channel") or q.get("channel") or store.CHANNEL_BLINKIT)
                         sap_hana_sync.sync_po_from_hana(conn, po, channel=ch)
                     except Exception:
                         logger.warning("HANA sync after SAP update skipped for %s", po, exc_info=True)
@@ -405,7 +433,7 @@ def dashboard_handler(event, context):
                 body = _body(event)
                 po = (body.get("po_number") or q.get("po_number") or "").strip()
                 ch = str(body.get("channel") or q.get("channel") or store.CHANNEL_BLINKIT)
-                result = blinkit_sap.cancel_posted_order(conn, po, actor=actor, channel=ch)
+                result = b2b_sappost.cancel_posted_order(conn, po, actor=actor, channel=ch)
                 return _json(200, result)
             if path.endswith("/v1/b2b/users") and method == "GET":
                 if not profile.get("can_manage_users"):
@@ -511,6 +539,15 @@ def dashboard_handler(event, context):
                     return _json(404, {"error": "Notification not found"})
                 conn.commit()
                 return _json(200, {"ok": True})
+            if path.endswith("/v1/b2b/sku-map/import") and method == "POST":
+                if deny := _deny_perm(profile, permissions.RESOURCE_SKU_MAP, permissions.PERM_EDIT):
+                    return deny
+                body = _body(event)
+                ch = str(body.get("channel") or q.get("channel") or store.CHANNEL_BLINKIT)
+                count = store.import_sku_map(conn, body.get("items") or [], channel=ch)
+                store.add_audit(conn, actor=actor, action="sku_map_import", detail=str(count), channel=ch)
+                conn.commit()
+                return _json(200, {"ok": True, "count": count})
             if path.endswith("/v1/b2b/sku-map/preview") and method == "POST":
                 if deny := _deny_perm(profile, permissions.RESOURCE_SKU_MAP, permissions.PERM_VIEW):
                     return deny
@@ -529,11 +566,12 @@ def dashboard_handler(event, context):
                     return deny
                 body = _body(event)
                 po = str(body.get("po_number") or "").strip()
+                ch = str(body.get("channel") or q.get("channel") or store.CHANNEL_BLINKIT)
                 try:
-                    updated = store.update_po(conn, po, body.get("header") or {}, body.get("lines") or [])
+                    updated = store.update_po(conn, po, body.get("header") or {}, body.get("lines") or [], channel=ch)
                 except ValueError as exc:
                     return _json(400, {"error": str(exc)})
-                store.add_audit(conn, actor=actor, action="edit_po", po_number=po)
+                store.add_audit(conn, actor=actor, action="edit_po", po_number=po, channel=ch)
                 conn.commit()
                 return _json(200, updated)
             if path.endswith("/v1/b2b/sku-map") and method == "PUT":
@@ -558,6 +596,15 @@ def dashboard_handler(event, context):
                 store.add_audit(conn, actor=actor, action="sku_map_delete", detail=item_code, channel=ch)
                 conn.commit()
                 return _json(200, {"ok": True})
+            if path.endswith("/v1/b2b/ship-to/import") and method == "POST":
+                if deny := _deny_perm(profile, permissions.RESOURCE_SHIP_TO, permissions.PERM_EDIT):
+                    return deny
+                body = _body(event)
+                ch = str(body.get("channel") or q.get("channel") or store.CHANNEL_BLINKIT)
+                count = store.import_ship_to_aliases(conn, body.get("items") or [], channel=ch)
+                store.add_audit(conn, actor=actor, action="ship_to_import", detail=str(count), channel=ch)
+                conn.commit()
+                return _json(200, {"ok": True, "count": count})
             if path.endswith("/v1/b2b/ship-to/preview") and method == "POST":
                 if deny := _deny_perm(profile, permissions.RESOURCE_SHIP_TO, permissions.PERM_VIEW):
                     return deny
@@ -611,7 +658,7 @@ def dashboard_handler(event, context):
                 header["xlsx_url"] = blinkit.public_url(header.get("xlsx_s3_key") or header.get("xlsx_s3_key") or "")
                 header["po_url"] = header["pdf_url"]
                 code = str(profile.get("sap_salesperson_code") or "")
-                payload = blinkit_sap.build_order_payload(header, lines, code)
+                payload = b2b_sappost.build_order_payload(header, lines, code, skip_enrich=True)
                 extract = {"header": header, "lines": lines}
                 return _json(200, {"header": header, "lines": lines, "payload": payload, "extract": extract})
             if path.endswith("/v1/b2b/order") and method == "DELETE":

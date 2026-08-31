@@ -7,12 +7,13 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=20260829b" />
+  <link rel="stylesheet" href="styles.css?v=20260831v" />
 </head>
 <body>
   <div id="login-screen" class="login-page">
     <div class="login-stage">
       <div class="login-bg-dots" aria-hidden="true"></div>
+      <div class="login-rain" aria-hidden="true"></div>
       <div class="login-layout">
         <section class="login-hero" aria-label="Product overview">
           <div class="login-brand">
@@ -169,10 +170,10 @@
             <div id="theme-panel" class="theme-panel hidden">
               <label class="theme-field">Theme
                 <select id="theme-select" title="Theme color">
+                  <option value="light">Light</option>
                   <option value="navy">Navy</option>
                   <option value="purple">Purple</option>
                   <option value="midnight">Midnight</option>
-                  <option value="light">Light</option>
                 </select>
               </label>
               <label class="theme-field">Text
@@ -199,8 +200,21 @@
           <button class="btn primary" id="fetch-btn" type="button" title="Fetch mailbox">↻ Fetch</button>
         </div>
       </header>
+      <div id="fetch-wait" class="fetch-wait hidden" aria-live="polite">
+        <div class="fetch-wait-inner">
+          <div class="fetch-wait-icon" aria-hidden="true">
+            <span class="fetch-spinner"></span>
+          </div>
+          <div class="fetch-wait-body">
+            <p class="fetch-wait-eyebrow">Checking mailbox</p>
+            <strong id="fetch-wait-title">Fetching mailbox…</strong>
+            <p id="fetch-wait-msg">Please wait — do not click Fetch again.</p>
+          </div>
+        </div>
+        <div class="fetch-progress" aria-hidden="true"><span class="fetch-progress-bar"></span></div>
+      </div>
       <p id="toast" class="toast hidden"></p>
-      <p id="channel-soon" class="soon hidden">This channel is wired in the desk. Mail fetch and POs for it will go live next — Blinkit is live today.</p>
+      <p id="channel-soon" class="soon hidden">This channel is not live yet.</p>
 
       <section id="view-home" class="view">
         <div class="kpis" id="kpi-row"></div>
@@ -216,29 +230,12 @@
         </div>
         <article class="card">
           <h3>Needs attention</h3>
-          <div class="sheet">
-            <div class="table-scroll">
-              <table class="data-table">
-                <thead>
-                  <tr>
-                    <th>PO number</th>
-                    <th>Status</th>
-                    <th>SO status</th>
-                    <th>SO Docnum</th>
-                    <th>Amount</th>
-                    <th>Items</th>
-                    <th>When</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody id="home-queue"></tbody>
-              </table>
-            </div>
-          </div>
+          <div id="home-queue" class="orders-cards home-cards"></div>
         </article>
       </section>
 
       <section id="view-orders" class="view hidden">
+        <div class="orders-sticky">
         <div class="filters orders-filters">
           <select id="status-filter" title="Pipeline status">
             <option value="">All statuses</option>
@@ -257,59 +254,132 @@
           <input id="created-to-filter" type="date" title="Created to" />
           <button class="btn ghost" id="orders-clear-filters" type="button">Clear</button>
         </div>
-        <p class="hint">Each row is one purchase order. If extract fails, the mail stays in the mailbox and on this list — it does not go to SAP. Click a row to open it.</p>
-        <div class="sheet">
-          <div class="sheet-bar">
-            <span>Purchase orders</span>
-            <span id="orders-count" class="muted"></span>
+        <div class="orders-banner-row">
+          <div id="orders-issue-banner" class="orders-banner hidden" role="status">
+            <span class="orders-banner-ico" aria-hidden="true">!</span>
+            <span id="orders-issue-text"></span>
+            <button type="button" class="orders-banner-link" id="orders-show-issues">Show issues</button>
           </div>
-          <div class="table-scroll">
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th><button class="th-sort" type="button" data-sort="po_number">PO number <span class="sort-ind" data-sort-ind="po_number"></span></button></th>
-                  <th><button class="th-sort" type="button" data-sort="status">Status <span class="sort-ind" data-sort-ind="status"></span></button></th>
-                  <th><button class="th-sort" type="button" data-sort="sap_status">SO status <span class="sort-ind" data-sort-ind="sap_status"></span></button></th>
-                  <th><button class="th-sort" type="button" data-sort="sap_docnum">SO Docnum <span class="sort-ind" data-sort-ind="sap_docnum"></span></button></th>
-                  <th><button class="th-sort" type="button" data-sort="amount">Amount <span class="sort-ind" data-sort-ind="amount"></span></button></th>
-                  <th><button class="th-sort" type="button" data-sort="items">Items <span class="sort-ind" data-sort-ind="items"></span></button></th>
-                  <th><button class="th-sort" type="button" data-sort="created_at">When <span class="sort-ind" data-sort-ind="created_at"></span></button></th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody id="orders-list"></tbody>
-            </table>
-          </div>
+          <span id="orders-count" class="orders-count"></span>
+        </div>
+        <div class="orders-head" id="orders-head">
+          <span class="col-num">#</span>
+          <button class="th-sort" type="button" data-sort="po_number">PO number <span class="sort-ind" data-sort-ind="po_number"></span></button>
+          <button class="th-sort" type="button" data-sort="status">Status <span class="sort-ind" data-sort-ind="status"></span></button>
+          <button class="th-sort" type="button" data-sort="sap_status">SO status <span class="sort-ind" data-sort-ind="sap_status"></span></button>
+          <button class="th-sort" type="button" data-sort="sap_docnum">SO Docnum <span class="sort-ind" data-sort-ind="sap_docnum"></span></button>
+          <button class="th-sort col-amt" type="button" data-sort="amount">Amount <span class="sort-ind" data-sort-ind="amount"></span></button>
+          <button class="th-sort col-items" type="button" data-sort="items">Items <span class="sort-ind" data-sort-ind="items"></span></button>
+          <button class="th-sort" type="button" data-sort="created_at">When <span class="sort-ind" data-sort-ind="created_at"></span></button>
+        </div>
+        </div>
+        <div id="orders-list" class="orders-cards"></div>
+        <div class="orders-pager">
+          <label class="orders-page-size">Show
+            <select id="orders-page-size">
+              <option value="10" selected>10</option>
+              <option value="25">25</option>
+              <option value="50">50</option>
+            </select>
+            per page
+          </label>
+          <div id="orders-pages" class="orders-pages"></div>
         </div>
       </section>
 
       <section id="view-maps" class="view hidden">
-        <article class="card">
-          <h3>Item → SAP item</h3>
-          <p class="muted">Type a channel item and SAP item, then Submit. Use Edit or Delete on a row to change it.</p>
-          <div class="editor" id="sku-form">
-            <label>Channel item<input id="sku-item" placeholder="Channel item code" /></label>
-            <label>SAP item<input id="sku-sap" placeholder="SAP item code" /></label>
-            <div class="editor-actions">
-              <button class="btn primary" id="sku-save" type="button">Submit</button>
+        <article class="card map-card">
+          <div class="map-head">
+            <div>
+              <h3>Item map</h3>
+              <p class="muted map-lead">Link each channel item code to its SAP item code.</p>
+            </div>
+            <span id="sku-count" class="map-count-badge">0</span>
+          </div>
+          <div class="map-toolbar">
+            <div class="map-search">
+              <input id="sku-search-item" type="search" placeholder="Search channel item" aria-label="Search channel item" />
+              <input id="sku-search-sap" type="search" placeholder="Search SAP item" aria-label="Search SAP item" />
+              <button class="btn ghost map-clear-btn" id="sku-search-clear" type="button">Clear</button>
+            </div>
+            <div class="map-io">
+              <button class="btn ghost" id="sku-template" type="button">Template</button>
+              <button class="btn ghost" id="sku-export" type="button">Export</button>
+              <button class="btn ghost" id="sku-import" type="button">Import CSV</button>
+              <input id="sku-import-file" class="hidden" type="file" accept=".csv,text/csv" />
             </div>
           </div>
-          <div class="table-wrap"><table><thead><tr><th>Channel item</th><th>SAP</th><th></th></tr></thead><tbody id="sku-body"></tbody></table></div>
+          <div class="editor map-add" id="sku-form">
+            <p class="section-h">Add mapping</p>
+            <div class="map-add-grid">
+              <label>Channel item<input id="sku-item" placeholder="Channel item code" /></label>
+              <label>SAP item<input id="sku-sap" placeholder="SAP item code" /></label>
+              <div class="map-add-actions">
+                <button class="btn primary" id="sku-save" type="button">Submit</button>
+              </div>
+            </div>
+          </div>
+          <div class="table-wrap map-table-wrap">
+            <table class="map-table">
+              <thead>
+                <tr>
+                  <th class="col-num">#</th>
+                  <th>Channel item</th>
+                  <th>SAP item</th>
+                  <th class="col-actions">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="sku-body"></tbody>
+            </table>
+          </div>
         </article>
       </section>
 
       <section id="view-addresses" class="view hidden">
-        <article class="card">
-          <h3>Ship-to aliases</h3>
-          <p class="muted">Type the SAP name and PO text, then Submit. Use Edit or Delete on a row to change it.</p>
-          <div class="editor" id="addr-form">
-            <label>SAP name<input id="addr-id" placeholder="SAP address name" /></label>
-            <label>PO text<input id="addr-entry" placeholder="Text as it appears on the PO" /></label>
-            <div class="editor-actions">
-              <button class="btn primary" id="addr-save" type="button">Submit</button>
+        <article class="card map-card">
+          <div class="map-head">
+            <div>
+              <h3>Ship-to aliases</h3>
+              <p class="muted map-lead">Map PO ship-to text to SAP address names so orders can post.</p>
+            </div>
+            <span id="addr-count" class="map-count-badge">0</span>
+          </div>
+          <div class="map-toolbar">
+            <div class="map-search">
+              <input id="addr-search-id" type="search" placeholder="Search SAP name" aria-label="Search SAP name" />
+              <input id="addr-search-entry" type="search" placeholder="Search PO text" aria-label="Search PO text" />
+              <button class="btn ghost map-clear-btn" id="addr-search-clear" type="button">Clear</button>
+            </div>
+            <div class="map-io">
+              <button class="btn ghost" id="addr-template" type="button">Template</button>
+              <button class="btn ghost" id="addr-export" type="button">Export</button>
+              <button class="btn ghost" id="addr-import" type="button">Import CSV</button>
+              <input id="addr-import-file" class="hidden" type="file" accept=".csv,text/csv" />
             </div>
           </div>
-          <div class="table-wrap"><table><thead><tr><th>SAP name</th><th>PO text</th><th></th></tr></thead><tbody id="addr-body"></tbody></table></div>
+          <div class="editor map-add" id="addr-form">
+            <p class="section-h">Add alias</p>
+            <div class="map-add-grid">
+              <label>SAP name<input id="addr-id" placeholder="SAP address name" /></label>
+              <label>PO text<input id="addr-entry" placeholder="Text as it appears on the PO" /></label>
+              <div class="map-add-actions">
+                <button class="btn primary" id="addr-save" type="button">Submit</button>
+              </div>
+            </div>
+          </div>
+          <div class="table-wrap map-table-wrap">
+            <table class="map-table">
+              <thead>
+                <tr>
+                  <th class="col-num">#</th>
+                  <th>SAP name</th>
+                  <th>PO text</th>
+                  <th class="col-actions">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="addr-body"></tbody>
+            </table>
+          </div>
         </article>
       </section>
 
@@ -390,8 +460,10 @@
           <h2 id="d-title">PO</h2>
           <p id="d-sub" class="muted"></p>
         </div>
-        <button class="btn ghost" id="drawer-wide" type="button">Widen</button>
-        <button class="btn-x" id="drawer-close" type="button" aria-label="Close">×</button>
+        <div class="drawer-tools">
+          <button class="btn ghost" id="drawer-wide" type="button" title="Toggle wide layout">Widen</button>
+          <button class="btn-x" id="drawer-close" type="button" aria-label="Close">×</button>
+        </div>
       </header>
       <div id="drawer-body"></div>
     </div>
@@ -443,7 +515,23 @@
     </div>
   </div>
 
+  <div id="confirm-modal" class="modal-overlay hidden">
+    <div class="modal-card confirm-card" role="alertdialog" aria-labelledby="confirm-title" aria-describedby="confirm-message">
+      <header class="modal-head">
+        <div>
+          <p class="eyebrow">Confirm</p>
+          <h2 id="confirm-title">Are you sure?</h2>
+          <p id="confirm-message" class="muted">This action cannot be undone.</p>
+        </div>
+      </header>
+      <div class="confirm-actions">
+        <button class="btn confirm-cancel-btn" id="confirm-cancel" type="button">Cancel</button>
+        <button class="btn danger" id="confirm-ok" type="button">Delete</button>
+      </div>
+    </div>
+  </div>
+
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <script src="app.js?v=20260829b"></script>
+  <script src="app.js?v=20260831w"></script>
 </body>
 </html>

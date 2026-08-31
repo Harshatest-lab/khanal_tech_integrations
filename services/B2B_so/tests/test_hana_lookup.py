@@ -75,3 +75,38 @@ def test_get_items_returns_tax_udfs():
     assert found["FGDV0001"]["U_TaxRate"] == 18
     assert found["FGDV0001"]["U_GstTax"] == "GST@18"
     assert found["FGDV0001"]["U_IgstTax"] == "IGST@18"
+
+
+def test_get_items_falls_back_to_service_layer_when_hana_has_no_tax():
+    hana_rows = [
+        ("__cols__", "ItemCode", "ItemName", "U_TaxRate", "U_GstTax", "U_IgstTax"),
+        ("FGHN0065", "Ghee", None, None, None),
+    ]
+    cur = _Cur([hana_rows])
+    params = SimpleNamespace(schema="FINAL_AUDIT")
+    cm = MagicMock()
+    cm.__enter__.return_value = _Conn(cur)
+    cm.__exit__.return_value = False
+    sl_body = {
+        "value": [
+            {
+                "ItemCode": "FGHN0065",
+                "ItemName": "Ghee",
+                "U_TaxRate": 5,
+                "U_GstTax": "GST@5",
+                "U_IgstTax": "IGST@5",
+            }
+        ]
+    }
+
+    def fake_sl(opener, method, url, body=None):
+        return 200, sl_body
+
+    with patch("hana_lookup.get_hana_params", return_value=params), patch(
+        "hana_lookup.hana_connection", return_value=cm
+    ), patch(
+        "khanal_shared.sap_sl.build_opener_and_base_via_ssm",
+        return_value=(None, "https://sl.test/b1s/v1"),
+    ), patch("khanal_shared.sap_sl.sap_sl_request_json", side_effect=fake_sl):
+        found = hana_lookup.get_items(["FGHN0065"])
+    assert found["FGHN0065"]["U_TaxRate"] == 5

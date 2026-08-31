@@ -13,6 +13,7 @@ import permissions
 
 CHANNEL_BLINKIT = "blinkit"
 ALL_CHANNELS = ["blinkit", "zepto", "instamart", "bigbasket", "more"]
+FETCH_CHANNELS = ["blinkit", "zepto", "instamart", "bigbasket"]
 STATUS_PARSED = "parsed"
 STATUS_NEEDS_REVIEW = "needs_review"
 STATUS_READY = "ready"
@@ -291,6 +292,18 @@ def upsert_sku(conn: psycopg.Connection, item_code: str, sap_code: str, channel:
         )
 
 
+def import_sku_map(conn: psycopg.Connection, rows: list[dict[str, Any]], channel: str = CHANNEL_BLINKIT) -> int:
+    count = 0
+    for row in rows:
+        item_code = str(row.get("item_code") or "").strip()
+        sap_code = str(row.get("sap_code") or "").strip()
+        if not item_code or not sap_code:
+            continue
+        upsert_sku(conn, item_code, sap_code, channel=channel)
+        count += 1
+    return count
+
+
 def list_ship_to_aliases(conn: psycopg.Connection, channel: str = CHANNEL_BLINKIT) -> list[dict[str, str]]:
     with conn.cursor() as cur:
         cur.execute(
@@ -310,6 +323,18 @@ def upsert_ship_to_alias(conn: psycopg.Connection, address_id: str, address_entr
             """,
             (channel, address_id.strip(), address_entry.strip()),
         )
+
+
+def import_ship_to_aliases(conn: psycopg.Connection, rows: list[dict[str, Any]], channel: str = CHANNEL_BLINKIT) -> int:
+    count = 0
+    for row in rows:
+        address_id = str(row.get("address_id") or "").strip()
+        address_entry = str(row.get("address_entry") or "").strip()
+        if not address_id or not address_entry:
+            continue
+        upsert_ship_to_alias(conn, address_id, address_entry, channel=channel)
+        count += 1
+    return count
 
 
 def delete_sku(conn: psycopg.Connection, item_code: str, channel: str = CHANNEL_BLINKIT) -> None:
@@ -734,6 +759,10 @@ def fetch_stats(conn: psycopg.Connection, channel: str = CHANNEL_BLINKIT) -> dic
         total = int(cur.fetchone()[0])
         cur.execute("SELECT COUNT(*) FROM b2b.notifications WHERE is_read = false AND channel = %s", (channel,))
         unread = int(cur.fetchone()[0])
+        cur.execute("SELECT COUNT(*) FROM b2b.sku_map WHERE channel = %s", (channel,))
+        sku_count = int(cur.fetchone()[0])
+        cur.execute("SELECT COUNT(*) FROM b2b.ship_to_aliases WHERE channel = %s", (channel,))
+        ship_count = int(cur.fetchone()[0])
     summary = {
         "pending_approval": by_status.get("pending_approval", 0),
         "needs_review": by_status.get("needs_review", 0),
@@ -745,6 +774,8 @@ def fetch_stats(conn: psycopg.Connection, channel: str = CHANNEL_BLINKIT) -> dic
     }
     return {
         "total_pos": total,
+        "sku_map_count": sku_count,
+        "ship_to_count": ship_count,
         "by_pipeline_status": by_status,
         "summary": summary,
         "unread_notifications": unread,
@@ -957,6 +988,27 @@ def list_audit(conn: psycopg.Connection, *, limit: int = 150, channel: str | Non
                 """,
                 (limit,),
             )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def list_po_audit(
+    conn: psycopg.Connection,
+    po_number: str,
+    *,
+    channel: str = CHANNEL_BLINKIT,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT actor, action, po_number, detail, channel, created_at
+            FROM b2b.audit_log
+            WHERE channel = %s AND po_number = %s
+            ORDER BY created_at DESC
+            LIMIT %s
+            """,
+            (channel, po_number, limit),
+        )
         return [dict(r) for r in cur.fetchall()]
 
 
