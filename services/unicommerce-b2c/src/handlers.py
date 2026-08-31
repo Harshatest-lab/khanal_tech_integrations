@@ -117,6 +117,41 @@ def fetch_handler(event, context):
     return _run("fetch_orders", _go_orders)
 
 
+def debug_find_invoice_by_order_handler(event, context):
+    """{"uniware_ids": [str, ...]}. Read-only: checks SAP directly (via
+    sap_client.find_invoice_by_uc_order_id -- HANA primary, Service Layer
+    Comments-filter fallback) for whether each order ALREADY has a real
+    posted invoice, independent of what our own DB's pipeline_status says.
+    One-off: built 2026-08-31 to cross-check "dead" orders after HANA
+    connectivity was found broken service-wide (see the HANA_USE_SSM fix
+    same day) -- with the primary lookup down, the idempotency guard in
+    _post_order was relying solely on the SL fallback, and a user manually
+    found at least one "dead" order that SAP already had a real invoice
+    for. No writes; safe to run against any order list. Invoke manually
+    (aws lambda invoke)."""
+    from unicommerce import sap_client
+
+    ev = event or {}
+    uniware_ids = ev.get("uniware_ids") or []
+
+    def _go():
+        found = []
+        not_found = []
+        errors = []
+        for uid in uniware_ids:
+            try:
+                existing = sap_client.find_invoice_by_uc_order_id(uid)
+                if existing:
+                    found.append({"uniware_id": uid, "doc_entry": existing["doc_entry"], "doc_num": existing["doc_num"]})
+                else:
+                    not_found.append(uid)
+            except Exception as exc:
+                errors.append({"uniware_id": uid, "error": _scrub(str(exc))})
+        return {"checked": len(uniware_ids), "found": found, "not_found": not_found, "errors": errors}
+
+    return _run("debug_find_invoice_by_order", _go)
+
+
 def numatcard_backfill_handler(event, context):
     """{"limit": int? (default 10), "offset": int? (default 0), "apply": bool?
     (default false -- dry-run only)}. One-off: backfill NumAtCard onto

@@ -178,7 +178,16 @@ provider:
     # with no CloudWatch error because the handler swallows the exception
     # before it reaches the Lambda runtime). See custom.sapVerifySslByStage.
     SAP_SL_VERIFY_SSL: ${self:custom.currentSapVerifySsl}
-    HANA_USE_SSM: ${env:HANA_USE_SSM, '1'}
+    # Hardcoded, not ${env:HANA_USE_SSM, '1'} -- confirmed live 2026-08-31
+    # that indirection was silently resolving to an empty string on every
+    # deploy (deploy.yml never sets HANA_USE_SSM, unlike SAP_SL_USE_SSM
+    # which IS explicitly passed as a secret), disabling HANA entirely --
+    # every batch-inventory/FEFO/idempotency-guard call across the whole
+    # service was silently falling through to "HANA not configured" with
+    # no visible error. Real credentials already exist and are IAM-granted
+    # at /sap/unicommerce/hana_config + hana_credentials; nothing about
+    # this service legitimately needs HANA disabled, so hardcode it on.
+    HANA_USE_SSM: 'true'
 
 custom:
   ucApiParamName: ${env:UC_API_PARAM_NAME, '/unicommerce/api_credentials'}
@@ -300,6 +309,15 @@ functions:
       - schedule:
           rate: cron(2,32 * * * ? *)
           enabled: ${self:custom.currentSchedulesEnabled}
+
+  debugFindInvoiceByOrder:
+    handler: src.handlers.debug_find_invoice_by_order_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+    # No schedule -- read-only ops tool, invoke manually with
+    # {"uniware_ids": [...]}. Checks SAP directly for an existing invoice,
+    # independent of our own DB's pipeline_status -- built to cross-check
+    # "dead" orders after HANA connectivity was found broken (2026-08-31).
+    # Delete once the dead-order backlog is fully reconciled.
 
   numatcardBackfill:
     handler: src.handlers.numatcard_backfill_handler
