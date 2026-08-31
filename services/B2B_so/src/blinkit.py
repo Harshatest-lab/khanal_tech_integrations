@@ -17,7 +17,9 @@ from pathlib import Path
 from typing import Any
 
 import store
+from gst_validate import extract_gst_from_text, normalize_gstin, validate_gst_match
 from hana_lookup import SapError, get_business_partner, get_items
+import intake_validate
 
 logger = logging.getLogger(__name__)
 
@@ -35,11 +37,20 @@ def _env(name: str, default: str = "") -> str:
 
 # --- credentials ---
 
-# SAP Business Partner for Blinkit. Does not change; not stored in SSM.
+# SAP Business Partner for Blinkit (default when card_codes.blinkit is not in SSM).
 BLINKIT_CARD_CODE = "C03570"
 
-# One shared mailbox; channel = Gmail label (folder). Not /b2b/blinkit/imap.
+CHANNEL_LABELS = {
+    "blinkit": "Blinkit",
+    "zepto": "Zepto",
+    "instamart": "Instamart",
+    "bigbasket": "Bigbasket",
+    "more": "More",
+}
+
+# One shared mailbox; each channel = Gmail label under folders.{channel}.
 IMAP_PARAM_NAME = _env("B2B_IMAP_PARAM_NAME", "/b2b/imap")
+_imap_config_cache: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -51,43 +62,83 @@ class ImapCredentials:
     folder: str
 
 
-def get_imap_credentials() -> ImapCredentials:
+def _load_imap_config() -> dict[str, Any]:
+    global _imap_config_cache
+    if _imap_config_cache is not None:
+        return _imap_config_cache
     try:
         from credentials_local import IMAP  # type: ignore
 
-        return ImapCredentials(
-            email=IMAP["email"],
-            password=IMAP["password"],
-            imap_server=IMAP["imap_server"],
-            imap_port=int(IMAP.get("imap_port") or 993),
-            folder=_folder_from_imap_data(IMAP),
-        )
+        _imap_config_cache = dict(IMAP)
+        return _imap_config_cache
     except ImportError:
         pass
     import boto3
 
     raw = boto3.client("ssm").get_parameter(Name=IMAP_PARAM_NAME, WithDecryption=True)["Parameter"]["Value"]
-    data = json.loads(raw)
+    _imap_config_cache = json.loads(raw)
+    if not isinstance(_imap_config_cache, dict):
+        raise RuntimeError(f"SSM {IMAP_PARAM_NAME} must be a JSON object")
+    return _imap_config_cache
+
+
+def channel_label(channel: str) -> str:
+    ch = (channel or store.CHANNEL_BLINKIT).strip().lower()
+    return CHANNEL_LABELS.get(ch, ch.replace("_", " ").title())
+
+
+def folder_for_channel(channel: str) -> str:
+    ch = (channel or store.CHANNEL_BLINKIT).strip().lower()
+    if ch not in store.FETCH_CHANNELS:
+        raise ValueError(f"Channel {ch!r} does not support mail fetch")
+    data = _load_imap_config()
+    folders = data.get("folders") if isinstance(data.get("folders"), dict) else {}
+    folder = str(folders.get(ch) or "").strip()
+    if not folder and ch == store.CHANNEL_BLINKIT:
+        folder = str(data.get("folder") or data.get("label_name") or "").strip()
+    if not folder:
+        raise RuntimeError(
+            f"SSM {IMAP_PARAM_NAME} must set folders.{ch} (Gmail label for {channel_label(ch)})"
+        )
+    return folder
+
+
+def card_code_for_channel(channel: str) -> str:
+    ch = (channel or store.CHANNEL_BLINKIT).strip().lower()
+    data = _load_imap_config()
+    codes = data.get("card_codes") if isinstance(data.get("card_codes"), dict) else {}
+    code = str(codes.get(ch) or "").strip()
+    if code:
+        return code
+    if ch == store.CHANNEL_BLINKIT:
+        return BLINKIT_CARD_CODE
+    raise RuntimeError(
+        f"SSM {IMAP_PARAM_NAME} must set card_codes.{ch} (SAP Business Partner for {channel_label(ch)})"
+    )
+
+
+def list_fetch_channels() -> list[str]:
+    data = _load_imap_config()
+    folders = data.get("folders") if isinstance(data.get("folders"), dict) else {}
+    if folders:
+        return [ch for ch in store.FETCH_CHANNELS if str(folders.get(ch) or "").strip()]
+    if str(data.get("folder") or data.get("label_name") or "").strip():
+        return [store.CHANNEL_BLINKIT]
+    return []
+
+
+def get_imap_credentials(channel: str = store.CHANNEL_BLINKIT) -> ImapCredentials:
+    data = _load_imap_config()
     creds = ImapCredentials(
         email=(data.get("email") or "").strip(),
         password=(data.get("password") or "").strip(),
         imap_server=(data.get("imap_server") or "").strip(),
         imap_port=int(data.get("imap_port") or 993),
-        folder=_folder_from_imap_data(data),
+        folder=folder_for_channel(channel),
     )
     if not (creds.email and creds.password and creds.imap_server):
         raise RuntimeError(f"SSM {IMAP_PARAM_NAME} is missing email/password/imap_server")
     return creds
-
-
-def _folder_from_imap_data(data: dict) -> str:
-    folders = data.get("folders") if isinstance(data.get("folders"), dict) else {}
-    folder = str(folders.get("blinkit") or data.get("folder") or data.get("label_name") or "").strip()
-    if not folder:
-        raise RuntimeError(
-            f"SSM {IMAP_PARAM_NAME} must set folder or folders.blinkit (Gmail label for this channel)"
-        )
-    return folder
 
 
 # --- S3 ---
@@ -110,14 +161,24 @@ def put_bytes(key: str, body: bytes, content_type: str) -> str:
     return key
 
 
+def channel_pdf_key(channel: str, po_number: str) -> str:
+    ch = (channel or store.CHANNEL_BLINKIT).strip().lower()
+    label = channel_label(ch)
+    return f"{ch}/{label}_{po_number or 'Unknown_PO'}.pdf"
+
+
+def channel_xlsx_key(channel: str, po_number: str) -> str:
+    ch = (channel or store.CHANNEL_BLINKIT).strip().lower()
+    label = channel_label(ch)
+    return f"{ch}/{label}_{po_number or 'Unknown_PO'}.xlsx"
+
+
 def blinkit_pdf_key(po_number: str) -> str:
-    prefix = (_env("B2B_S3_PREFIX") or "blinkit").strip("/")
-    return f"{prefix}/Blinkit_{po_number or 'Unknown_PO'}.pdf"
+    return channel_pdf_key(store.CHANNEL_BLINKIT, po_number)
 
 
 def blinkit_xlsx_key(po_number: str) -> str:
-    prefix = (_env("B2B_S3_PREFIX") or "blinkit").strip("/")
-    return f"{prefix}/Blinkit_{po_number or 'Unknown_PO'}.xlsx"
+    return channel_xlsx_key(store.CHANNEL_BLINKIT, po_number)
 
 
 def public_url(key: str) -> str:
@@ -275,17 +336,8 @@ def extract_delivered_to(text: str) -> str:
 
 
 def extract_gst_no(text: str) -> str:
-    delivered = re.search(
-        r"Delivered\s*To\s*:\s*[\s\S]*?GST\s*No\.?\s*:\s*([0-9]{2}[A-Z0-9]{10}[0-9A-Z]{3})",
-        text,
-        flags=re.IGNORECASE,
-    )
-    if delivered:
-        return (delivered.group(1) or "").strip().upper()
-    gst_matches = re.findall(r"GST\s*No\.?\s*:\s*([0-9]{2}[A-Z0-9]{10}[0-9A-Z]{3})", text, flags=re.IGNORECASE)
-    if not gst_matches:
-        return "Not Found"
-    return (gst_matches[1] if len(gst_matches) >= 2 else gst_matches[0]).strip().upper()
+    found = extract_gst_from_text(text)
+    return found if found != "Not Found" else "Not Found"
 
 
 def is_valid_po_pdf_text(text: str) -> bool:
@@ -386,8 +438,14 @@ def parse_xlsx(xlsx_bytes: bytes) -> list[dict[str, Any]]:
     return rows
 
 
-def normalize_gstin(value: str) -> str:
-    return re.sub(r"\s+", "", (value or "")).upper().strip()
+def _apply_gst_validation(
+    header: dict[str, str],
+    *,
+    sap_addr: dict[str, Any] | None,
+    bp: dict[str, Any],
+) -> str | None:
+    """Compare extracted GST on the PO with SAP ship-to GST (HANA CRD1/OCRD)."""
+    return validate_gst_match(header.get("gst_no") or "", sap_addr, bp)
 
 
 AMEND_SUBJECT_KEYWORDS = ("amend", "amended", "amendment", "revised", "revise")
@@ -406,6 +464,7 @@ def skip_duplicate_without_amend(
     po_number: str,
     subject: str,
     existing_detail: dict[str, Any] | None,
+    channel: str = store.CHANNEL_BLINKIT,
 ) -> dict[str, Any]:
     """Duplicate PO email without amend keywords — do not update DB or mark mail processed."""
     message = (
@@ -420,14 +479,17 @@ def skip_duplicate_without_amend(
         title=f"Skipped duplicate PO {po_number}",
         body=message,
         po_number=po_number,
+        channel=channel,
     )
-    sent = send_po_email(po_number=po_number, message=message, file_url=file_url)
+    label = channel_label(channel)
+    sent = send_po_email(po_number=po_number, message=message, file_url=file_url, channel_name=label)
     store.add_email_log(
         conn,
         recipients=",".join(_recipients()),
-        subject=f"Blinkit duplicate skipped {po_number}",
+        subject=f"{label} duplicate skipped {po_number}",
         po_number=po_number,
         sent_ok=sent,
+        channel=channel,
     )
     conn.commit()
     logger.info("Skipped duplicate PO %s (uid %s) — subject lacks amend/revised: %r", po_number, uid, subject)
@@ -440,15 +502,41 @@ def skip_duplicate_without_amend(
     }
 
 
+def _ship_to_match_candidates(delivered_to: str) -> list[str]:
+    """Variants of PO ship-to text (Frappe compares multi-line warehouse block)."""
+    text = (delivered_to or "").strip()
+    if not text:
+        return [""]
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    candidates = [text]
+    if lines:
+        candidates.append("\n".join(lines))
+        candidates.append(" ".join(lines))
+        if lines[0].lower().strip() == "warehouse address":
+            body = lines[1:]
+            if body:
+                candidates.append("\n".join(body))
+                candidates.append(" ".join(body))
+    seen: set[str] = set()
+    out: list[str] = []
+    for candidate in candidates:
+        key = candidate.lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(candidate)
+    return out
+
+
 def match_ship_to(delivered_to: str, aliases: list[dict[str, str]]) -> dict[str, Any]:
     best = None
     best_score = 0.0
-    for entry in aliases:
-        haystack = entry.get("address_entry") or entry.get("address_entry") or ""
-        score = SequenceMatcher(None, (delivered_to or "").lower(), haystack.lower()).ratio()
-        if score > best_score:
-            best_score = score
-            best = entry
+    for candidate in _ship_to_match_candidates(delivered_to):
+        for entry in aliases:
+            haystack = entry.get("address_entry") or entry.get("address_entry") or ""
+            score = SequenceMatcher(None, candidate.lower(), haystack.lower()).ratio()
+            if score > best_score:
+                best_score = score
+                best = entry
     if not best or best_score <= 0.6:
         return {"ok": False, "message": "No sufficiently similar address entry found."}
     return {
@@ -457,12 +545,6 @@ def match_ship_to(delivered_to: str, aliases: list[dict[str, str]]) -> dict[str,
         "address_entry": best.get("address_entry") or best.get("address_entry") or "",
         "score": best_score,
     }
-
-
-match_ship_to = match_ship_to
-match_ship_to = match_ship_to
-
-
 def pick_sap_address(addresses: list[dict[str, Any]], address_id: str) -> dict[str, Any] | None:
     want = (address_id or "").strip()
     for address in addresses:
@@ -485,8 +567,9 @@ def _subject(msg: email.message.Message) -> str:
     return " ".join(bits).strip()
 
 
-def _attachments(msg: email.message.Message) -> tuple[bytes | None, bytes | None]:
-    pdf = xlsx_bytes = None
+def _attachments(msg: email.message.Message) -> tuple[bytes | None, bytes | None, str]:
+    pdf = excel_bytes = None
+    excel_name = ""
     for part in msg.walk():
         name = (part.get_filename() or "").lower()
         payload = part.get_payload(decode=True)
@@ -494,9 +577,89 @@ def _attachments(msg: email.message.Message) -> tuple[bytes | None, bytes | None
             continue
         if name.endswith(".pdf") and pdf is None:
             pdf = payload
-        elif name.endswith(".xlsx") and xlsx_bytes is None:
-            xlsx_bytes = payload
-    return pdf, xlsx_bytes
+        elif name.endswith((".xlsx", ".xls", ".csv")) and excel_bytes is None:
+            excel_bytes = payload
+            excel_name = part.get_filename() or name
+    return pdf, excel_bytes, excel_name
+
+
+def _excel_storage_key(channel: str, po_number: str, filename: str = "") -> str:
+    ch = (channel or store.CHANNEL_BLINKIT).strip().lower()
+    label = channel_label(ch)
+    name = (filename or "").lower()
+    if name.endswith(".csv"):
+        ext = "csv"
+    elif name.endswith(".xls") and not name.endswith(".xlsx"):
+        ext = "xls"
+    else:
+        ext = "xlsx"
+    return f"{ch}/{label}_{po_number or 'Unknown_PO'}.{ext}"
+
+
+def _excel_content_type(filename: str = "") -> str:
+    name = (filename or "").lower()
+    if name.endswith(".csv"):
+        return "text/csv"
+    if name.endswith(".xls") and not name.endswith(".xlsx"):
+        return "application/vnd.ms-excel"
+    return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def extract_po_header(pdf_bytes: bytes, channel: str) -> tuple[dict[str, str], str]:
+    ch = (channel or store.CHANNEL_BLINKIT).strip().lower()
+    if ch == "instamart":
+        import instamart as instamart_parser
+
+        return instamart_parser.extract_header(pdf_bytes)
+    if ch == "zepto":
+        import zepto as zepto_parser
+
+        return zepto_parser.extract_header(pdf_bytes)
+    if ch == "bigbasket":
+        raise ValueError("Bigbasket purchase orders are extracted from Excel, not PDF")
+    return extract_blinkit_header(pdf_bytes)
+
+
+def parse_channel_lines(
+    excel_bytes: bytes | None,
+    *,
+    channel: str,
+    filename: str = "",
+) -> list[dict[str, Any]]:
+    ch = (channel or store.CHANNEL_BLINKIT).strip().lower()
+    if not excel_bytes:
+        return []
+    if ch == "instamart":
+        import instamart as instamart_parser
+
+        parsed = instamart_parser.parse_excel_attachment(excel_bytes, filename)
+        return instamart_parser.lines_from_item_details(parsed.get("Item Details") or [])
+    if ch == "zepto":
+        import zepto as zepto_parser
+
+        return zepto_parser.parse_attachment(excel_bytes).get("lines") or []
+    if ch == "bigbasket":
+        import bigbasket as bigbasket_parser
+
+        return bigbasket_parser.parse_excel_attachment(excel_bytes, filename).get("lines") or []
+    return parse_xlsx(excel_bytes)
+
+
+def parse_channel_excel(excel_bytes: bytes, *, channel: str, filename: str = "") -> dict[str, Any]:
+    ch = (channel or store.CHANNEL_BLINKIT).strip().lower()
+    if ch == "instamart":
+        import instamart as instamart_parser
+
+        return instamart_parser.parse_excel_attachment(excel_bytes, filename)
+    if ch == "zepto":
+        import zepto as zepto_parser
+
+        return zepto_parser.parse_attachment(excel_bytes)
+    if ch == "bigbasket":
+        import bigbasket as bigbasket_parser
+
+        return bigbasket_parser.parse_excel_attachment(excel_bytes, filename)
+    return {"lines": parse_xlsx(excel_bytes)}
 
 
 def _processed_folder(source_folder: str) -> str:
@@ -520,30 +683,187 @@ def _move_to_processed(mail: imaplib.IMAP4_SSL, uid: str, *, source_folder: str 
     return True
 
 
-def _parse_tax_rate(item: dict[str, Any]) -> int:
+def _mail_ready_for_processed(pipeline_status: str, last_error: str) -> bool:
+    """Only move mailbox mail once PO is ready for approval/posting (no blocking errors)."""
+    return (pipeline_status or "") == store.STATUS_READY and not (last_error or "").strip()
+
+
+def _move_ready_mails_in_folder(
+    conn,
+    mail: imaplib.IMAP4_SSL,
+    *,
+    channel: str,
+    source_folder: str,
+    uids: list[bytes | str],
+) -> int:
+    """Move inbox mails whose POs became ready after refetch (e.g. maps fixed on dashboard)."""
+    if not _move_processed():
+        return 0
+    ch = (channel or store.CHANNEL_BLINKIT).strip().lower()
+    moved = 0
+    with conn.cursor() as cur:
+        for raw_uid in uids:
+            uid = raw_uid.decode() if isinstance(raw_uid, bytes) else str(raw_uid)
+            cur.execute(
+                """
+                SELECT po_number, pipeline_status, COALESCE(last_error, '')
+                FROM b2b.purchase_orders
+                WHERE channel = %s AND email_uid = %s
+                LIMIT 1
+                """,
+                (ch, uid),
+            )
+            row = cur.fetchone()
+            if not row or not _mail_ready_for_processed(row[1], row[2]):
+                continue
+            if _move_to_processed(mail, uid, source_folder=source_folder):
+                moved += 1
+                logger.info("Moved ready PO %s mail uid %s to %s-Processed", row[0], uid, source_folder)
+    return moved
+
+
+def move_ready_po_mail_for_header(header: dict[str, Any], *, channel: str) -> bool:
+    """Move this PO's mailbox message to {Channel}-Processed once it is ready for approval."""
+    if not _move_processed():
+        return False
+    ch = (channel or store.CHANNEL_BLINKIT).strip().lower()
+    uid = str(header.get("email_uid") or "").strip()
+    if not uid:
+        logger.info("PO %s has no email_uid — skip processed-mail move", header.get("po_number") or "")
+        return False
+    if not _mail_ready_for_processed(header.get("pipeline_status"), header.get("last_error")):
+        return False
+    try:
+        creds = get_imap_credentials(ch)
+        mail = imaplib.IMAP4_SSL(creds.imap_server, creds.imap_port)
+        mail.login(creds.email, creds.password)
+        mail.select(f'"{creds.folder}"')
+        moved = _move_to_processed(mail, uid, source_folder=creds.folder)
+        try:
+            mail.logout()
+        except Exception:
+            pass
+        if moved:
+            logger.info(
+                "Moved ready PO %s mail uid %s from %s to %s-Processed",
+                header.get("po_number"),
+                uid,
+                creds.folder,
+                creds.folder,
+            )
+        return moved
+    except Exception:
+        logger.exception("Could not move processed mail for PO %s channel %s", header.get("po_number"), ch)
+        return False
+
+
+def _tax_rate_is_set(tax_rate: Any) -> bool:
+    """True when rate is known, including explicit 0 (Nil GST in item master)."""
+    if tax_rate is None or tax_rate == "":
+        return False
+    try:
+        int(float(tax_rate))
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _parse_tax_rate(item: dict[str, Any]) -> int | None:
     """SAP Item Master U_TaxRate is the source of truth. Excel IGST % is not used."""
+    if not item:
+        return None
     raw = item.get("U_TaxRate")
-    if raw not in (None, "", "N/A"):
+    if raw is not None and raw != "" and str(raw).strip().upper() != "N/A":
         try:
             return int(float(raw))
         except (TypeError, ValueError):
             pass
     for key in ("U_IgstTax", "U_GstTax"):
-        text = str(item.get(key) or "")
+        text = str(item.get(key) or "").strip()
+        if not text or text.lower() in {"nil", "n/a", "na", "-"}:
+            continue
         found = re.search(r"(\d+)", text)
         if found:
             return int(found.group(1))
-    return 0
+    if item.get("ItemCode"):
+        return 0
+    return None
 
 
 def _taxcode(state: str, tax_rate: Any) -> str:
-    """Karnataka (KT) → KACS{rate}; other states → KAIG{rate}."""
+    """Karnataka (KT) → KACS{rate}; other states → KAIG{rate}. Rate 0 → KAIG0 / KACS0 (Frappe)."""
+    if not _tax_rate_is_set(tax_rate):
+        return ""
     prefix = "KACS" if (state or "").upper() == "KT" else "KAIG"
-    try:
-        rate = int(float(tax_rate or 0))
-    except (TypeError, ValueError):
-        rate = 0
+    rate = int(float(tax_rate))
     return f"{prefix}{rate}"
+
+
+def matched_state_for_tax(header: dict[str, Any]) -> str:
+    state = str(header.get("matched_state") or "").strip()
+    if state:
+        return state
+    if str(header.get("bill_to") or "").strip().lower() == "local":
+        return "KT"
+    return ""
+
+
+def resolve_line_tax_code(
+    line: dict[str, Any],
+    *,
+    matched_state: str = "",
+    bill_to: str = "",
+    header: dict[str, Any] | None = None,
+) -> str:
+    if header is not None:
+        matched_state = matched_state or matched_state_for_tax(header)
+        bill_to = bill_to or str(header.get("bill_to") or "")
+    for key in ("taxcode", "tax_code", "TaxCode"):
+        val = line.get(key)
+        if val not in (None, ""):
+            return str(val)
+    rate = line.get("tax_rate")
+    if _tax_rate_is_set(rate):
+        if int(float(rate)) == 0 and not str(line.get("taxcode") or "").strip():
+            gst_hint = str(line.get("gst_tax") or line.get("igst_tax") or "").strip().lower()
+            if not gst_hint or gst_hint in {"n/a", "na", "-"}:
+                return ""
+        state = matched_state
+        if not state and str(bill_to or "").strip().lower() == "local":
+            state = "KT"
+        return _taxcode(state, rate)
+    return ""
+
+
+def tax_code_gap_sap_codes(
+    lines: list[dict[str, Any]],
+    *,
+    matched_state: str = "",
+    bill_to: str = "",
+    header: dict[str, Any] | None = None,
+) -> list[str]:
+    """SAP item codes mapped on the PO but missing a usable tax code."""
+    if header is not None:
+        matched_state = matched_state or matched_state_for_tax(header)
+        bill_to = bill_to or str(header.get("bill_to") or "")
+    gaps: list[str] = []
+    for row in lines:
+        sap = str(row.get("sap_code") or "").strip()
+        if not sap:
+            continue
+        if not resolve_line_tax_code(row, matched_state=matched_state, bill_to=bill_to):
+            gaps.append(sap)
+    return gaps
+
+
+def enrich_and_validate_tax_codes(header: dict[str, Any], lines: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str]:
+    """Fill tax fields from OITM (HANA) and report SAP codes still missing TaxCode."""
+    state = matched_state_for_tax(header)
+    filled = enrich_lines_from_item_master(lines, state)
+    gaps = tax_code_gap_sap_codes(filled, matched_state=state, bill_to=str(header.get("bill_to") or ""))
+    if not gaps:
+        return filled, ""
+    return filled, f"Missing tax code from SAP item master (OITM / Service Layer) for: {', '.join(gaps)}"
 
 
 def enrich_lines_from_item_master(lines: list[dict[str, Any]], matched_state: str = "") -> list[dict[str, Any]]:
@@ -562,16 +882,20 @@ def enrich_lines_from_item_master(lines: list[dict[str, Any]], matched_state: st
         if item:
             tax_rate = _parse_tax_rate(item)
             rec["item_name"] = item.get("ItemName") or rec.get("item_name") or ""
-            rec["tax_rate"] = tax_rate
-            rec["gst_tax"] = item.get("U_GstTax") or rec.get("gst_tax") or ""
-            rec["igst_tax"] = item.get("U_IgstTax") or rec.get("igst_tax") or ""
-            rec["taxcode"] = _taxcode(matched_state, tax_rate)
+            if tax_rate is not None:
+                rec["tax_rate"] = tax_rate
+                rec["gst_tax"] = item.get("U_GstTax") or rec.get("gst_tax") or ""
+                rec["igst_tax"] = item.get("U_IgstTax") or rec.get("igst_tax") or ""
+                rec["taxcode"] = _taxcode(matched_state, tax_rate)
+        elif not rec.get("taxcode") and _tax_rate_is_set(rec.get("tax_rate")):
+            rec["taxcode"] = _taxcode(matched_state, rec.get("tax_rate"))
         out.append(rec)
     return out
 
 
-def unparsed_po_number(uid: str) -> str:
-    return f"UNPARSED-{uid}"
+def unparsed_po_number(uid: str, channel: str = store.CHANNEL_BLINKIT) -> str:
+    ch = (channel or store.CHANNEL_BLINKIT).strip().lower()
+    return f"UNPARSED-{ch}-{uid}"
 
 
 def decide_pipeline(last_error: str, lines: list) -> str:
@@ -638,7 +962,8 @@ def get_bytes(key: str) -> bytes | None:
 
 
 def rematch_po(conn, po_number: str, channel: str = store.CHANNEL_BLINKIT) -> dict[str, Any]:
-    detail = store.get_po(conn, po_number, channel)
+    ch = (channel or store.CHANNEL_BLINKIT).strip().lower()
+    detail = store.get_po(conn, po_number, ch)
     if not detail:
         raise ValueError("PO not found")
     header = dict(detail["header"])
@@ -646,9 +971,10 @@ def rematch_po(conn, po_number: str, channel: str = store.CHANNEL_BLINKIT) -> di
         raise ValueError("Posted POs cannot be rechecked")
     lines = [dict(r) for r in detail["lines"]]
     pdf_raw = get_bytes(header.get("pdf_s3_key") or "")
-    if pdf_raw:
+    pdf_text: str | None = None
+    if pdf_raw and ch != "bigbasket":
         try:
-            parsed_header, _ = extract_blinkit_header(pdf_raw)
+            parsed_header, pdf_text = extract_po_header(pdf_raw, ch)
             for src, dest in (
                 ("company_name", "company_name"),
                 ("company_name", "company_name"),
@@ -656,51 +982,108 @@ def rematch_po(conn, po_number: str, channel: str = store.CHANNEL_BLINKIT) -> di
                 ("delivered_to", "delivered_to"),
                 ("gst_no", "gst_no"),
                 ("gst_no", "gst_no"),
-                ("po_expiry_date", "po_expiry_date"),
-                ("po_expiry_date", "po_expiry_date"),
             ):
                 val = parsed_header.get(src)
                 if val and val not in {"Not Found", "Invalid Date Format"}:
                     header[dest] = val
+            if ch not in {"zepto"}:
+                expiry = parsed_header.get("po_expiry_date")
+                if expiry and expiry not in {"Not Found", "Invalid Date Format"}:
+                    header["po_expiry_date"] = expiry
         except Exception:
             logger.exception("Could not re-read PDF for PO %s", po_number)
     xlsx_key = header.get("xlsx_s3_key") or ""
     raw = get_bytes(xlsx_key)
+    excel_data: dict[str, Any] | None = None
     if raw:
-        parsed = parse_xlsx(raw)
+        parsed = parse_channel_lines(raw, channel=ch, filename=xlsx_key)
         if parsed:
             lines = parsed
+        if ch in {"instamart", "bigbasket", "zepto"}:
+            try:
+                excel_data = parse_channel_excel(raw, channel=ch, filename=xlsx_key)
+                if ch == "instamart":
+                    import instamart as instamart_parser
+
+                    instamart_parser.apply_excel_to_header(header, excel_data)
+                elif ch == "bigbasket":
+                    main_address = excel_data.get("delivered_to") or excel_data.get("Warehouse Address") or ""
+                    if main_address and main_address != "Not Found":
+                        header["delivered_to"] = main_address
+                    gst = str(excel_data.get("gst_no") or "")
+                    if gst and gst not in {"Not Found", ""}:
+                        header["gst_no"] = gst
+                    expiry = str(excel_data.get("po_expiry_date") or "")
+                    if expiry and expiry not in {"Not Found", "Invalid Date Format"}:
+                        header["po_expiry_date"] = expiry
+                else:
+                    import zepto as zepto_parser
+
+                    zepto_parser.apply_csv_to_header(header, excel_data, pdf_text=pdf_text)
+            except Exception:
+                logger.exception("Could not re-read %s Excel for PO %s", ch, po_number)
+    intake_errors = intake_validate.validate_intake_data(ch, header, lines)
+    if ch == "zepto" and excel_data:
+        mismatch = intake_validate.zepto_pdf_csv_po_mismatch(header.get("po_number"), excel_data.get("po_numbers"))
+        if mismatch:
+            intake_errors.append(mismatch)
     state = rematch_po_state(
         header.get("delivered_to") or "",
         lines,
-        store.list_ship_to_aliases(conn, channel),
-        store.sku_map_dict(conn, channel),
+        store.list_ship_to_aliases(conn, ch),
+        store.sku_map_dict(conn, ch),
     )
-    header["last_error"] = state["last_error"]
-    header["pipeline_status"] = state["pipeline_status"]
+    header["last_error"] = intake_validate.join_errors(
+        " ".join(intake_errors),
+        state["last_error"],
+    )
+    header["pipeline_status"] = decide_pipeline(header["last_error"], state["lines"])
     if state["matched_address_name"]:
-        header["matched_address_name"] = state["matched_address_name"]
         try:
-            bp = get_business_partner(BLINKIT_CARD_CODE)
+            bp = get_business_partner(header.get("customer_code") or card_code_for_channel(ch))
             sap_addr = pick_sap_address(bp.get("BPAddresses") or [], state["matched_address_name"])
             if sap_addr:
+                header["matched_address_name"] = sap_addr.get("AddressName") or state["matched_address_name"]
                 header["matched_state"] = sap_addr.get("State") or header.get("matched_state") or ""
                 header["bill_to"] = "Local" if (header.get("matched_state") or "").upper() == "KT" else "Central"
-        except SapError:
+                gst_error = _apply_gst_validation(header, sap_addr=sap_addr, bp=bp)
+                if gst_error:
+                    header["last_error"] = intake_validate.join_errors(header["last_error"], gst_error)
+                    header["pipeline_status"] = store.STATUS_NEEDS_REVIEW
+            else:
+                header["matched_address_name"] = ""
+                header["matched_state"] = ""
+                msg = f"No matching SAP address found for '{state['matched_address_name']}'."
+                header["last_error"] = intake_validate.join_errors(header["last_error"], msg)
+                header["pipeline_status"] = store.STATUS_NEEDS_REVIEW
+        except SapError as exc:
+            header["matched_address_name"] = ""
+            header["matched_state"] = ""
+            header["last_error"] = intake_validate.join_errors(header["last_error"], str(exc))
+            header["pipeline_status"] = store.STATUS_NEEDS_REVIEW
             logger.exception("Could not load BP state while refetching PO %s", po_number)
-    filled = enrich_lines_from_item_master(state["lines"], header.get("matched_state") or "")
+    else:
+        header["matched_address_name"] = ""
+        header["matched_state"] = ""
+    filled, tax_err = enrich_and_validate_tax_codes(header, state["lines"])
+    if tax_err:
+        header["last_error"] = (header.get("last_error") + " " if header.get("last_error") else "") + tax_err
+        header["pipeline_status"] = store.STATUS_NEEDS_REVIEW
     qty = sum(float(r.get("quantity") or 0) for r in filled)
     amt = sum(float(r.get("total_amount") or 0) for r in filled)
     header["total_quantity"] = qty
     header["total_amount"] = amt
     header["total_items"] = len({str(r.get("item_code")) for r in filled})
     store.upsert_purchase_order(conn, header, filled)
+    mail_moved = move_ready_po_mail_for_header(header, channel=ch)
+    ok = (header.get("pipeline_status") or "") == store.STATUS_READY and not (header.get("last_error") or "").strip()
     return {
-        "ok": state["ok"],
+        "ok": ok,
         "po_number": po_number,
-        "pipeline_status": state["pipeline_status"],
-        "last_error": state["last_error"],
-        "message": "Refetched from stored PDF/Excel. PO is ready." if state["ok"] else state["last_error"],
+        "pipeline_status": header["pipeline_status"],
+        "last_error": header["last_error"],
+        "mail_moved": mail_moved,
+        "message": "Refetched from stored PDF/Excel. PO is ready." if ok else header["last_error"],
     }
 
 
@@ -711,22 +1094,26 @@ def record_intake_failure(
     subject: str,
     message: str,
     pdf: bytes | None = None,
+    channel: str = store.CHANNEL_BLINKIT,
 ) -> dict[str, Any]:
     """Keep a failed extract on the dashboard. Do not mark the mail processed."""
-    po_number = unparsed_po_number(uid)
+    ch = (channel or store.CHANNEL_BLINKIT).strip().lower()
+    label = channel_label(ch)
+    card_code = card_code_for_channel(ch)
+    po_number = unparsed_po_number(uid, ch)
     pdf_key = ""
     if pdf:
         try:
-            pdf_key = blinkit_pdf_key(po_number)
+            pdf_key = channel_pdf_key(ch, po_number)
             put_bytes(pdf_key, pdf, "application/pdf")
         except Exception:
             logger.exception("Could not store failed PDF for UID %s", uid)
             pdf_key = ""
-    existing = store.get_po(conn, po_number)
+    existing = store.get_po(conn, po_number, channel=ch)
     store.upsert_purchase_order(
         conn,
         {
-            "channel": store.CHANNEL_BLINKIT,
+            "channel": ch,
             "po_number": po_number,
             "pipeline_status": store.STATUS_FAILED,
             "company_name": "",
@@ -734,7 +1121,7 @@ def record_intake_failure(
             "po_expiry_date": None,
             "delivered_to": "",
             "gst_no": "",
-            "customer_code": BLINKIT_CARD_CODE,
+            "customer_code": card_code,
             "salesperson_code": "",
             "matched_address_name": "",
             "matched_state": "",
@@ -759,17 +1146,19 @@ def record_intake_failure(
             title="Could not extract purchase order",
             body=message,
             po_number=po_number,
+            channel=ch,
         )
-        sent = send_po_email(po_number=po_number, message=message, file_url=presign(pdf_key) if pdf_key else "")
+        sent = send_po_email(po_number=po_number, message=message, file_url=presign(pdf_key) if pdf_key else "", channel_name=label)
         store.add_email_log(
             conn,
             recipients=",".join(_recipients()),
-            subject=f"Blinkit extract failed {po_number}",
+            subject=f"{label} extract failed {po_number}",
             po_number=po_number,
             sent_ok=sent,
+            channel=ch,
         )
     conn.commit()
-    return {"uid": uid, "po_number": po_number, "status": store.STATUS_FAILED, "error": message}
+    return {"uid": uid, "po_number": po_number, "status": store.STATUS_FAILED, "error": message, "channel": ch}
 
 
 def process_one_email(
@@ -777,8 +1166,12 @@ def process_one_email(
     mail: imaplib.IMAP4_SSL,
     uid: str,
     *,
+    channel: str = store.CHANNEL_BLINKIT,
     source_folder: str = "Blinkit",
 ) -> dict[str, Any]:
+    ch = (channel or store.CHANNEL_BLINKIT).strip().lower()
+    label = channel_label(ch)
+    card_code = card_code_for_channel(ch)
     _ok, msg_data = mail.uid("fetch", uid, "(RFC822)")
     raw = None
     for part in msg_data or []:
@@ -790,27 +1183,118 @@ def process_one_email(
 
     msg = email.message_from_bytes(raw)
     subject = _subject(msg)
-    pdf, xlsx_bytes = _attachments(msg)
-    if not pdf:
-        return record_intake_failure(
-            conn,
-            uid=uid,
-            subject=subject,
-            message="This email has no PDF attachment, so the purchase order could not be extracted.",
-        )
+    pdf, excel_bytes, excel_name = _attachments(msg)
+    header: dict[str, str] = {}
+    instamart_excel: dict[str, Any] = {}
+    xlsx_rows: list[dict[str, Any]] = []
 
-    try:
-        header, _text = extract_blinkit_header(pdf)
-    except Exception as exc:
-        return record_intake_failure(
-            conn,
-            uid=uid,
-            subject=subject,
-            message=f"Could not extract this purchase order from the PDF. {exc}",
-            pdf=pdf,
-        )
+    if ch == "bigbasket":
+        if not excel_bytes:
+            return record_intake_failure(
+                conn,
+                uid=uid,
+                subject=subject,
+                message="This email has no Excel (.xls or .xlsx) attachment, so the Bigbasket purchase order could not be extracted.",
+                channel=ch,
+            )
+        try:
+            import bigbasket as bigbasket_parser
+
+            parsed = bigbasket_parser.parse_excel_attachment(excel_bytes, excel_name)
+            header = bigbasket_parser.header_from_parsed(parsed)
+            xlsx_rows = parsed.get("lines") or []
+        except Exception as exc:
+            return record_intake_failure(
+                conn,
+                uid=uid,
+                subject=subject,
+                message=f"Could not extract this purchase order from the Excel file. {exc}",
+                channel=ch,
+            )
+    else:
+        if not pdf:
+            return record_intake_failure(
+                conn,
+                uid=uid,
+                subject=subject,
+                message="This email has no PDF attachment, so the purchase order could not be extracted.",
+                channel=ch,
+            )
+        try:
+            header, pdf_text = extract_po_header(pdf, ch)
+        except Exception as exc:
+            return record_intake_failure(
+                conn,
+                uid=uid,
+                subject=subject,
+                message=f"Could not extract this purchase order from the PDF. {exc}",
+                pdf=pdf,
+                channel=ch,
+            )
+
+        if ch == "instamart":
+            if not excel_bytes:
+                return record_intake_failure(
+                    conn,
+                    uid=uid,
+                    subject=subject,
+                    message="No Excel (.xls or .xlsx) attachment found. Instamart line items could not be extracted.",
+                    pdf=pdf,
+                    channel=ch,
+                )
+            try:
+                instamart_excel = parse_channel_excel(excel_bytes, channel=ch, filename=excel_name)
+            except Exception as exc:
+                return record_intake_failure(
+                    conn,
+                    uid=uid,
+                    subject=subject,
+                    message=f"Could not read the Instamart Excel attachment. {exc}",
+                    pdf=pdf,
+                    channel=ch,
+                )
+            import instamart as instamart_parser
+
+            instamart_parser.apply_excel_to_header(header, instamart_excel)
+        elif ch == "zepto":
+            if not excel_bytes:
+                return record_intake_failure(
+                    conn,
+                    uid=uid,
+                    subject=subject,
+                    message="No CSV attachment found. Zepto line items could not be extracted.",
+                    pdf=pdf,
+                    channel=ch,
+                )
+            try:
+                zepto_excel = parse_channel_excel(excel_bytes, channel=ch, filename=excel_name)
+            except Exception as exc:
+                return record_intake_failure(
+                    conn,
+                    uid=uid,
+                    subject=subject,
+                    message=f"Could not read the Zepto CSV attachment. {exc}",
+                    pdf=pdf,
+                    channel=ch,
+                )
+            xlsx_rows = zepto_excel.get("lines") or []
+            import zepto as zepto_parser
+
+            zepto_parser.apply_csv_to_header(header, zepto_excel, pdf_text=pdf_text)
+            mismatch = intake_validate.zepto_pdf_csv_po_mismatch(header.get("po_number"), zepto_excel.get("po_numbers"))
+            if mismatch:
+                return record_intake_failure(
+                    conn,
+                    uid=uid,
+                    subject=subject,
+                    message=mismatch,
+                    pdf=pdf,
+                    channel=ch,
+                )
 
     po_number = header.get("po_number") or "Unknown"
+    if po_number in {"Unknown", "Not Found"} and ch == "instamart":
+        po_number = (instamart_excel.get("PO Details") or {}).get("PO No") or po_number
     if po_number in {"Unknown", "Not Found"}:
         return record_intake_failure(
             conn,
@@ -818,8 +1302,9 @@ def process_one_email(
             subject=subject,
             message="Could not read a PO number from the PDF.",
             pdf=pdf,
+            channel=ch,
         )
-    existing_detail = store.get_po(conn, po_number, store.CHANNEL_BLINKIT)
+    existing_detail = store.get_po(conn, po_number, ch)
     prev_header = (existing_detail or {}).get("header") if existing_detail else None
     amended = False
     amend_status = "False/0"
@@ -837,6 +1322,7 @@ def process_one_email(
                 po_number=po_number,
                 subject=subject,
                 existing_detail=existing_detail,
+                channel=ch,
             )
         logger.info("Amending PO %s (uid %s) — subject %r", po_number, uid, subject)
         amend_status = store.archive_po_for_amend(
@@ -851,11 +1337,13 @@ def process_one_email(
             action="amend_archive",
             po_number=po_number,
             detail=amend_status,
+            channel=ch,
         )
         amended = True
         prev_header = None
-    xlsx_rows = parse_xlsx(xlsx_bytes) if xlsx_bytes else []
-    match = match_ship_to(header.get("delivered_to") or "", store.list_ship_to_aliases(conn))
+    if ch not in {"bigbasket", "zepto"}:
+        xlsx_rows = parse_channel_lines(excel_bytes, channel=ch, filename=excel_name) if excel_bytes else []
+    match = match_ship_to(header.get("delivered_to") or "", store.list_ship_to_aliases(conn, ch))
     matched_name = ""
     matched_state = ""
     last_error = ""
@@ -866,7 +1354,7 @@ def process_one_email(
         last_error = match["message"]
     else:
         try:
-            bp = get_business_partner(BLINKIT_CARD_CODE)
+            bp = get_business_partner(card_code)
         except SapError as exc:
             pipeline = store.STATUS_NEEDS_REVIEW
             last_error = str(exc)
@@ -878,15 +1366,12 @@ def process_one_email(
         else:
             matched_name = sap_addr.get("AddressName") or ""
             matched_state = sap_addr.get("State") or ""
-            extracted_gst = normalize_gstin(header.get("gst_no") or "")
-            sap_gst = normalize_gstin(
-                sap_addr.get("GSTIN") or sap_addr.get("FederalTaxID") or bp.get("GSTIN") or bp.get("FederalTaxID")
-            )
-            if not extracted_gst or not sap_gst or extracted_gst != sap_gst:
+            gst_error = _apply_gst_validation(header, sap_addr=sap_addr, bp=bp)
+            if gst_error:
                 pipeline = store.STATUS_NEEDS_REVIEW
-                last_error = f"GST mismatch. Extracted: {extracted_gst or 'Not Found'}, SAP: {sap_gst or 'Not Found'}."
+                last_error = gst_error
 
-    sku_map = store.sku_map_dict(conn)
+    sku_map = store.sku_map_dict(conn, ch)
     mapped_codes = [sku_map[str(r.get("item_code") or "")] for r in xlsx_rows if sku_map.get(str(r.get("item_code") or ""))]
     try:
         item_by_code = get_items(mapped_codes) if mapped_codes else {}
@@ -906,7 +1391,7 @@ def process_one_email(
                     **row,
                     "sap_code": "",
                     "item_name": "",
-                    "tax_rate": 0,
+                    "tax_rate": "",
                     "gst_tax": "",
                     "igst_tax": "",
                     "taxcode": "",
@@ -920,26 +1405,42 @@ def process_one_email(
                 **row,
                 "sap_code": sap_code,
                 "item_name": item.get("ItemName") or "",
-                "tax_rate": tax_rate,
+                "tax_rate": tax_rate if tax_rate is not None else "",
                 "gst_tax": item.get("U_GstTax") or "",
                 "igst_tax": item.get("U_IgstTax") or "",
-                "taxcode": _taxcode(matched_state, tax_rate),
+                "taxcode": _taxcode(matched_state, tax_rate) if tax_rate is not None else "",
             }
         )
     if missing:
         last_error = (last_error + " " if last_error else "") + f"No mapping found for item codes: {', '.join(missing)}"
-    if not xlsx_bytes:
-        last_error = (last_error + " " if last_error else "") + "No Excel (.xlsx) attachment found. Line items could not be extracted."
-    elif not xlsx_rows:
-        last_error = (last_error + " " if last_error else "") + "Excel attachment had no usable line items."
+    intake_err = " ".join(
+        intake_validate.validate_intake_data(ch, header, xlsx_rows, skip_lines=(ch == "blinkit" and not excel_bytes))
+    )
+    if intake_err:
+        last_error = intake_validate.join_errors(last_error, intake_err)
+    if not excel_bytes:
+        if ch == "zepto":
+            excel_hint = "No CSV attachment found."
+        elif ch in {"instamart", "bigbasket"}:
+            excel_hint = "No Excel (.xls or .xlsx) attachment found."
+        else:
+            excel_hint = "No Excel (.xlsx) attachment found."
+        last_error = (last_error + " " if last_error else "") + f"{excel_hint} Line items could not be extracted."
+    elif not xlsx_rows and not intake_err:
+        last_error = (last_error + " " if last_error else "") + "Line-item attachment had no usable rows."
+    tax_gaps = tax_code_gap_sap_codes(lines, matched_state=matched_state, bill_to="Local" if matched_state == "KT" else "Central")
+    if tax_gaps:
+        last_error = (last_error + " " if last_error else "") + f"Missing tax code from SAP item master (OITM / Service Layer) for: {', '.join(tax_gaps)}"
     pipeline = decide_pipeline(last_error, lines)
 
-    pdf_key = blinkit_pdf_key(po_number)
-    put_bytes(pdf_key, pdf, "application/pdf")
+    pdf_key = ""
+    if pdf:
+        pdf_key = channel_pdf_key(ch, po_number)
+        put_bytes(pdf_key, pdf, "application/pdf")
     xlsx_key = ""
-    if xlsx_bytes:
-        xlsx_key = blinkit_xlsx_key(po_number)
-        put_bytes(xlsx_key, xlsx_bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    if excel_bytes:
+        xlsx_key = _excel_storage_key(ch, po_number, excel_name)
+        put_bytes(xlsx_key, excel_bytes, _excel_content_type(excel_name))
 
     qty = sum(float(r.get("quantity") or 0) for r in lines)
     amt = sum(float(r.get("total_amount") or 0) for r in lines)
@@ -947,7 +1448,7 @@ def process_one_email(
     record = store.upsert_purchase_order(
         conn,
         {
-            "channel": store.CHANNEL_BLINKIT,
+            "channel": ch,
             "po_number": po_number,
             "pipeline_status": pipeline,
             "company_name": header.get("company_name") or header.get("company_name") or "",
@@ -955,7 +1456,7 @@ def process_one_email(
             "po_expiry_date": expiry if expiry not in {"Not Found", "Invalid Date Format"} else None,
             "delivered_to": header.get("delivered_to") or header.get("delivered_to") or "",
             "gst_no": header.get("gst_no") or header.get("gst_no") or "",
-            "customer_code": BLINKIT_CARD_CODE,
+            "customer_code": card_code,
             "salesperson_code": "",
             "matched_address_name": matched_name,
             "matched_state": matched_state,
@@ -990,8 +1491,8 @@ def process_one_email(
             "error": message,
             "mail_moved": False,
         }
-    store.delete_po(conn, unparsed_po_number(uid))
-    store.mark_email_processed(conn, store.CHANNEL_BLINKIT, uid, po_number)
+    store.delete_po(conn, unparsed_po_number(uid, ch), channel=ch)
+    store.mark_email_processed(conn, ch, uid, po_number)
     notify = amended or should_notify_po_update(prev_header, pipeline_status=pipeline, last_error=last_error)
     sent = False
     if notify:
@@ -1014,12 +1515,28 @@ def process_one_email(
             title=inbox_title,
             body=inbox_body,
             po_number=po_number,
+            channel=ch,
         )
-        sent = send_po_email(po_number=po_number, message=email_message, file_url=presign(pdf_key))
-        store.add_email_log(conn, recipients=",".join(_recipients()), subject=f"Blinkit PO {po_number}", po_number=po_number, sent_ok=sent)
+        sent = send_po_email(po_number=po_number, message=email_message, file_url=presign(pdf_key), channel_name=label)
+        store.add_email_log(
+            conn,
+            recipients=",".join(_recipients()),
+            subject=f"{label} PO {po_number}",
+            po_number=po_number,
+            sent_ok=sent,
+            channel=ch,
+        )
     moved = False
-    if _move_processed():
+    if _move_processed() and _mail_ready_for_processed(pipeline, last_error):
         moved = _move_to_processed(mail, uid, source_folder=source_folder)
+    elif _move_processed() and not _mail_ready_for_processed(pipeline, last_error):
+        logger.info(
+            "Keeping mail uid %s in %s — PO %s status=%s (not ready for posting)",
+            uid,
+            source_folder,
+            po_number,
+            pipeline,
+        )
     conn.commit()
     action = "amended" if amended else "created"
     return {
@@ -1030,11 +1547,15 @@ def process_one_email(
         "amend_status": amend_status if amended else None,
         "id": record.get("id"),
         "mail_moved": moved,
+        "channel": ch,
     }
 
 
-def run_fetch(max_messages: int | None = None) -> dict[str, Any]:
-    creds = get_imap_credentials()
+def run_fetch(channel: str = store.CHANNEL_BLINKIT, max_messages: int | None = None) -> dict[str, Any]:
+    ch = (channel or store.CHANNEL_BLINKIT).strip().lower()
+    if ch not in store.FETCH_CHANNELS:
+        raise ValueError(f"Channel {ch!r} does not support mail fetch")
+    creds = get_imap_credentials(ch)
     mail = imaplib.IMAP4_SSL(creds.imap_server, creds.imap_port)
     mail.login(creds.email, creds.password)
     mail.select(f'"{creds.folder}"')
@@ -1046,21 +1567,29 @@ def run_fetch(max_messages: int | None = None) -> dict[str, Any]:
     with store.connect() as conn:
         for raw_uid in uids:
             uid = raw_uid.decode() if isinstance(raw_uid, bytes) else str(raw_uid)
-            if store.already_processed(conn, store.CHANNEL_BLINKIT, uid):
-                results.append({"uid": uid, "status": "skipped"})
+            if store.already_processed(conn, ch, uid):
+                results.append({"uid": uid, "status": "skipped", "channel": ch})
                 continue
             try:
-                results.append(process_one_email(conn, mail, uid, source_folder=creds.folder))
+                results.append(
+                    process_one_email(conn, mail, uid, channel=ch, source_folder=creds.folder)
+                )
             except Exception as exc:
-                logger.exception("Blinkit UID %s failed", uid)
+                logger.exception("%s UID %s failed", channel_label(ch), uid)
                 conn.rollback()
                 try:
-                    results.append(record_intake_failure(conn, uid=uid, subject="", message=str(exc)))
+                    results.append(record_intake_failure(conn, uid=uid, subject="", message=str(exc), channel=ch))
                 except Exception:
-                    send_alert(f"Blinkit UID {uid} failed", str(exc))
-                    results.append({"uid": uid, "status": "error", "error": str(exc)})
+                    send_alert(f"{channel_label(ch)} UID {uid} failed", str(exc))
+                    results.append({"uid": uid, "status": "error", "error": str(exc), "channel": ch})
+        ready_moves = _move_ready_mails_in_folder(
+            conn, mail, channel=ch, source_folder=creds.folder, uids=uids
+        )
+        if ready_moves:
+            conn.commit()
+            logger.info("%s fetch moved %s ready mail(s) to processed folder", channel_label(ch), ready_moves)
     try:
         mail.logout()
     except Exception:
         pass
-    return {"processed": len(results), "results": results}
+    return {"channel": ch, "folder": creds.folder, "processed": len(results), "results": results}

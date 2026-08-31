@@ -7,8 +7,22 @@ IMAP = {
     "password": "",
     "imap_server": "imap.gmail.com",
     "imap_port": 993,
-    "folder": "Blinkit",  # Gmail label for this channel; same mailbox later: Zepto, etc.
+    # Legacy single-channel (Blinkit only):
+    "folder": "Blinkit",
+    # Preferred — one shared mailbox, one Gmail label per channel:
+    "folders": {
+        "blinkit": "Blinkit",
+        "zepto": "Zepto",
+        "instamart": "Instamart",
+        "bigbasket": "Bigbasket",
+    },
+    # SAP Business Partner CardCode per channel (blinkit defaults to C03570 in code):
+    "card_codes": {
+        "blinkit": "C03570",
+        # "zepto": "Cxxxxx",
+        # "instamart": "Cxxxxx",
+        # "bigbasket": "Cxxxxx",
+    },
 }
 
-# Blinkit CardCode is hardcoded in blinkit.py (BLINKIT_CARD_CODE).
 # Salesperson codes live in b2b.users, not here.

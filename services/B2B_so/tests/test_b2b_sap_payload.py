@@ -1,5 +1,5 @@
 from blinkit import BLINKIT_CARD_CODE
-from blinkit_sap import build_order_payload
+from b2b_sappost import build_order_payload
 
 
 def test_card_code_is_hardcoded():
@@ -50,6 +50,53 @@ def test_po_link_is_public_and_not_presigned(monkeypatch):
     assert "X-Amz-" not in payload["U_PO_LINK"]
 
 
+def test_order_payload_fills_tax_code_from_tax_rate_when_missing(monkeypatch):
+    import blinkit
+
+    monkeypatch.setattr(
+        blinkit,
+        "enrich_lines_from_item_master",
+        lambda lines, matched_state="": lines,
+    )
+    header = {
+        "customer_code": "C03566",
+        "company_name": "SCOOTSY LOGISTICS PRIVATE LIMITED",
+        "po_number": "NARPO22475",
+        "po_expiry_date": "2026-08-22",
+        "billing_from": "KT",
+        "bill_to": "Central",
+        "matched_address_name": "Scootsy Nagpur warehouse",
+        "matched_state": "MH",
+        "pdf_s3_key": "instamart/x.pdf",
+    }
+    lines = [{"sap_code": "FGHN0065", "quantity": 24, "basic_cost_price": 469.16, "tax_rate": 5}]
+    payload = build_order_payload(header, lines, "111")
+    assert payload["DocumentLines"][0]["TaxCode"] == "KAIG5"
+
+
+def test_order_payload_fills_tax_code_via_item_master(monkeypatch):
+    import blinkit
+
+    def fake_enrich(lines, matched_state=""):
+        return [{**lines[0], "taxcode": "KAIG5", "tax_rate": 5}]
+
+    monkeypatch.setattr(blinkit, "enrich_lines_from_item_master", fake_enrich)
+    header = {
+        "customer_code": "C03570",
+        "company_name": "TEST",
+        "po_number": "PO1",
+        "po_expiry_date": "2026-08-22",
+        "billing_from": "KT",
+        "bill_to": "Central",
+        "matched_state": "MH",
+        "matched_address_name": "WH",
+        "pdf_s3_key": "x.pdf",
+    }
+    lines = [{"sap_code": "FGHN0065", "quantity": 1, "basic_cost_price": 10}]
+    payload = build_order_payload(header, lines, "103")
+    assert payload["DocumentLines"][0]["TaxCode"] == "KAIG5"
+
+
 def test_order_payload_accepts_db_column_names():
     header = {
         "customer_code": "C03570",
@@ -78,8 +125,155 @@ def test_order_payload_accepts_db_column_names():
     assert payload["DocumentLines"][0]["TaxCode"] == "KAIG5"
 
 
+def _document_line_for_channel(channel: str) -> dict:
+    header = {
+        "channel": channel,
+        "customer_code": "C03570",
+        "company_name": "TEST",
+        "po_number": "PO-PRICE",
+        "po_expiry_date": "2026-03-06",
+        "billing_from": "KT",
+        "bill_to": "Local",
+        "matched_address_name": "WH",
+        "pdf_s3_key": "x.pdf",
+    }
+    lines = [{"sap_code": "FG-001", "quantity": 2, "basic_cost_price": 50.0, "taxcode": "KACS5"}]
+    return build_order_payload(header, lines, "103")["DocumentLines"][0]
+
+
+def test_blinkit_sends_price_and_unit_price():
+    line = _document_line_for_channel("blinkit")
+    assert line["Price"] == 50.0
+    assert line["UnitPrice"] == 50.0
+
+
+def test_bigbasket_sends_price_and_unit_price():
+    line = _document_line_for_channel("bigbasket")
+    assert line["Price"] == 50.0
+    assert line["UnitPrice"] == 50.0
+
+
+def test_zepto_sends_unit_price_only():
+    line = _document_line_for_channel("zepto")
+    assert "Price" not in line
+    assert line["UnitPrice"] == 50.0
+
+
+def test_instamart_omits_price_fields():
+    line = _document_line_for_channel("instamart")
+    assert "Price" not in line
+    assert "UnitPrice" not in line
+
+
+def test_instamart_prices_enabled_via_env(monkeypatch):
+    monkeypatch.setenv("B2B_INSTAMART_SEND_PRICES", "1")
+    line = _document_line_for_channel("instamart")
+    assert line["Price"] == 50.0
+    assert line["UnitPrice"] == 50.0
+
+
+def test_instamart_payload_tax_from_oitm(monkeypatch):
+    import blinkit
+
+    header = {
+        "channel": "instamart",
+        "customer_code": "C03566",
+        "company_name": "SCOOTSY LOGISTICS PRIVATE LIMITED",
+        "po_number": "NARPO22475",
+        "po_expiry_date": "2026-08-22",
+        "billing_from": "KT",
+        "bill_to": "Central",
+        "matched_address_name": "Scootsy Nagpur warehouse",
+        "matched_state": "MH",
+        "pdf_s3_key": "instamart/Instamart_NARPO22475.pdf",
+    }
+    lines = [
+        {"sap_code": "FGHN0065", "quantity": 24, "basic_cost_price": 469.16},
+        {"sap_code": "FGHN0008", "quantity": 72, "basic_cost_price": 100},
+    ]
+    items = {
+        "FGHN0065": {"ItemCode": "FGHN0065", "U_TaxRate": 5},
+        "FGHN0008": {"ItemCode": "FGHN0008", "U_TaxRate": 5},
+    }
+    monkeypatch.setattr(blinkit, "get_items", lambda codes: {c: items[c] for c in codes if c in items})
+    payload = build_order_payload(header, lines, "111")
+    assert payload["DocumentLines"][0]["TaxCode"] == "KAIG5"
+    assert payload["DocumentLines"][1]["TaxCode"] == "KAIG5"
+    assert "Price" not in payload["DocumentLines"][0]
+
+
+def test_post_blocks_when_tax_code_missing(monkeypatch):
+    import b2b_sappost as sap
+
+    header = {
+        "channel": "instamart",
+        "po_number": "NARPO22475",
+        "pipeline_status": "approved",
+        "customer_code": "C03566",
+        "matched_state": "MH",
+        "bill_to": "Central",
+        "pdf_s3_key": "instamart/x.pdf",
+        "matched_address_name": "Scootsy Nagpur warehouse",
+        "po_expiry_date": "2026-08-22",
+        "billing_from": "KT",
+    }
+    lines = [{"sap_code": "FGHN0065", "quantity": 24, "basic_cost_price": 469.16}]
+    monkeypatch.setattr(sap.store, "get_po", lambda *a, **k: {"header": header, "lines": lines})
+    saved = {}
+
+    def set_status(conn, po, status, **kw):
+        saved.update(kw)
+        saved["pipeline_status"] = status
+
+    monkeypatch.setattr(sap.store, "set_po_status", set_status)
+    monkeypatch.setattr(sap.store, "add_audit", lambda *a, **k: None)
+
+    class Conn:
+        def commit(self):
+            pass
+
+    out = sap.post_purchase_order(Conn(), "NARPO22475", channel="instamart", salesperson_code="111")
+    assert out["status"] == "error"
+    assert "FGHN0065" in out["message"]
+    assert "Refetch" in out["message"]
+    assert saved.get("sap_status") == "POST FAILED"
+
+
+def test_post_purchase_order_uses_channel_for_lookup(monkeypatch):
+    import b2b_sappost as sap
+
+    lookup = []
+
+    def fake_get_po(conn, po_number, channel=sap.store.CHANNEL_BLINKIT):
+        lookup.append((po_number, channel))
+        if channel == "instamart":
+            return {
+                "header": {"channel": "instamart", "po_number": po_number, "pipeline_status": "approved"},
+                "lines": [{"sap_code": "FG-001", "quantity": 1, "basic_cost_price": 1, "taxcode": "KAIG5"}],
+            }
+        return None
+
+    monkeypatch.setattr(sap.store, "get_po", fake_get_po)
+    monkeypatch.setattr(sap.store, "set_po_status", lambda *a, **k: None)
+    monkeypatch.setattr(sap.store, "add_audit", lambda *a, **k: None)
+    monkeypatch.setattr(
+        sap,
+        "find_order_by_num_at_card",
+        lambda *_a, **_k: (_ for _ in ()).throw(ValueError("skip sap")),
+    )
+
+    class Conn:
+        def commit(self):
+            pass
+
+    out = sap.post_purchase_order(Conn(), "NARPO1", channel="instamart", salesperson_code="103")
+    assert lookup == [("NARPO1", "instamart")]
+    assert out["status"] == "error"
+    assert "skip sap" in out["message"]
+
+
 def test_post_persists_ssm_error(monkeypatch):
-    import blinkit_sap as sap
+    import b2b_sappost as sap
 
     header = {
         "po_number": "8525210021628",
@@ -136,7 +330,7 @@ def test_post_persists_ssm_error(monkeypatch):
 
 
 def test_is_open_document_status():
-    import blinkit_sap as sap
+    import b2b_sappost as sap
 
     assert sap.is_open_document_status("bost_Open")
     assert sap.is_open_document_status("Open")
@@ -145,7 +339,7 @@ def test_is_open_document_status():
 
 
 def test_update_posted_order_patches_open_doc(monkeypatch):
-    import blinkit_sap as sap
+    import b2b_sappost as sap
 
     header = {
         "po_number": "51925610000607",
@@ -185,7 +379,7 @@ def test_update_posted_order_patches_open_doc(monkeypatch):
 
 
 def test_cancel_posted_order_calls_service_layer(monkeypatch):
-    import blinkit_sap as sap
+    import b2b_sappost as sap
 
     header = {
         "po_number": "51925610000607",
