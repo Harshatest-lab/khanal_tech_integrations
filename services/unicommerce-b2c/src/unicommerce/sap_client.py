@@ -304,6 +304,30 @@ def get_invoice_by_doc_entry(doc_entry: int) -> dict:
     return body
 
 
+def patch_invoice_note(doc_entry: int, header_suffix: str, line_notes: dict[int, str]) -> dict:
+    """Append informational text to a POSTED invoice -- Comments (header)
+    and DocumentLines[].FreeText (per line) are the only fields SAP B1
+    still allows editing after Add; UnitPrice/Qty/Tax stay locked once
+    the document has generated GL entries. Idempotent on Comments (won't
+    duplicate header_suffix if already present); FreeText is overwritten
+    each call, so re-running with the same line_notes is also safe."""
+    current = get_invoice_by_doc_entry(doc_entry)
+    comments = str(current.get("Comments") or "")
+    if header_suffix not in comments:
+        comments = f"{comments} | {header_suffix}" if comments else header_suffix
+
+    body: dict[str, Any] = {"Comments": comments[:254]}
+    if line_notes:
+        body["DocumentLines"] = [
+            {"LineNum": line_num, "FreeText": text[:254]} for line_num, text in line_notes.items()
+        ]
+
+    status, resp = _request("PATCH", f"Invoices({int(doc_entry)})", body=body)
+    if status not in (200, 204):
+        raise SapPostError(f"Invoice note patch failed for DocEntry={doc_entry}: HTTP {status}: {str(resp)[:500]}")
+    return {"doc_entry": doc_entry, "status": status, "comments": comments}
+
+
 # ── Credit notes ──────────────────────────────────────────────────────
 # Ported from khanal_tech_integrations/unicommerce/client/sap.py's
 # CreditNotes-facing methods and workers/credit_note.py's series fallback.

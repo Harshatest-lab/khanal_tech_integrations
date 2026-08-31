@@ -301,6 +301,15 @@ functions:
           rate: cron(2,32 * * * ? *)
           enabled: ${self:custom.currentSchedulesEnabled}
 
+  bogoNoteBackfill:
+    handler: src.handlers.bogo_note_backfill_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+    # No schedule -- invoked manually (aws lambda invoke) with
+    # {"items": [...], "apply": bool}. Appends a visible BOGO note to
+    # already-posted invoices whose free line shows a blank UnitPrice
+    # (price/qty locked post-Add; only Comments + line FreeText stay
+    # editable). Delete once the known affected invoices are done.
+
   numatcardBackfill:
     handler: src.handlers.numatcard_backfill_handler
     layers: [{ Ref: SharedLambdaLayer }]
