@@ -304,22 +304,35 @@ def get_invoice_by_doc_entry(doc_entry: int) -> dict:
     return body
 
 
-def patch_invoice_note(doc_entry: int, header_suffix: str, line_notes: dict[int, str]) -> dict:
+def patch_invoice_note(doc_entry: int, header_suffix: str, item_notes: dict[str, str]) -> dict:
     """Append informational text to a POSTED invoice -- Comments (header)
     and DocumentLines[].FreeText (per line) are the only fields SAP B1
     still allows editing after Add; UnitPrice/Qty/Tax stay locked once
     the document has generated GL entries. Idempotent on Comments (won't
     duplicate header_suffix if already present); FreeText is overwritten
-    each call, so re-running with the same line_notes is also safe."""
+    each call, so re-running with the same item_notes is also safe.
+
+    item_notes is keyed by ItemCode (SKU), not raw SAP LineNum -- a
+    caller can't know a posted invoice's actual LineNum ordering without
+    an extra round trip, and guessing risks writing the note onto the
+    wrong line. Matched here against the DocumentLines this call already
+    fetches. Raises if a requested SKU isn't found on the invoice, rather
+    than silently skipping it -- a caller-side data mismatch (wrong
+    doc_entry, item since remapped) should surface, not vanish."""
     current = get_invoice_by_doc_entry(doc_entry)
     comments = str(current.get("Comments") or "")
     if header_suffix not in comments:
         comments = f"{comments} | {header_suffix}" if comments else header_suffix
 
     body: dict[str, Any] = {"Comments": comments[:254]}
-    if line_notes:
+    if item_notes:
+        lines = current.get("DocumentLines") or []
+        matched = {ln.get("ItemCode"): ln.get("LineNum") for ln in lines}
+        missing = [sku for sku in item_notes if sku not in matched]
+        if missing:
+            raise SapPostError(f"DocEntry={doc_entry}: SKU(s) not found on invoice: {missing}")
         body["DocumentLines"] = [
-            {"LineNum": line_num, "FreeText": text[:254]} for line_num, text in line_notes.items()
+            {"LineNum": matched[sku], "FreeText": text[:254]} for sku, text in item_notes.items()
         ]
 
     status, resp = _request("PATCH", f"Invoices({int(doc_entry)})", body=body)

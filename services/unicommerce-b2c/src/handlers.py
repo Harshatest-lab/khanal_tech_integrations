@@ -119,13 +119,17 @@ def fetch_handler(event, context):
 
 def bogo_note_backfill_handler(event, context):
     """{"items": [{"doc_entry": int, "header_note": str,
-    "line_notes": {"<LineNum>": str}}], "apply": bool? (default false --
-    dry-run, only reads current Comments back)}. One-off: append a
-    visible note to already-posted BOGO/100%-off invoices whose free
-    line shows a blank UnitPrice in SAP (price/qty/tax are locked on a
-    posted doc -- only Comments + DocumentLines[].FreeText stay
-    editable, see sap_client.patch_invoice_note). Invoke manually (aws
-    lambda invoke), same network-path reasoning as numatcardBackfill.
+    "item_notes": {"<ItemCode/SKU>": str}}], "apply": bool? (default false
+    -- dry-run, only reads current Comments + DocumentLines back)}.
+    One-off: append a visible note to already-posted BOGO/100%-off
+    invoices whose free line shows a blank UnitPrice in SAP (price/qty/tax
+    are locked on a posted doc -- only Comments + DocumentLines[].FreeText
+    stay editable, see sap_client.patch_invoice_note). item_notes is keyed
+    by SKU, not SAP LineNum -- matched against the invoice's actual
+    DocumentLines server-side, since a caller can't know real LineNum
+    ordering without an extra round trip. Invoke manually (aws lambda
+    invoke), same network-path reasoning as numatcardBackfill. One bad
+    item in a batch is caught and reported, doesn't abort the rest.
     Delete once the known affected invoices are done; not a recurring job."""
     from unicommerce import sap_client
 
@@ -135,21 +139,29 @@ def bogo_note_backfill_handler(event, context):
 
     def _go():
         results = []
+        errors = []
         for it in items:
             doc_entry = int(it["doc_entry"])
-            line_notes = {int(k): v for k, v in (it.get("line_notes") or {}).items()}
-            if not apply:
-                current = sap_client.get_invoice_by_doc_entry(doc_entry)
-                results.append({
-                    "doc_entry": doc_entry,
-                    "dry_run": True,
-                    "current_comments": current.get("Comments"),
-                    "would_set_header_note": it["header_note"],
-                    "would_set_line_notes": line_notes,
-                })
-                continue
-            results.append(sap_client.patch_invoice_note(doc_entry, it["header_note"], line_notes))
-        return {"apply": apply, "count": len(results), "results": results}
+            item_notes = dict(it.get("item_notes") or {})
+            try:
+                if not apply:
+                    current = sap_client.get_invoice_by_doc_entry(doc_entry)
+                    results.append({
+                        "doc_entry": doc_entry,
+                        "dry_run": True,
+                        "current_comments": current.get("Comments"),
+                        "would_set_header_note": it["header_note"],
+                        "would_set_item_notes": item_notes,
+                        "actual_lines": [
+                            {"LineNum": ln.get("LineNum"), "ItemCode": ln.get("ItemCode")}
+                            for ln in (current.get("DocumentLines") or [])
+                        ],
+                    })
+                    continue
+                results.append(sap_client.patch_invoice_note(doc_entry, it["header_note"], item_notes))
+            except Exception as exc:
+                errors.append({"doc_entry": doc_entry, "error": _scrub(str(exc))})
+        return {"apply": apply, "count": len(results), "results": results, "errors": errors}
 
     return _run("bogo_note_backfill", _go)
 
