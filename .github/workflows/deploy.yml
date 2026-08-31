@@ -128,7 +128,8 @@ jobs:
           # other service/stage still reads. Only used when stage=prod.
           SAFEXPRESS_PROD_DATABASE_URL: ${{ secrets.SAFEXPRESS_PROD_DATABASE_URL }}
           # B2B_so only — falls back to serverless.yml defaults if unset.
-          B2B_DOCS_BUCKET: ${{ secrets.B2B_DOCS_BUCKET }}
+          # Docs bucket name comes from CloudFormation (Ref B2BDocsBucket); do not set
+          # B2B_DOCS_BUCKET here — a pre-existing global name causes ResourceExistenceCheck.
           B2B_ALERT_ADMIN_EMAIL: ${{ secrets.B2B_ALERT_ADMIN_EMAIL }}
           B2B_ALERT_FROM_EMAIL: ${{ secrets.B2B_ALERT_FROM_EMAIL }}
           B2B_SES_REGION: ${{ secrets.B2B_SES_REGION }}

@@ -67,12 +67,13 @@ Also: `DATABASE_URL`, SES from/to emails, seed SKU + ship-to maps.
 
 Workflow: **Actions → Deploy**. Service folder must be **`B2B_so`** (exact case).
 
-Default S3 docs bucket: `b2b-so-{stage}-docs` (override with env / secret `B2B_DOCS_BUCKET`).
+Default PO docs bucket: created by CloudFormation (name in stack **Outputs → B2BDocsBucketName**). Do not set a fixed `B2B_DOCS_BUCKET` at deploy time — that caused `ResourceExistenceCheck` when the name already existed globally.
 
 ### `ResourceExistenceCheck` failed
 
-CloudFormation blocks create when a **fixed bucket name already exists** in the account (common after a rolled-back first deploy). B2B_so creates S3 buckets; most other services do not.
+Usually a **stuck partial stack** (only `ServerlessDeploymentBucket` in Resources) or an old deploy that tried a fixed bucket name.
 
-1. AWS Console → **CloudFormation** → delete stack `b2b-so-dev` if status is `ROLLBACK_COMPLETE`.
-2. S3 → delete **empty** orphaned buckets only: `khanal-b2b-so-dev`, `b2b-so-dev-docs`, `b2b-so-dev-dashboard-site`.
-3. Re-run Deploy, or set GitHub secret `B2B_DOCS_BUCKET` to a unique name.
+1. AWS Console → **CloudFormation** → delete stack `b2b-so-{stage}`.
+2. Re-run **Actions → Deploy** with service **`B2B_so`**.
+3. Confirm **Resources** shows Lambdas, Cognito, HTTP API — not just the deployment bucket.
+4. Note bucket names from stack **Outputs** (`B2BDocsBucketName`, `B2BDashboardSiteBucketName`).

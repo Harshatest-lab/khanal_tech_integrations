@@ -60,7 +60,7 @@ provider:
             - s3:GetObject
             - s3:PutObject
           Resource:
-            - arn:aws:s3:::${self:custom.docsBucket}/*
+            - Fn::Sub: "${B2BDocsBucket.Arn}/*"
         - Effect: Allow
           Action:
             - lambda:InvokeFunction
@@ -82,7 +82,8 @@ provider:
     LOG_LEVEL: ${env:LOG_LEVEL, 'INFO'}
     DATABASE_URL: ${env:DATABASE_URL, ''}
     B2B_IMAP_PARAM_NAME: ${env:B2B_IMAP_PARAM_NAME, '/b2b/imap'}
-    B2B_DOCS_BUCKET: ${self:custom.docsBucket}
+    B2B_DOCS_BUCKET:
+      Ref: B2BDocsBucket
     B2B_S3_PREFIX: blinkit
     B2B_MOVE_PROCESSED_MAIL: ${env:B2B_MOVE_PROCESSED_MAIL, 'true'}
     B2B_ALERT_ADMIN_EMAIL: ${env:B2B_ALERT_ADMIN_EMAIL, ''}
@@ -96,9 +97,6 @@ provider:
       Ref: B2BDashboardUserPool
 
 custom:
-  # Use service-scoped names (b2b-so-dev-docs). Avoids ResourceExistenceCheck when
-  # khanal-b2b-so-dev or similar was created manually or by a rolled-back stack.
-  docsBucket: ${env:B2B_DOCS_BUCKET, '${self:service}-${self:provider.stage}-docs'}
   pythonRequirements:
     dockerizePip: false
     slim: true
@@ -186,7 +184,6 @@ resources:
     B2BDocsBucket:
       Type: AWS::S3::Bucket
       Properties:
-        BucketName: ${self:custom.docsBucket}
         PublicAccessBlockConfiguration:
           BlockPublicAcls: false
           BlockPublicPolicy: false
@@ -207,7 +204,7 @@ resources:
               Effect: Allow
               Principal: "*"
               Action: s3:GetObject
-              Resource: arn:aws:s3:::${self:custom.docsBucket}/*
+              Resource: !Sub "${B2BDocsBucket.Arn}/*"
 
     B2BDashboardUserPool:
       Type: AWS::Cognito::UserPool
@@ -269,7 +266,6 @@ resources:
     B2BDashboardSiteBucket:
       Type: AWS::S3::Bucket
       Properties:
-        BucketName: ${self:service}-${self:provider.stage}-dashboard-site
         PublicAccessBlockConfiguration:
           BlockPublicAcls: true
           BlockPublicPolicy: true
