@@ -153,7 +153,7 @@ def bogo_note_backfill_handler(event, context):
                         "would_set_header_note": it["header_note"],
                         "would_set_item_notes": item_notes,
                         "actual_lines": [
-                            {"LineNum": ln.get("LineNum"), "ItemCode": ln.get("ItemCode")}
+                            {"LineNum": ln.get("LineNum"), "ItemCode": ln.get("ItemCode"), "UnitPrice": ln.get("UnitPrice")}
                             for ln in (current.get("DocumentLines") or [])
                         ],
                     })
