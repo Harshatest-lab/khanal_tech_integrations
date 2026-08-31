@@ -65,7 +65,7 @@ provider:
           Action:
             - lambda:InvokeFunction
           Resource:
-            - arn:aws:lambda:${self:provider.region}:*:function:${self:service}-${self:provider.stage}-b2bBlinkitFetch
+            - arn:aws:lambda:${self:provider.region}:*:function:${self:service}-${self:provider.stage}-b2bPoFetch
         - Effect: Allow
           Action:
             - cognito-idp:AdminCreateUser
@@ -127,7 +127,7 @@ package:
     - "!**/*.pyc"
 
 functions:
-  b2bBlinkitFetch:
+  b2bPoFetch:
     handler: src.handlers.fetch_handler
     memorySize: 512
     timeout: 300
@@ -142,7 +142,7 @@ functions:
     memorySize: 512
     timeout: 29
     environment:
-      B2B_FETCH_FUNCTION_NAME: ${self:service}-${self:provider.stage}-b2bBlinkitFetch
+      B2B_FETCH_FUNCTION_NAME: ${self:service}-${self:provider.stage}-b2bPoFetch
     layers: [{ Ref: SharedLambdaLayer }]
     events:
       - httpApi: { path: /v1/b2b/me, method: get, authorizer: { name: dashboardCognitoJwt } }
