@@ -97,6 +97,23 @@ def post_invoice(payload: dict) -> dict:
     return {"doc_entry": int(body["DocEntry"]), "doc_num": int(body.get("DocNum") or 0), "response": body}
 
 
+def cancel_invoice(doc_entry: int) -> None:
+    """SAP Service Layer's standard document-cancel endpoint -- voids the
+    DocNum/DocEntry (CancelStatus -> csYes / CANCELED -> 'Y' in HANA)
+    without deleting it, so it stays in the audit trail as a cancelled
+    document rather than vanishing. Raises SapPostError on any non-204
+    response; callers must not treat a failed cancel as having succeeded
+    (a repost against a still-live invoice would double-book it --
+    find_invoice_by_uc_order_id's dedup guard only ignores invoices SAP
+    itself reports as cancelled)."""
+    try:
+        status, body = _request("POST", f"Invoices({int(doc_entry)})/Cancel")
+    except RuntimeError as e:
+        raise SapPostError(f"SAP AR Invoice cancel failed for DocEntry={doc_entry}: {_sap_error_text(str(e))}") from e
+    if status not in (204, 200):
+        raise SapPostError(f"SAP AR Invoice cancel failed for DocEntry={doc_entry}: HTTP {status}: {str(body)[:500]}")
+
+
 def find_invoice_by_uc_order_id(uc_order_id: str) -> dict | None:
     """Duplicate guard: live (non-cancelled) AR Invoice already posted for
     this UC order. Primary check is hana_access.find_invoice_by_order_id

@@ -404,6 +404,34 @@ def admin_debug_get_invoice_handler(event, context):
     return _run("admin_debug_get_invoice", _go)
 
 
+def dogsee_bogo_correction_handler(event, context):
+    """TEMPORARY, one-off. {"corrections": [{"uniware_id": str, "doc_entry":
+    int}, ...], "apply": bool? (default false -- dry-run only)}. Cancels
+    and resets each already-posted invoice that still shows the
+    pre-2026-09-01 zero_discount_floor_channels bug (a BOGO free line
+    posted at gross with no discount, see
+    unicommerce.dogsee_bogo_correction's module docstring), so it reposts
+    fresh through the current (fixed) pipeline on the next scheduled
+    post_invoices run. Re-verifies each invoice's live SAP state
+    immediately before touching anything -- an already-corrected or
+    never-broken row is skipped, not re-cancelled. Dry-run by default,
+    same pattern as numatcard_backfill_handler. Remove once the historical
+    Dogsee correction pass is done."""
+    from unicommerce import dogsee_bogo_correction
+
+    ev = event or {}
+    corrections = ev.get("corrections") or []
+    apply = bool(ev.get("apply") or False)
+    if not corrections:
+        return {"error": "corrections is required"}
+
+    def _go():
+        with store.connect() as conn:
+            return dogsee_bogo_correction.run(conn, corrections, apply=apply)
+
+    return _run("dogsee_bogo_correction", _go)
+
+
 def post_credit_notes_handler(event, context):
     """{"limit": 50?, "start_date": "YYYY-MM-DD"?, "end_date": "YYYY-MM-DD"?,
     "channel_name": str?} — bulk posting run, date range keys off the

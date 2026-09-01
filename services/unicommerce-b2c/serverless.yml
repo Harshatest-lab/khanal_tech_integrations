@@ -428,6 +428,16 @@ functions:
     handler: src.handlers.admin_debug_get_invoice_handler
     layers: [{ Ref: SharedLambdaLayer }]
 
+  # TEMPORARY -- invoke-only, one-off. Built 2026-09-01 to cancel + reset
+  # the historical Dogsee BOGO invoices that posted under the pre-fix
+  # zero_discount_floor_channels behavior (gross UnitPrice, no discount
+  # applied), so they repost fresh through the current pipeline. Real SAP
+  # writes (Invoices/Cancel) -- dry-run by default. Remove once the
+  # historical correction pass is done.
+  unicommerceDogseeBogoCorrection:
+    handler: src.handlers.dogsee_bogo_correction_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+
   unicommercePostCreditNotes:
     handler: src.handlers.post_credit_notes_handler
     layers: [{ Ref: SharedLambdaLayer }]

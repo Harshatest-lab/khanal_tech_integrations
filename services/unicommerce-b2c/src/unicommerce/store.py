@@ -628,6 +628,38 @@ def reset_dead_orders_for_retry(conn: psycopg.Connection, uniware_ids: list[str]
     return affected
 
 
+def reset_posted_order_for_repost(conn: psycopg.Connection, uniware_id: str, expected_doc_entry: str | int) -> bool:
+    """One-off correction path: after the caller has confirmed and
+    cancelled the given order's live SAP invoice (sap_client.cancel_invoice),
+    clears every posted-state field and moves it back to 'ready' so the
+    normal posting pipeline picks it up fresh and reposts through current
+    logic (e.g. the 2026-09-01 Dogsee BOGO-discount fix). Scoped to an
+    exact (uniware_id, current sap_ar_invoice_docentry) match, same
+    belt-and-suspenders pattern as reset_dead_orders_for_retry's status
+    scoping -- refuses to touch the row if its stored DocEntry has since
+    changed from what the caller expected (state moved under us, or wrong
+    id passed by mistake). Returns False, no-op, if it doesn't match.
+    Caller is responsible for the SAP-side cancel actually having
+    succeeded before calling this -- this only touches our own table."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE unicommerce_orders
+            SET pipeline_status = 'ready', sap_ar_invoice_docentry = NULL, sap_ar_invoice_docnum = NULL,
+                ar_invoice_tax_actual = NULL, ar_invoice_tax_expected = NULL, ar_invoice_tax_diff = NULL,
+                ar_invoice_unit_price_expected = NULL, ar_invoice_unit_price_actual = NULL, ar_invoice_unit_price_diff = NULL,
+                ar_invoice_reconciled = 0, ar_invoice_reconciliation_status = '', ar_invoice_mismatch_reason = '',
+                payload_json = NULL, posting_started_at = NULL, batch_hold_since = NULL,
+                attempt_count = 0, last_error = '', updated_at = now()
+            WHERE uniware_id = %s AND pipeline_status = 'posted' AND sap_ar_invoice_docentry = %s
+            """,
+            (uniware_id, str(expected_doc_entry)),
+        )
+        affected = cur.rowcount == 1
+    conn.commit()
+    return affected
+
+
 def get_verify_orders(conn: psycopg.Connection, limit: int) -> list[dict]:
     with conn.cursor() as cur:
         cur.execute(
