@@ -216,20 +216,27 @@ def debug_batch_inventory_handler(event, context):
 
 
 def debug_invoice_totals_handler(event, context):
-    """{"doc_entries": [int|str, ...]} -- read-only HANA bulk lookup of
-    real SAP AR Invoice totals (unicommerce.hana_access.
-    bulk_invoice_totals_by_doc_entries). Not scheduled, ops tooling only
-    -- invoke manually to cross-check what SAP actually has on a batch of
-    invoices (DocTotal/VatSum) against our own recorded uc_total, e.g.
-    for a channel-level reconciliation report."""
+    """{"doc_entries": [int|str, ...], "doc_type": "invoice"|"credit_note"?
+    (default "invoice")} -- read-only HANA bulk lookup of real SAP
+    document totals (unicommerce.hana_access.
+    bulk_invoice_totals_by_doc_entries for AR Invoices/OINV,
+    bulk_credit_note_totals_by_doc_entries for Credit Notes/ORIN). Not
+    scheduled, ops tooling only -- invoke manually to cross-check what SAP
+    actually has on a batch of documents (DocTotal/VatSum) against our own
+    recorded figures, e.g. for a channel-level reconciliation report."""
     from unicommerce import hana_access
 
     ev = event or {}
     doc_entries = ev.get("doc_entries") or []
+    doc_type = (ev.get("doc_type") or "invoice").strip().lower()
     if not doc_entries:
         return {"status": "error", "error": "doc_entries is required"}
+    if doc_type not in ("invoice", "credit_note"):
+        return {"status": "error", "error": "doc_type must be 'invoice' or 'credit_note'"}
 
     def _go():
+        if doc_type == "credit_note":
+            return {"rows": hana_access.bulk_credit_note_totals_by_doc_entries(doc_entries)}
         return {"rows": hana_access.bulk_invoice_totals_by_doc_entries(doc_entries)}
 
     return _run("debug_invoice_totals", _go)
