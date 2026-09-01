@@ -623,6 +623,14 @@ def dashboard_handler(event, context):
                     ),
                 )
 
+            if path.endswith("/v1/unicommerce/flex-cn"):
+                return _json_response(
+                    200,
+                    dashboard_queries.fetch_flex_cn_log(
+                        conn, limit=dashboard_queries._clamp_limit(q.get("limit")), status=q.get("status") or None
+                    ),
+                )
+
             if path.endswith("/v1/unicommerce/sync-log"):
                 items = dashboard_queries.fetch_sync_log(
                     conn, limit=dashboard_queries._clamp_limit(q.get("limit"), default=20), mode=q.get("mode") or None

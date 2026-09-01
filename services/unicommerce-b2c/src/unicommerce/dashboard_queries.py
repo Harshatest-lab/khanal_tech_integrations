@@ -177,8 +177,38 @@ def fetch_returns(conn: psycopg.Connection, *, limit: int, status: str | None = 
         cur.execute(
             f"""
             SELECT uc_return_id, uc_order_id, parent_sap_doc_entry, return_type, return_date,
-                   status, sap_cn_docentry, sap_cn_docnum, attempt_count, last_error, updated_at
+                   status, sap_cn_docentry, sap_cn_docnum, attempt_count, last_error, updated_at, items_json
             FROM unicommerce_cn_staging
+            {where_sql}
+            ORDER BY updated_at DESC
+            LIMIT %s
+            """,
+            [*params, limit],
+        )
+        items = _rows_to_dicts(cur)
+    return {"total": total, "items": items, "limit": limit}
+
+
+def fetch_flex_cn_log(conn: psycopg.Connection, *, limit: int, status: str | None = None) -> dict[str, Any]:
+    """AMAZON_FLEX's own Credit Note log -- a separate table
+    (unicommerce_flex_cn_log) from unicommerce_cn_staging every other
+    channel's returns use, since Flex refunds come from Amazon's own
+    Finances API (flex_refunds.py), not a UC return record. Same shape as
+    fetch_returns so callers/reports can treat both sources uniformly."""
+    where = []
+    params: list[Any] = []
+    if status:
+        where.append("status = %s")
+        params.append(status)
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT COUNT(*) FROM unicommerce_flex_cn_log {where_sql}", params)
+        total = int(cur.fetchone()[0])
+        cur.execute(
+            f"""
+            SELECT refund_id, amazon_order_id, posted_date, status, doc_entry, doc_num,
+                   base_doc_entry, attempt_count, error, skip_reason, updated_at
+            FROM unicommerce_flex_cn_log
             {where_sql}
             ORDER BY updated_at DESC
             LIMIT %s
