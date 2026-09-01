@@ -336,6 +336,13 @@ functions:
     # ({"warehouse_code", "item_codes"}) to check real HANA batch
     # inventory when a batch_hold shortage looks wrong.
 
+  debugInvoiceTotals:
+    handler: src.handlers.debug_invoice_totals_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+    # No schedule -- read-only ops tool, invoke manually ({"doc_entries":
+    # [int, ...]}) to pull real SAP AR Invoice totals (DocTotal/VatSum)
+    # for a channel-level UC-vs-SAP reconciliation report.
+
   flexFetch:
     handler: src.handlers.flex_fetch_handler
     layers: [{ Ref: SharedLambdaLayer }]

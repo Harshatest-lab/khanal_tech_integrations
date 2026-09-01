@@ -192,6 +192,26 @@ def debug_batch_inventory_handler(event, context):
     return _run("debug_batch_inventory", _go)
 
 
+def debug_invoice_totals_handler(event, context):
+    """{"doc_entries": [int|str, ...]} -- read-only HANA bulk lookup of
+    real SAP AR Invoice totals (unicommerce.hana_access.
+    bulk_invoice_totals_by_doc_entries). Not scheduled, ops tooling only
+    -- invoke manually to cross-check what SAP actually has on a batch of
+    invoices (DocTotal/VatSum) against our own recorded uc_total, e.g.
+    for a channel-level reconciliation report."""
+    from unicommerce import hana_access
+
+    ev = event or {}
+    doc_entries = ev.get("doc_entries") or []
+    if not doc_entries:
+        return {"status": "error", "error": "doc_entries is required"}
+
+    def _go():
+        return {"rows": hana_access.bulk_invoice_totals_by_doc_entries(doc_entries)}
+
+    return _run("debug_invoice_totals", _go)
+
+
 def flex_fetch_handler(event, context):
     """{"lookback_days": int? (default 2)} -- pulls the Amazon SP-API
     fulfilled-shipments report, filters to PRCJ, stages synthetic orders

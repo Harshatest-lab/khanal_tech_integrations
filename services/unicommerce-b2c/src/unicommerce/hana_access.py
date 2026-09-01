@@ -142,6 +142,50 @@ def bulk_batch_inventory_by_warehouse(whs_code: str, item_codes: list[str] | set
     return rows_out
 
 
+def bulk_invoice_totals_by_doc_entries(doc_entries: list[str | int]) -> list[dict]:
+    """Real SAP AR Invoice totals for a batch of DocEntries, straight from
+    OINV -- for cross-checking our own recorded/recomputed figures against
+    what SAP actually has on the document, not what we last sent it.
+
+    Row shape: {"doc_entry", "doc_num", "doc_total", "vat_sum", "canceled"}.
+    Returns [] if HANA is unreachable or doc_entries is empty, same
+    fail-safe policy as bulk_batch_inventory_by_warehouse.
+    """
+    cleaned = sorted({int(d) for d in (doc_entries or []) if str(d or "").strip().isdigit()})
+    if not cleaned:
+        return []
+
+    rows_out: list[dict] = []
+    try:
+        with hana_connection() as conn:
+            cur = conn.cursor()
+            for start in range(0, len(cleaned), _CHUNK_SIZE):
+                chunk = cleaned[start : start + _CHUNK_SIZE]
+                placeholders = ",".join(["?"] * len(chunk))
+                query = f'''
+                    SELECT "DocEntry", "DocNum", "DocTotal", "VatSum", "CANCELED"
+                    FROM "OINV"
+                    WHERE "DocEntry" IN ({placeholders})
+                '''
+                cur.execute(query, chunk)
+                for row in cur.fetchall():
+                    doc_entry, doc_num, doc_total, vat_sum, canceled = row[0], row[1], row[2], row[3], row[4]
+                    rows_out.append(
+                        {
+                            "doc_entry": int(doc_entry),
+                            "doc_num": int(doc_num or 0),
+                            "doc_total": float(doc_total or 0),
+                            "vat_sum": float(vat_sum or 0),
+                            "canceled": str(canceled or "N"),
+                        }
+                    )
+            cur.close()
+    except Exception as exc:
+        logger.warning("bulk_invoice_totals_by_doc_entries HANA query failed: %s", exc)
+        return []
+    return rows_out
+
+
 def bulk_manage_batch_numbers(item_codes: list[str] | set[str]) -> dict[str, bool | None]:
     """{item_code: ManageBatchNumbers?}.
 
