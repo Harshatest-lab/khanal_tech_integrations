@@ -170,6 +170,29 @@ def numatcard_backfill_handler(event, context):
     return _run("numatcard_backfill", _go)
 
 
+def uc_financials_backfill_handler(event, context):
+    """{"limit": int? (default 200), "offset": int? (default 0), "apply":
+    bool? (default false -- dry-run only), "channel_name": str?}. One-off:
+    recompute uc_taxable_value/uc_cgst/uc_sgst/uc_igst/uc_total on
+    already-staged orders using the current mappers.compute_uc_financials
+    (see uc_financials_backfill.py's module docstring -- corrects historical
+    rows a fix to that function can't reach on its own, since posted orders
+    are never re-touched by the normal fetch flow). Batched, same
+    dry-run-by-default pattern as numatcard_backfill_handler."""
+    from unicommerce import uc_financials_backfill
+
+    ev = event or {}
+    limit = int(ev.get("limit") or 200)
+    offset = int(ev.get("offset") or 0)
+    apply = bool(ev.get("apply") or False)
+    channel_name = ev.get("channel_name")
+
+    def _go():
+        return uc_financials_backfill.run_backfill(limit=limit, offset=offset, apply=apply, channel_name=channel_name)
+
+    return _run("uc_financials_backfill", _go)
+
+
 def debug_batch_inventory_handler(event, context):
     """{"warehouse_code": str, "item_codes": [str, ...]} -- read-only HANA
     batch-inventory lookup (unicommerce.hana_access.

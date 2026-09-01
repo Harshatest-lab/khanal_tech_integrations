@@ -329,6 +329,17 @@ functions:
     # numatcard_backfill.py's module docstring. Delete once the ~1243
     # historical invoices are fully backfilled; not a recurring job.
 
+  ucFinancialsBackfill:
+    handler: src.handlers.uc_financials_backfill_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+    # No schedule -- one-off ops tool, invoke manually
+    # ({"limit","offset","apply","channel_name"}) to recompute
+    # uc_total/uc_igst/etc on already-staged orders from their own stored
+    # order_json after a mappers.compute_uc_financials fix -- see
+    # uc_financials_backfill.py's module docstring. Delete once the
+    # AMAZON_FLEX historical backfill (2026-09-01 taxPercentage-fallback
+    # fix) is done; not a recurring job.
+
   debugBatchInventory:
     handler: src.handlers.debug_batch_inventory_handler
     layers: [{ Ref: SharedLambdaLayer }]
