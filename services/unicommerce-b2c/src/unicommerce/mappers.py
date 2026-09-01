@@ -227,6 +227,27 @@ def compute_uc_financials(order: dict) -> dict:
         except Exception:
             sgst_pct = 0.0
 
+        if igst_pct <= 0 and cgst_pct <= 0 and sgst_pct <= 0:
+            # None of UC's native GST-breakdown fields are populated --
+            # fall back to the generic taxPercentage field, the same
+            # fallback sap_payload._append_sales_line's own tax-percent
+            # extraction already uses. Real UC saleOrderItems always
+            # populate the igst/cgst+sgst split; only synthetic
+            # non-UC-native items hit this branch (confirmed live
+            # 2026-09-01: flex_fetch.py's Amazon Flex orders only carry a
+            # flat taxPercentage, so this fell through to 0/0/0 and
+            # silently dropped the entire tax component from uc_total --
+            # SAP posted the correct tax-inclusive amount regardless,
+            # since sap_payload.py already had this fallback; only our
+            # own recorded/recon total was wrong). Applied as IGST since
+            # only the combined total matters here, not the intra/inter-
+            # state split -- SAP's own TaxCode resolution at posting time
+            # is what actually determines the real split.
+            try:
+                igst_pct = float(item.get("taxPercentage") or 0)
+            except Exception:
+                igst_pct = 0.0
+
         if igst_pct > 0:
             igst += line_taxable * igst_pct / 100.0
         else:
