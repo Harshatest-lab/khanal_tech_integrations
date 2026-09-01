@@ -381,6 +381,29 @@ def admin_debug_get_cn_handler(event, context):
     return _run("admin_debug_get_cn", _go)
 
 
+def admin_debug_get_invoice_handler(event, context):
+    """TEMPORARY, invoke-only, read-only. {"doc_entry": int} -- GETs a
+    live SAP AR Invoice by DocEntry, raw (including DocumentLines). Built
+    2026-09-01 to confirm, against SAP's own live document rather than our
+    locally-stored payload_json snapshot, whether a given invoice's
+    DiscountPercent (the zero_discount_floor_channels BOGO fix) actually
+    made it into the real posted document -- our own payload_json column
+    can in principle be overwritten by a later recompute without a new
+    SAP POST, so it's not proof on its own. Remove once the Dogsee
+    BOGO-discount fix is fully verified against real SAP data."""
+    from unicommerce import sap_client
+
+    ev = event or {}
+    doc_entry = ev.get("doc_entry")
+    if not doc_entry:
+        return {"error": "doc_entry is required"}
+
+    def _go():
+        return sap_client.get_invoice_by_doc_entry(int(doc_entry))
+
+    return _run("admin_debug_get_invoice", _go)
+
+
 def post_credit_notes_handler(event, context):
     """{"limit": 50?, "start_date": "YYYY-MM-DD"?, "end_date": "YYYY-MM-DD"?,
     "channel_name": str?} — bulk posting run, date range keys off the
