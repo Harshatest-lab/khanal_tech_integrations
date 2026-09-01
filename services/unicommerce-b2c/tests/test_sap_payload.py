@@ -82,6 +82,44 @@ def test_ar_invoice_payload_fills_batch_numbers_for_fefo_line_without_explicit_b
     assert line["BatchNumbers"] == [{"BatchNumber": "B1", "Quantity": 5.0, "ItemCode": "SKU-A"}]
 
 
+def test_ar_invoice_payload_pools_fefo_across_sibling_lines_same_sku():
+    """UC often represents quantity>1 as N separate line-items instead of
+    one line with quantity=N -- confirmed real incident 2026-09-01. Without
+    pooling, each of the 3 lines independently draws from the same
+    earliest batch (qty=2), so line 3 would come back with an empty
+    BatchNumbers (unfulfillable) even though a second batch (qty=48)
+    covers it. Each line must draw from whichever batch is left over from
+    its sibling lines, same order as _check_batches resolves it."""
+    settings = UnicommerceSettings(
+        channel_customer_map={"default": "C-DEFAULT"}, ar_invoice_series=10, tax_code_map={"0_intra": "GST0"}
+    )
+    uc_data = {
+        "code": "SO-MULTI-LINE",
+        "items": [
+            {"itemSku": "FGHN0051", "quantity": 1, "unitPrice": 100, "taxPercent": 0, "warehouseCode": "EC-FG"},
+            {"itemSku": "FGHN0051", "quantity": 1, "unitPrice": 100, "taxPercent": 0, "warehouseCode": "EC-FG"},
+            {"itemSku": "FGHN0051", "quantity": 1, "unitPrice": 100, "taxPercent": 0, "warehouseCode": "EC-FG"},
+        ],
+    }
+    payload, _tax = ar_invoice_payload(
+        uniware_id="SO-MULTI-LINE", channel="FLIPKART", order_json="{}", uc_data=uc_data, order_date="2026-09-01",
+        settings=settings,
+        batch_managed_cache={"FGHN0051": True},
+        fefo_rows_cache={
+            ("FGHN0051", "EC-FG"): [
+                {"batch_number": "EARLIEST-2", "quantity": 2},
+                {"batch_number": "LATER-48", "quantity": 48},
+            ]
+        },
+    )
+    lines = payload["DocumentLines"]
+    assert [l["BatchNumbers"] for l in lines] == [
+        [{"BatchNumber": "EARLIEST-2", "Quantity": 1.0, "ItemCode": "FGHN0051"}],
+        [{"BatchNumber": "EARLIEST-2", "Quantity": 1.0, "ItemCode": "FGHN0051"}],
+        [{"BatchNumber": "LATER-48", "Quantity": 1.0, "ItemCode": "FGHN0051"}],
+    ]
+
+
 def test_ar_invoice_payload_batch_numbers_empty_without_fefo_cache():
     """Same setup as above but with no fefo_rows_cache passed (the bug's
     exact shape) -- confirms the failure mode this test class guards

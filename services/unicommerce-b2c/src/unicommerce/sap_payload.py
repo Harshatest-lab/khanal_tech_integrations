@@ -400,13 +400,35 @@ def resolve_and_expand_items(uc_data: dict, settings: UnicommerceSettings) -> li
     return expanded
 
 
-def fefo_allocate_from_rows(rows: list[dict], qty_needed: float) -> list[dict]:
+def fefo_allocate_from_rows(
+    rows: list[dict],
+    qty_needed: float,
+    *,
+    consumed: dict | None = None,
+    item_code: str | None = None,
+    warehouse_code: str | None = None,
+) -> list[dict]:
     """Allocate qty_needed across already-fetched FEFO rows (must already
     be sorted earliest-expiry-first). Returns SAP BatchNumbers rows, or []
-    when available quantity is below qty_needed (minus BATCH_QTY_TOLERANCE)."""
+    when available quantity is below qty_needed (minus BATCH_QTY_TOLERANCE).
+
+    consumed (optional, keyed by (item_code, warehouse_code, batch)): a
+    dict shared across every line of the same order. UC often represents
+    quantity>1 as N separate line-items instead of one line with
+    quantity=N (confirmed live: a 3-unit order posted as 3 separate
+    FGHN0051 lines, each quantity=1) -- without this, every sibling line
+    independently re-reads the same immutable rows snapshot, so each one
+    individually finds the earliest batch "big enough" for its own small
+    qty and none of them ever spill into a later batch, even when it has
+    plenty. That aggregates into a false shortage against real, sufficient
+    stock. When item_code/warehouse_code are also passed, this nets out
+    prior lines' consumption before allocating and records this call's
+    own allocation back in for the next sibling line to see."""
     needed = round(float(qty_needed or 0), 3)
     if needed <= 0:
         return []
+
+    track_consumption = consumed is not None and item_code is not None and warehouse_code is not None
 
     by_batch: dict[str, float] = {}
     for row in rows or []:
@@ -417,6 +439,8 @@ def fefo_allocate_from_rows(rows: list[dict], qty_needed: float) -> list[dict]:
             qty = float(row.get("quantity") or 0)
         except Exception:
             qty = 0.0
+        if track_consumption:
+            qty -= consumed.get((item_code, warehouse_code, batch), 0.0)
         if qty <= 0:
             continue
         by_batch[batch] = round(float(by_batch.get(batch, 0) + qty), 3)
@@ -434,6 +458,12 @@ def fefo_allocate_from_rows(rows: list[dict], qty_needed: float) -> list[dict]:
 
     if remaining > BATCH_QTY_TOLERANCE:
         return []
+
+    if track_consumption:
+        for alloc in allocations:
+            key = (item_code, warehouse_code, alloc["BatchNumber"])
+            consumed[key] = round(consumed.get(key, 0.0) + alloc["Quantity"], 3)
+
     return allocations
 
 
@@ -507,6 +537,7 @@ def _append_sales_line(
     batch_managed_cache: dict | None = None,
     fefo_rows_cache: dict | None = None,
     order_has_paid_line: bool = False,
+    fefo_consumed: dict | None = None,
 ) -> float:
     item_code = normalize_text(item.get("itemSku"))
     qty = float(item.get("quantity", 0) or 0)
@@ -567,7 +598,9 @@ def _append_sales_line(
         batch_numbers = []
     else:
         rows = (fefo_rows_cache or {}).get((item_code, sap_wh_code), [])
-        batch_numbers = fefo_allocate_from_rows(rows, qty)
+        batch_numbers = fefo_allocate_from_rows(
+            rows, qty, consumed=fefo_consumed, item_code=item_code, warehouse_code=sap_wh_code
+        )
     batch_numbers = _with_batch_item_code(batch_numbers, item_code)
 
     tax_code = get_tax_code(tax_percent, ship_state, origin_state_code, settings)
@@ -672,6 +705,7 @@ def ar_invoice_payload(
         "U_Order_JSON": raw_order_json,
     }
     doc_lines: list[dict] = []
+    fefo_consumed: dict = {}
     total_tax_expected = 0.0
     processed_bundle_codes: set[str] = set()
     freight_buckets: dict[tuple, dict] = {}
@@ -726,6 +760,7 @@ def ar_invoice_payload(
                     batch_managed_cache=batch_managed_cache,
                     fefo_rows_cache=fefo_rows_cache,
                     order_has_paid_line=order_has_paid_line,
+                    fefo_consumed=fefo_consumed,
                 )
             continue
 
@@ -743,6 +778,7 @@ def ar_invoice_payload(
             batch_managed_cache=batch_managed_cache,
             fefo_rows_cache=fefo_rows_cache,
             order_has_paid_line=order_has_paid_line,
+            fefo_consumed=fefo_consumed,
         )
 
     for bucket in sorted(

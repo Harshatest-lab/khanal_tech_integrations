@@ -141,6 +141,11 @@ def _check_batches(
     items = sap_payload.resolve_and_expand_items(uc_data, settings)
     aggregated: dict[tuple, dict] = {}
     shortages: list[dict] = []
+    # Shared across every line of this order -- see fefo_allocate_from_rows'
+    # own docstring for why (UC often splits qty>1 into N separate
+    # line-items, each of which would otherwise re-check the same
+    # un-decremented earliest batch and falsely report a shortage).
+    consumed: dict = {}
 
     for item in items:
         item_code = item.get("itemSku")
@@ -158,7 +163,9 @@ def _check_batches(
             continue
 
         fefo_rows = fefo_cache.get((item_code, sap_wh), [])
-        allocations = sap_payload.fefo_allocate_from_rows(fefo_rows, qty_needed)
+        allocations = sap_payload.fefo_allocate_from_rows(
+            fefo_rows, qty_needed, consumed=consumed, item_code=item_code, warehouse_code=sap_wh
+        )
         if allocations:
             for alloc in allocations:
                 key = (item_code, alloc["BatchNumber"], sap_wh)
@@ -168,7 +175,13 @@ def _check_batches(
                 aggregated[key]["qty_needed"] += float(alloc["Quantity"])
             continue
 
-        sap_avail = round(sum(float(r.get("quantity") or 0) for r in fefo_rows), 3)
+        sap_avail = round(
+            sum(
+                max(0.0, float(r.get("quantity") or 0) - consumed.get((item_code, sap_wh, normalize_text(r.get("batch_number"))), 0.0))
+                for r in fefo_rows
+            ),
+            3,
+        )
         shortages.append(
             {
                 "item_code": item_code, "batch_number": "", "warehouse_code": sap_wh,

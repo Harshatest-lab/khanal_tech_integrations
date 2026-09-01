@@ -105,6 +105,65 @@ def test_check_batches_ignores_ucs_batch_number_uses_fefo_instead():
     assert result["missing"] == []
 
 
+def test_check_batches_pools_fefo_across_sibling_lines_same_sku():
+    """UC often represents quantity>1 as N separate line-items instead of
+    one line with quantity=N -- confirmed real incident 2026-09-01: a
+    3-unit FGHN0051 order posted as 3 separate line-items, each
+    quantity=1. Without pooling, each line independently checks the same
+    un-decremented earliest batch (qty=2), finds it "big enough" for its
+    own qty=1, and none of them ever spill into the second batch (qty=48)
+    -- a false shortage (need 3, have 2) against real, sufficient stock
+    (50 total). The three lines together must be recognized as fitting:
+    2 from the earliest batch + 1 from the second."""
+    uc_data = {
+        "items": [
+            {"itemSku": "FGHN0051", "quantity": 1, "warehouseCode": "AMZ-BLR7"},
+            {"itemSku": "FGHN0051", "quantity": 1, "warehouseCode": "AMZ-BLR7"},
+            {"itemSku": "FGHN0051", "quantity": 1, "warehouseCode": "AMZ-BLR7"},
+        ]
+    }
+    result = post_invoices._check_batches(
+        uniware_id="SO-MULTI-LINE",
+        channel_name="AMAZON_FBA_IN_BLR7",
+        uc_data=uc_data,
+        settings=UnicommerceSettings(),
+        batch_managed_cache={"FGHN0051": True},
+        fefo_cache={
+            ("FGHN0051", "AMZ-BLR7"): [
+                {"batch_number": "EARLIEST-2", "quantity": 2},
+                {"batch_number": "LATER-48", "quantity": 48},
+            ]
+        },
+        reservation_ctx=post_invoices.new_reservation_context(),
+    )
+    assert result["ok"] is True
+    assert result["missing"] == []
+
+
+def test_check_batches_still_reports_real_shortage_across_sibling_lines():
+    """Pooling must not paper over a genuine shortage: 3 lines needing 1
+    each (total 3) against only 2 real units, with no second batch to
+    spill into, must still fail."""
+    uc_data = {
+        "items": [
+            {"itemSku": "FGHN0051", "quantity": 1, "warehouseCode": "AMZ-BLR7"},
+            {"itemSku": "FGHN0051", "quantity": 1, "warehouseCode": "AMZ-BLR7"},
+            {"itemSku": "FGHN0051", "quantity": 1, "warehouseCode": "AMZ-BLR7"},
+        ]
+    }
+    result = post_invoices._check_batches(
+        uniware_id="SO-MULTI-LINE-SHORT",
+        channel_name="AMAZON_FBA_IN_BLR7",
+        uc_data=uc_data,
+        settings=UnicommerceSettings(),
+        batch_managed_cache={"FGHN0051": True},
+        fefo_cache={("FGHN0051", "AMZ-BLR7"): [{"batch_number": "ONLY-2", "quantity": 2}]},
+        reservation_ctx=post_invoices.new_reservation_context(),
+    )
+    assert result["ok"] is False
+    assert result["missing"][0]["shortage"] == 1
+
+
 def test_check_batches_applies_sku_remap_for_retired_items():
     """A UC line still reporting a SAP-retired itemSku (e.g. a dead plain
     item replaced by a like-for-like item, non-CFG) must resolve against
