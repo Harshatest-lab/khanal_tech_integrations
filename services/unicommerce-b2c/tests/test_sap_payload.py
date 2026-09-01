@@ -173,12 +173,15 @@ def test_ar_invoice_payload_ignores_ucs_batch_number_uses_fefo_instead():
     assert line["BatchNumbers"] == [{"BatchNumber": "CURRENTLY-AVAILABLE", "Quantity": 5.0, "ItemCode": "SKU-A"}]
 
 
-def test_zero_discount_floor_keeps_gross_price_when_order_has_a_paid_line():
+def test_zero_discount_floor_discounts_gross_price_to_zero_when_order_has_a_paid_line():
     # The BOGO case this whole feature exists for: one paid line, one
     # line whose discount equals its full price. On a channel opted into
     # zero_discount_floor_channels, the free line must keep its gross
-    # UnitPrice instead of clamping to 0.0 -- SAP rejects a 0.0 UnitPrice
-    # outright ("Unit Price cannot be less than Item Cost").
+    # UnitPrice (SAP rejects a 0.0 UnitPrice outright, "Unit Price cannot
+    # be less than Item Cost") but carry a 100% DiscountPercent so the
+    # invoice's real LineTotal/tax nets to 0 -- confirmed live 2026-08-31:
+    # 37 real dogsee invoices posted overstated by the free item's full
+    # gross value before this fix (no discount applied at all).
     settings = UnicommerceSettings(
         channel_customer_map={"default": "C-DEFAULT"}, ar_invoice_series=10, tax_code_map={"0_intra": "GST0"},
         zero_discount_floor_channels={"DOGSEE_SITE_IN": True},
@@ -194,9 +197,39 @@ def test_zero_discount_floor_keeps_gross_price_when_order_has_a_paid_line():
         uniware_id="SO-1", channel="DOGSEE_SITE_IN", order_json="{}", uc_data=uc_data, order_date="2026-08-20",
         settings=settings,
     )
-    prices = {line["ItemCode"]: line["UnitPrice"] for line in payload["DocumentLines"]}
-    assert prices["SKU-PAID"] == 249.0
-    assert prices["SKU-FREE"] == 199.0  # kept gross, not clamped to 0
+    lines = {line["ItemCode"]: line for line in payload["DocumentLines"]}
+    assert lines["SKU-PAID"]["UnitPrice"] == 249.0
+    assert "DiscountPercent" not in lines["SKU-PAID"]
+    assert lines["SKU-FREE"]["UnitPrice"] == 199.0  # gross, satisfies SAP's cost floor
+    assert lines["SKU-FREE"]["DiscountPercent"] == 100.0  # nets the line to 0 on SAP's own math
+    assert lines["SKU-FREE"]["TaxTotal"] == 0.0
+
+
+def test_zero_discount_floor_charges_zero_tax_on_the_discounted_free_line():
+    # Real economics: a free item must not carry real GST just because its
+    # UnitPrice field stays at gross for SAP's cost-floor check -- tax has
+    # to be computed on the true net (post-discount) amount, same as it
+    # already is for a normal (non-floored) BOGO line whose UnitPrice goes
+    # straight to 0.
+    settings = UnicommerceSettings(
+        channel_customer_map={"default": "C-DEFAULT"}, ar_invoice_series=10, tax_code_map={"18_intra": "GST18"},
+        zero_discount_floor_channels={"DOGSEE_SITE_IN": True},
+    )
+    uc_data = {
+        "code": "SO-1",
+        "items": [
+            {"itemSku": "SKU-PAID", "quantity": 1, "unitPrice": 249.0, "discount": 0, "taxPercent": 18, "warehouseCode": "EC-FG"},
+            {"itemSku": "SKU-FREE", "quantity": 1, "unitPrice": 199.0, "discount": 199.0, "taxPercent": 18, "warehouseCode": "EC-FG"},
+        ],
+    }
+    payload, total_tax_expected = ar_invoice_payload(
+        uniware_id="SO-1", channel="DOGSEE_SITE_IN", order_json="{}", uc_data=uc_data, order_date="2026-08-20",
+        settings=settings,
+    )
+    lines = {line["ItemCode"]: line for line in payload["DocumentLines"]}
+    assert lines["SKU-FREE"]["DiscountPercent"] == 100.0
+    assert lines["SKU-FREE"]["TaxTotal"] == 0.0
+    assert total_tax_expected == pytest.approx(lines["SKU-PAID"]["TaxTotal"])
 
 
 def test_zero_discount_floor_off_for_channels_not_opted_in():

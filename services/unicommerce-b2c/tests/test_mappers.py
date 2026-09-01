@@ -138,15 +138,18 @@ def _bogo_order(channel="DOGSEE_SITE_IN"):
 
 
 def test_compute_uc_financials_floors_when_order_has_a_paid_line(monkeypatch):
-    # Mirrors sap_payload._append_sales_line's floor guard so the recon
-    # "expected" figure matches what actually gets posted, instead of
-    # false-flagging a mismatch on the free line of a real BOGO order.
+    # Mirrors sap_payload._append_sales_line's floor guard (2026-09-01: now
+    # posts UnitPrice at gross to satisfy SAP's cost floor, but applies a
+    # DiscountPercent on the same line so the real invoice total nets to 0)
+    # so the recon "expected" figure matches what actually gets posted,
+    # instead of false-flagging a mismatch on the free line of a real BOGO
+    # order.
     import unicommerce.mappers as mappers_mod
 
     monkeypatch.setattr(mappers_mod, "get_settings", lambda: _FakeSettings({"DOGSEE_SITE_IN": True}))
     result = compute_uc_financials(_bogo_order())
-    # 249 (paid, unaffected) + 199 (kept gross instead of floored to 0)
-    assert result["uc_taxable_value"] == pytest.approx(448.0)
+    # 249 (paid, unaffected) + 0 (free line nets to its real economic value)
+    assert result["uc_taxable_value"] == pytest.approx(249.0)
 
 
 def test_compute_uc_financials_stays_clamped_when_every_line_is_free(monkeypatch):

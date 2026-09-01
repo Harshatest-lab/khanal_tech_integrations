@@ -543,17 +543,28 @@ def _append_sales_line(
     qty = float(item.get("quantity", 0) or 0)
     unit_price = float(item.get("unitPrice", 0) or 0)
     discount_total = _to_float(item.get("discount"))
+    discount_percent_for_sap = 0.0
+    taxable_unit_price = unit_price
     if discount_total > 0 and qty > 0:
         net_price = unit_price - (discount_total / qty)
         if net_price > 0:
             unit_price = net_price
+            taxable_unit_price = net_price
         elif order_has_paid_line and bool(resolve_mapped_value(settings.zero_discount_floor_channels, channel, False)):
             # Discount >= full line value (BOGO / 100%-off promo) on a
-            # channel opted into the floor guard -- netting would send SAP
-            # a 0.0 UnitPrice, which trips its "Unit Price cannot be less
-            # than Item Cost" validation. Keep the gross UnitPrice; Finance
-            # books the promo spend separately (same convention as
-            # amazon-us-b2c's PURE GROSS pricing).
+            # channel opted into the floor guard -- SAP's "Unit Price cannot
+            # be less than Item Cost" validation blocks UnitPrice itself
+            # from going to 0, but that validation doesn't apply to
+            # DiscountPercent. Keep UnitPrice at gross (passes the floor)
+            # and apply the discount as its own SAP line field instead --
+            # SAP's own LineTotal math (UnitPrice * Qty * (1 - Discount%))
+            # then nets to the real economic value (0 for a full BOGO), same
+            # as the tax computed below on that net amount. The invoice
+            # itself is now genuinely correct (2026-09-01 fix) instead of
+            # relying on Finance to book a compensating entry separately,
+            # which was this branch's previous convention (gross UnitPrice,
+            # no discount at all -- confirmed live 2026-08-31: 37 real
+            # dogsee invoices posted overstated by their free item's value).
             #
             # order_has_paid_line requires at least one OTHER line in this
             # order to have real value -- that's what tells a genuine promo
@@ -564,14 +575,16 @@ def _append_sales_line(
             # dogsee BOGO orders). Without a paid line elsewhere, this
             # falls through to the old clamp-to-0 behavior below -- better
             # to leave a genuine all-free order stuck failing at SAP
-            # (visible, safe) than silently book it at gross price
-            # (misstated revenue).
+            # (visible, safe) than silently discount it away.
+            discount_percent_for_sap = min(100.0, round(100.0 * discount_total / (unit_price * qty), 4))
+            taxable_unit_price = max(0.0, net_price)
             logger.info(
-                "promo_not_netted item_sku=%s channel=%s discount_total=%s gross_unit_price=%s",
-                item_code, channel, discount_total, unit_price,
+                "promo_discounted_on_sap_line item_sku=%s channel=%s discount_total=%s gross_unit_price=%s discount_percent=%s",
+                item_code, channel, discount_total, unit_price, discount_percent_for_sap,
             )
         else:
             unit_price = max(0.0, net_price)
+            taxable_unit_price = unit_price
     tax_percent = float(item.get("taxPercent", 0) or 0)
     uc_wh_code = normalize_text(item.get("warehouseCode"))
     sap_wh_code = _resolve_sap_warehouse(settings, channel, uc_wh_code)
@@ -604,7 +617,7 @@ def _append_sales_line(
     batch_numbers = _with_batch_item_code(batch_numbers, item_code)
 
     tax_code = get_tax_code(tax_percent, ship_state, origin_state_code, settings)
-    line_tax = compute_tax_from_line(unit_price, qty, tax_percent, tax_inclusive)
+    line_tax = compute_tax_from_line(taxable_unit_price, qty, tax_percent, tax_inclusive)
     line = {
         "LineNum": len(doc_lines),
         "ItemCode": item_code,
@@ -619,6 +632,8 @@ def _append_sales_line(
         "U_Sale_order_itemcode": normalize_text(item.get("saleOrderItemCode")),
         "U_ActualItem": item_code,
     }
+    if discount_percent_for_sap > 0:
+        line["DiscountPercent"] = discount_percent_for_sap
     if line_udfs:
         line.update(line_udfs)
     gl_acct = _resolve_gl_account_code(settings, channel, ship_state, tax_bucket, "product")

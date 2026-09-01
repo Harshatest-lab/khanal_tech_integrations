@@ -200,11 +200,14 @@ def compute_uc_financials(order: dict) -> dict:
         if net_price > 0:
             unit_price = net_price
         elif floor_guard and order_has_paid_line:
-            # Mirrors sap_payload._append_sales_line's floor guard so this
-            # reconciliation "expected" figure matches what actually gets
-            # posted, instead of flagging a false mismatch on BOGO/100%-off
-            # lines.
-            unit_price = selling_wo_tax
+            # Mirrors sap_payload._append_sales_line's floor guard (2026-09-01:
+            # now posts UnitPrice at gross to satisfy SAP's cost-floor
+            # validation, but applies a DiscountPercent on the same line so
+            # the invoice's real economic total nets to 0 -- correct revenue,
+            # no separate Finance offset needed). The taxable/tax basis here
+            # must match that real net total, not the gross UnitPrice, or
+            # recon would flag every one of these as a false mismatch.
+            unit_price = max(0.0, net_price)
         else:
             unit_price = max(0.0, net_price)
         line_taxable = unit_price * qty
