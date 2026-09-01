@@ -175,7 +175,7 @@ def test_compute_uc_financials_unaffected_when_channel_not_opted_in(monkeypatch)
     assert result["uc_taxable_value"] == pytest.approx(249.0)
 
 
-def test_compute_uc_financials_falls_back_to_flat_tax_percentage_when_gst_fields_absent():
+def test_compute_uc_financials_falls_back_to_flat_tax_percentage_when_gst_fields_absent(monkeypatch):
     """Confirmed real incident 2026-09-01: flex_fetch.py's synthetic
     Amazon Flex items only carry a flat taxPercentage, never UC-native
     integratedGstPercentage/centralGstPercentage/stateGstPercentage --
@@ -184,6 +184,9 @@ def test_compute_uc_financials_falls_back_to_flat_tax_percentage_when_gst_fields
     since sap_payload.py already had this same fallback; only our own
     recorded total was wrong, understating every Flex order by its GST
     amount)."""
+    import unicommerce.mappers as mappers_mod
+
+    monkeypatch.setattr(mappers_mod, "get_settings", lambda: _FakeSettings({}))
     order = {
         "channel": "AMAZON_FLEX",
         "saleOrderItems": [
@@ -196,11 +199,14 @@ def test_compute_uc_financials_falls_back_to_flat_tax_percentage_when_gst_fields
     assert result["uc_total"] == pytest.approx(round(143.22 * 1.18, 2))
 
 
-def test_compute_uc_financials_prefers_native_gst_fields_over_flat_taxpercentage():
+def test_compute_uc_financials_prefers_native_gst_fields_over_flat_taxpercentage(monkeypatch):
     """A real UC order carrying both its native GST fields and (for
     whatever reason) a stray taxPercentage must still use the native
     fields -- the fallback is for when they're genuinely absent, not a
     general override."""
+    import unicommerce.mappers as mappers_mod
+
+    monkeypatch.setattr(mappers_mod, "get_settings", lambda: _FakeSettings({}))
     order = {
         "channel": "FLIPKART",
         "saleOrderItems": [
