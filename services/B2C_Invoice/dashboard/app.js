@@ -235,6 +235,7 @@ const sapAlertViewAll = document.getElementById("sap-alert-view-all");
 const sapRetryBtn = document.getElementById("sap-retry-btn");
 const sapExportFailedBtn = document.getElementById("sap-export-failed-btn");
 const ordersExportBtn = document.getElementById("orders-export-btn");
+const returnsExportBtn = document.getElementById("returns-export-btn");
 
 function hasActiveOrderFilters() {
   const hasText = (el) => Boolean(String(el?.value || "").trim());
@@ -568,6 +569,7 @@ function setOrdersChromeVisible(visible) {
   ordersExportBtn?.classList.toggle("hidden", !visible);
   sapExportFailedBtn?.classList.toggle("hidden", !visible);
   sapAlertWrap?.classList.toggle("hidden", !visible);
+  returnsExportBtn?.classList.add("hidden");
 }
 
 async function runSapRetryBatch(btn) {
@@ -905,6 +907,118 @@ async function exportSapFailures(btn) {
     downloadCsv(
       `walmart-sap-failed-${stamp}.csv`,
       SAP_FAILED_EXPORT_HEADERS,
+      rows
+    );
+    button.textContent = `Exported ${total}`;
+    window.setTimeout(() => {
+      if (button.textContent.startsWith("Exported")) {
+        button.textContent = originalLabel;
+      }
+    }, 2000);
+  } catch (err) {
+    showError(`Export failed: ${err.message}`);
+    button.textContent = originalLabel;
+  } finally {
+    button.disabled = false;
+    if (button.textContent === "Exporting…") {
+      button.textContent = originalLabel;
+    }
+  }
+}
+
+const RETURNS_EXPORT_HEADERS = [
+  "Return Order ID",
+  "Customer Order",
+  "PO IDs",
+  "Return Date",
+  "Status",
+  "Delivery Status",
+  "Refund Status",
+  "Refund Amount",
+  "Currency",
+  "Refund Mode",
+  "Reasons",
+  "Credit Note",
+  "AR Invoice Posted",
+  "Updated",
+];
+
+function hasActiveReturnFilters() {
+  const hasText = (el) => Boolean(String(el?.value || "").trim());
+  return (
+    hasText(returnIdFilter) ||
+    hasText(returnPoFilter) ||
+    hasText(returnStatusFilter) ||
+    hasText(returnRefundFilter) ||
+    hasText(returnDeliveryFilter) ||
+    hasText(returnCreditFilter) ||
+    hasText(returnDateFrom) ||
+    hasText(returnDateTo)
+  );
+}
+
+function buildReturnsExportRows(items) {
+  return items.map((row) => [
+    row.return_order_id || "",
+    row.customer_order_id || "",
+    row.purchase_order_ids || "",
+    formatExportDate(row.return_order_date),
+    row.status || "",
+    row.current_delivery_status || "",
+    row.current_refund_status || "",
+    row.total_refund_amount ?? "",
+    row.total_refund_currency || "",
+    row.refund_mode || "",
+    row.return_reasons || "",
+    row.credit_note_status || "",
+    row.ar_invoice_posted ? "Yes" : "No",
+    formatExportDate(row.updated_at),
+  ]);
+}
+
+async function fetchAllFilteredReturns() {
+  const all = [];
+  let offset = 0;
+  let total = null;
+
+  while (total == null || offset < total) {
+    const page = await apiGet(
+      `/v1/walmart/returns?${buildReturnsQueryParams(EXPORT_PAGE_SIZE, offset)}`
+    );
+    const items = page.items || [];
+    total = Number(page.total ?? 0);
+    all.push(...items);
+
+    if (!items.length) break;
+    offset += items.length;
+    if (offset >= total) break;
+  }
+
+  return { items: all, total: total ?? all.length };
+}
+
+async function exportFilteredReturns(btn) {
+  const button = btn || returnsExportBtn;
+  if (!button) return;
+
+  button.disabled = true;
+  const originalLabel = button.textContent;
+  button.textContent = "Exporting…";
+
+  try {
+    hideError();
+    const { items, total } = await fetchAllFilteredReturns();
+    if (!items.length) {
+      window.alert("No returns match the current filters.");
+      return;
+    }
+
+    const rows = buildReturnsExportRows(items);
+    const stamp = new Date().toISOString().slice(0, 10);
+    const filterTag = hasActiveReturnFilters() ? "filtered" : "all";
+    downloadCsv(
+      `walmart-returns-${filterTag}-${stamp}.csv`,
+      RETURNS_EXPORT_HEADERS,
       rows
     );
     button.textContent = `Exported ${total}`;
@@ -2396,6 +2510,12 @@ if (ordersExportBtn) {
   });
 }
 
+if (returnsExportBtn) {
+  returnsExportBtn.addEventListener("click", () => {
+    exportFilteredReturns(returnsExportBtn).catch((e) => showError(e.message));
+  });
+}
+
 document.addEventListener("click", (e) => {
   if (!sapAlertWrap?.contains(e.target)) {
     closeSapAlertPanel();
@@ -2950,6 +3070,7 @@ function showReturnsPanel() {
   syncPanel.classList.add("hidden");
   returnsPanel.classList.remove("hidden");
   setOrdersChromeVisible(false);
+  returnsExportBtn?.classList.remove("hidden");
   if (pageEyebrow) pageEyebrow.textContent = "Returns";
   if (pageTitle) pageTitle.textContent = "Returns";
   loadReturns(true).catch((e) => showError(e.message));
