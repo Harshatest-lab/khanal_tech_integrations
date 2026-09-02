@@ -184,19 +184,50 @@ def _post_credit_note(conn, uc_return_id: str, settings) -> None:
 
     # Verify the POST response actually describes THIS return before
     # trusting/recording its DocEntry -- same defense as post_invoices.py's
-    # _post_order, see its comment for the incident this is guarding
-    # against. credit_note_payload always sets U_UCReturnID to this
-    # return's own id, so an exact match confirms the response is ours.
-    if str(response_body.get("U_UCReturnID") or "") != uc_return_id:
+    # _post_order. Unlike invoices, this can't key off U_UCReturnID: ORIN
+    # (SAP B1's A/R Credit Memo table) has no such UDF on this install at
+    # all (see sap_client.find_credit_note_by_return_id's docstring), so
+    # that field is always absent from the response regardless of whether
+    # the post succeeded -- confirmed live 2026-09-02 this was failing
+    # every real (non-idempotency-guard) credit note post, silently
+    # orphaning genuinely-correct SAP documents (matches the known
+    # DocEntry 12717-12732 symptom from 2026-08-28). Comments is the field
+    # that's actually set (credit_note_payload: "Return for UC Order:
+    # {uc_order_id}") and reliably echoed back, same as the invoice-side
+    # check -- it only carries the parent order id, not the return id, so
+    # this confirms the response describes the right order, mirroring
+    # exactly what the invoice check already relies on.
+    # Second, stronger signal on top of Comments: DocumentLines[*].U_Order
+    # is SAP's own copy-from-base-document-line value (not something our
+    # own credit_note_payload sets -- confirmed it's absent from what we
+    # submit), so a line whose U_Order is populated but doesn't match our
+    # order id is real evidence of a cross-attributed response, not a
+    # parsing fluke. Only lines that actually carry a value are checked --
+    # the field isn't guaranteed present (it depends on SAP's own field-
+    # copy config, not our code), so its absence isn't itself suspicious.
+    def _line_order_mismatch(lines: list) -> str | None:
+        for line in lines or []:
+            line_order = str((line or {}).get("U_Order") or "").strip()
+            if line_order and line_order != str(uc_order_id):
+                return line_order
+        return None
+
+    uc_order_id = cn.get("uc_order_id") if cn else None
+    comments_ok = bool(uc_order_id) and str(uc_order_id) in str(response_body.get("Comments") or "")
+    mismatched_line_order = _line_order_mismatch(response_body.get("DocumentLines")) if comments_ok else None
+
+    if not comments_ok or mismatched_line_order:
         store.mark_cn_failed(
             conn, uc_return_id,
             f"Post response did not describe this return (DocEntry={doc_entry}, "
-            f"U_UCReturnID={response_body.get('U_UCReturnID')!r}) -- not trusting it",
+            f"Comments={response_body.get('Comments')!r}, "
+            f"line U_Order={mismatched_line_order!r} expected {uc_order_id!r}) -- not trusting it",
             settings.max_retry_attempts,
         )
         logger.error(
-            "_post_credit_note(%s): POST response mismatch, DocEntry=%s U_UCReturnID=%r -- treating as failed, not recording",
-            uc_return_id, doc_entry, response_body.get("U_UCReturnID"),
+            "_post_credit_note(%s): POST response mismatch, DocEntry=%s Comments=%r line U_Order=%r -- "
+            "treating as failed, not recording",
+            uc_return_id, doc_entry, response_body.get("Comments"), mismatched_line_order,
         )
         return
 
