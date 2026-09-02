@@ -586,6 +586,15 @@ def dashboard_handler(event, context):
         if path.endswith("/v1/unicommerce/infra"):
             return _json_response(200, infra_status.fetch_infra_status(os.environ.get("STAGE") or "dev"))
 
+        if path.endswith("/v1/unicommerce/recon-summary"):
+            from unicommerce import recon_summary
+
+            start_date = (q.get("start_date") or "").strip()
+            end_date = (q.get("end_date") or "").strip()
+            if not start_date or not end_date:
+                return _json_response(400, {"error": "start_date and end_date are required"})
+            return _json_response(200, recon_summary.fetch_monthly_summary(start_date, end_date))
+
         # ── read-only queries ──
         with store.connect() as conn:
             if path.endswith("/v1/unicommerce/stats"):

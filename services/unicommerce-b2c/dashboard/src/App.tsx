@@ -7,18 +7,20 @@ import { OrdersPage } from "@/pages/OrdersPage";
 import { ReturnsPage } from "@/pages/ReturnsPage";
 import { SyncLogPage } from "@/pages/SyncLogPage";
 import { ReconPage } from "@/pages/ReconPage";
+import { MonthlyReconPage } from "@/pages/MonthlyReconPage";
 import { ensureAuthenticated, clearAuthSession } from "@/lib/auth";
 import { getStats } from "@/lib/api";
 import type { Stats } from "@/lib/types";
 import { Package, CheckCircle2, Clock, Inbox, PauseCircle, XCircle } from "lucide-react";
 
-export type PanelId = "orders" | "returns" | "sync" | "recon";
+export type PanelId = "orders" | "returns" | "sync" | "recon" | "recon-summary";
 
 const PANEL_META: Record<PanelId, { eyebrow: string; title: string }> = {
   orders: { eyebrow: "Orders", title: "Orders" },
   returns: { eyebrow: "Returns / credit notes", title: "Returns & credit notes" },
   sync: { eyebrow: "Sync history", title: "Sync history" },
   recon: { eyebrow: "Recon / mismatches", title: "Recon & mismatches" },
+  "recon-summary": { eyebrow: "Monthly reconciliation", title: "Monthly reconciliation" },
 };
 
 function StatsBar({ stats, loading }: { stats: Stats | null; loading: boolean }) {
@@ -108,6 +110,7 @@ export default function App() {
           {panel === "returns" && <ReturnsPage onStatsRefresh={refreshStats} />}
           {panel === "sync" && <SyncLogPage />}
           {panel === "recon" && <ReconPage />}
+          {panel === "recon-summary" && <MonthlyReconPage />}
         </div>
       </main>
     </div>

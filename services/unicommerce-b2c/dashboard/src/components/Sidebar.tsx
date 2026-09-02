@@ -1,5 +1,5 @@
 import { cn } from "@/lib/utils";
-import { Boxes, ListOrdered, Undo2, RefreshCcw, ScaleIcon, LogOut } from "lucide-react";
+import { Boxes, ListOrdered, Undo2, RefreshCcw, ScaleIcon, BarChart3, LogOut } from "lucide-react";
 import type { PanelId } from "@/App";
 
 const NAV: { id: PanelId; label: string; icon: typeof ListOrdered }[] = [
@@ -7,6 +7,7 @@ const NAV: { id: PanelId; label: string; icon: typeof ListOrdered }[] = [
   { id: "returns", label: "Returns / credit notes", icon: Undo2 },
   { id: "sync", label: "Sync history", icon: RefreshCcw },
   { id: "recon", label: "Recon / mismatches", icon: ScaleIcon },
+  { id: "recon-summary", label: "Monthly reconciliation", icon: BarChart3 },
 ];
 
 export function Sidebar({

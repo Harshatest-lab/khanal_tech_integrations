@@ -58,3 +58,19 @@ export interface Stats {
   by_pipeline_status?: Record<string, number>;
   cn_by_status?: Record<string, number>;
 }
+
+export interface ReconSummaryRow {
+  type: "Invoice" | "CreditNote-Standard" | "CreditNote-Flex";
+  channel: string;
+  status: string;
+  count: number;
+  api_total: number;
+  sap_total: number;
+  diff: number;
+}
+
+export interface ReconSummary {
+  period: { start_date: string; end_date: string };
+  by_channel: ReconSummaryRow[];
+  grand_total: { count: number; api_total: number; sap_total: number; diff: number };
+}

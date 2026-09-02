@@ -1,5 +1,5 @@
 import { authHeaders, handleUnauthorized } from "./auth";
-import type { OrdersPage, OrderDetail, ReturnRow, SyncLogRow, ReconGapRow, Stats } from "./types";
+import type { OrdersPage, OrderDetail, ReturnRow, SyncLogRow, ReconGapRow, ReconSummary, Stats } from "./types";
 
 const API_BASE = "https://coqi1t0nvb.execute-api.ap-south-1.amazonaws.com";
 
@@ -96,6 +96,11 @@ export function getSyncLog(mode?: string) {
 
 export function getReconGaps(minDiff: string) {
   return apiGet<{ items: ReconGapRow[] }>(`/v1/unicommerce/recon-gaps?min_diff=${encodeURIComponent(minDiff)}&limit=100`);
+}
+
+export function getReconSummary(startDate: string, endDate: string) {
+  const params = new URLSearchParams({ start_date: startDate, end_date: endDate });
+  return apiGet<ReconSummary>(`/v1/unicommerce/recon-summary?${params.toString()}`);
 }
 
 export function retryInvoices() {

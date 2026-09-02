@@ -506,6 +506,7 @@ functions:
       - httpApi: { path: /v1/unicommerce/flex-cn, method: get, authorizer: { name: dashboardCognitoJwt } }
       - httpApi: { path: /v1/unicommerce/sync-log, method: get, authorizer: { name: dashboardCognitoJwt } }
       - httpApi: { path: /v1/unicommerce/recon-gaps, method: get, authorizer: { name: dashboardCognitoJwt } }
+      - httpApi: { path: /v1/unicommerce/recon-summary, method: get, authorizer: { name: dashboardCognitoJwt } }
       - httpApi: { path: /v1/unicommerce/retry-invoices, method: post, authorizer: { name: dashboardCognitoJwt } }
       - httpApi: { path: /v1/unicommerce/retry-cn, method: post, authorizer: { name: dashboardCognitoJwt } }
       - httpApi: { path: /v1/unicommerce/infra, method: get, authorizer: { name: dashboardCognitoJwt } }
