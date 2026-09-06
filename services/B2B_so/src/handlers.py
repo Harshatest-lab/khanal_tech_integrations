@@ -168,6 +168,7 @@ def _profile(conn, actor: str, groups: list[str]) -> dict[str, Any]:
         "perm_orders": "",
         "perm_sku_map": "",
         "perm_ship_to": "",
+        "perm_delivery": "",
     }
     return permissions.attach_permissions(fallback)
 
@@ -465,6 +466,7 @@ def dashboard_handler(event, context):
                     perm_orders=str(body.get("perm_orders") or ""),
                     perm_sku_map=str(body.get("perm_sku_map") or ""),
                     perm_ship_to=str(body.get("perm_ship_to") or ""),
+                    perm_delivery=str(body.get("perm_delivery") or ""),
                 )
                 store.add_audit(conn, actor=actor, action="upsert_user", detail=email)
                 conn.commit()
@@ -510,15 +512,43 @@ def dashboard_handler(event, context):
                 if deny := _deny_perm(profile, permissions.RESOURCE_ORDERS, permissions.PERM_VIEW):
                     return deny
                 unread = (q.get("unread") or "").lower() in {"1", "true"}
-                ch = q.get("channel") or store.CHANNEL_BLINKIT
-                store.mark_notifications_read_for_posted_pos(conn, channel=ch)
+                allowed = {
+                    str(c).strip().lower()
+                    for c in (profile.get("channels") or [])
+                    if str(c).strip() and str(c).strip().lower() != store.CHANNEL_LOGISTICS
+                }
+                raw_multi = str(q.get("channels") or "").strip()
+                if raw_multi:
+                    requested = [p.strip().lower() for p in raw_multi.split(",") if p.strip()]
+                    chans = [c for c in requested if c in allowed]
+                else:
+                    ch = str(q.get("channel") or store.CHANNEL_BLINKIT).strip().lower()
+                    chans = [ch] if ch in allowed else []
+                if not chans:
+                    return _json(200, {"items": []})
+                for ch in chans:
+                    store.mark_notifications_read_for_posted_pos(conn, channel=ch)
                 conn.commit()
-                return _json(200, {"items": store.list_notifications(conn, unread_only=unread, channel=ch)})
+                return _json(
+                    200,
+                    {
+                        "items": store.list_notifications(
+                            conn, unread_only=unread, channels=chans, limit=80
+                        )
+                    },
+                )
             if path.endswith("/v1/b2b/notifications/read") and method == "POST":
                 if deny := _deny_perm(profile, permissions.RESOURCE_ORDERS, permissions.PERM_VIEW):
                     return deny
                 body = _body(event)
-                ch = str(body.get("channel") or q.get("channel") or store.CHANNEL_BLINKIT)
+                allowed = {
+                    str(c).strip().lower()
+                    for c in (profile.get("channels") or [])
+                    if str(c).strip() and str(c).strip().lower() != store.CHANNEL_LOGISTICS
+                }
+                ch = str(body.get("channel") or q.get("channel") or store.CHANNEL_BLINKIT).strip().lower()
+                if ch not in allowed:
+                    return _json(403, {"error": "Not allowed for this channel"})
                 nid = body.get("id")
                 po = str(body.get("po_number") or "").strip()
                 if po:

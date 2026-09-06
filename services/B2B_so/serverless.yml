@@ -60,12 +60,12 @@ provider:
             - s3:GetObject
             - s3:PutObject
           Resource:
-            - Fn::Sub: "${B2BDocsBucket.Arn}/*"
+            - arn:aws:s3:::${self:custom.docsBucket}/*
         - Effect: Allow
           Action:
             - lambda:InvokeFunction
           Resource:
-            - arn:aws:lambda:${self:provider.region}:*:function:${self:service}-${self:provider.stage}-b2bPoFetch
+            - arn:aws:lambda:${self:provider.region}:*:function:${self:service}-${self:provider.stage}-b2bBlinkitFetch
         - Effect: Allow
           Action:
             - cognito-idp:AdminCreateUser
@@ -82,8 +82,7 @@ provider:
     LOG_LEVEL: ${env:LOG_LEVEL, 'INFO'}
     DATABASE_URL: ${env:DATABASE_URL, ''}
     B2B_IMAP_PARAM_NAME: ${env:B2B_IMAP_PARAM_NAME, '/b2b/imap'}
-    B2B_DOCS_BUCKET:
-      Ref: B2BDocsBucket
+    B2B_DOCS_BUCKET: ${self:custom.docsBucket}
     B2B_S3_PREFIX: blinkit
     B2B_MOVE_PROCESSED_MAIL: ${env:B2B_MOVE_PROCESSED_MAIL, 'true'}
     B2B_ALERT_ADMIN_EMAIL: ${env:B2B_ALERT_ADMIN_EMAIL, ''}
@@ -92,11 +91,12 @@ provider:
     SAP_SL_USE_SSM: ${env:SAP_SL_USE_SSM, 'true'}
     SAP_SL_VERIFY_SSL: ${env:SAP_SL_VERIFY_SSL, 'true'}
     SAP_SL_PROFILE: ${env:SAP_SL_PROFILE, 'default'}
-    HANA_USE_SSM: ${env:HANA_USE_SSM, '1'}
+    HANA_USE_SSM: '1'
     COGNITO_USER_POOL_ID:
       Ref: B2BDashboardUserPool
 
 custom:
+  docsBucket: ${env:B2B_DOCS_BUCKET, 'khanal-b2b-so-${self:provider.stage}'}
   pythonRequirements:
     dockerizePip: false
     slim: true
@@ -127,7 +127,7 @@ package:
     - "!**/*.pyc"
 
 functions:
-  b2bPoFetch:
+  b2bBlinkitFetch:
     handler: src.handlers.fetch_handler
     memorySize: 512
     timeout: 300
@@ -142,7 +142,7 @@ functions:
     memorySize: 512
     timeout: 29
     environment:
-      B2B_FETCH_FUNCTION_NAME: ${self:service}-${self:provider.stage}-b2bPoFetch
+      B2B_FETCH_FUNCTION_NAME: ${self:service}-${self:provider.stage}-b2bBlinkitFetch
     layers: [{ Ref: SharedLambdaLayer }]
     events:
       - httpApi: { path: /v1/b2b/me, method: get, authorizer: { name: dashboardCognitoJwt } }
@@ -184,6 +184,7 @@ resources:
     B2BDocsBucket:
       Type: AWS::S3::Bucket
       Properties:
+        BucketName: ${self:custom.docsBucket}
         PublicAccessBlockConfiguration:
           BlockPublicAcls: false
           BlockPublicPolicy: false
@@ -204,7 +205,7 @@ resources:
               Effect: Allow
               Principal: "*"
               Action: s3:GetObject
-              Resource: !Sub "${B2BDocsBucket.Arn}/*"
+              Resource: arn:aws:s3:::${self:custom.docsBucket}/*
 
     B2BDashboardUserPool:
       Type: AWS::Cognito::UserPool
@@ -263,9 +264,17 @@ resources:
         Description: Read-only
         UserPoolId: !Ref B2BDashboardUserPool
 
+    B2BDeliveryGroup:
+      Type: AWS::Cognito::UserPoolGroup
+      Properties:
+        GroupName: B2BDelivery
+        Description: Logistics delivery portal (bootstrap; per-user perm_delivery in DB)
+        UserPoolId: !Ref B2BDashboardUserPool
+
     B2BDashboardSiteBucket:
       Type: AWS::S3::Bucket
       Properties:
+        BucketName: ${self:service}-${self:provider.stage}-dashboard-site
         PublicAccessBlockConfiguration:
           BlockPublicAcls: true
           BlockPublicPolicy: true
@@ -320,8 +329,12 @@ resources:
   Outputs:
     B2BDashboardUserPoolId:
       Value: !Ref B2BDashboardUserPool
+      Export:
+        Name: ${self:service}-${self:provider.stage}-DashboardUserPoolId
     B2BDashboardUserPoolClientId:
       Value: !Ref B2BDashboardUserPoolClient
+      Export:
+        Name: ${self:service}-${self:provider.stage}-DashboardUserPoolClientId
     B2BDocsBucketName:
       Value: !Ref B2BDocsBucket
     B2BDashboardSiteBucketName:

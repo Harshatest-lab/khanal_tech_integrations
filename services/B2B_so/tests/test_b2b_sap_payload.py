@@ -248,7 +248,13 @@ def test_post_purchase_order_uses_channel_for_lookup(monkeypatch):
         lookup.append((po_number, channel))
         if channel == "instamart":
             return {
-                "header": {"channel": "instamart", "po_number": po_number, "pipeline_status": "approved"},
+                "header": {
+                    "channel": "instamart",
+                    "po_number": po_number,
+                    "pipeline_status": "approved",
+                    "po_expiry_date": "2026-03-06",
+                    "matched_address_name": "BLR-WF",
+                },
                 "lines": [{"sap_code": "FG-001", "quantity": 1, "basic_cost_price": 1, "taxcode": "KAIG5"}],
             }
         return None

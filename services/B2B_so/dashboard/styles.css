@@ -933,7 +933,15 @@ html[data-theme="light"] .fetch-progress { background: rgba(91, 54, 201, .1); }
 }
 .bell-item.is-error strong { color: #fecaca; }
 .bell-item.is-error .bell-body { color: #fca5a5; }
-.bell-empty { margin: 8px; font-size: 12px; color: var(--muted); }
+.bell-section-label {
+  margin: 8px 8px 4px; font-size: 10px; font-weight: 700; letter-spacing: .08em;
+  text-transform: uppercase; color: var(--muted);
+}
+.bell-meta {
+  margin: 2px 0 0; font-size: 11px; color: var(--muted);
+}
+.bell-item.is-error .bell-meta { color: #fca5a5; }
+html[data-theme="light"] .bell-item.is-error .bell-meta { color: #b91c1c; }
 html[data-theme="light"] .bell-item:hover {
   background: rgba(91, 54, 201, .06);
   border-color: rgba(91, 54, 201, .14);
@@ -1668,4 +1676,179 @@ html[data-theme="light"] .status.s-rejected { background: #f1f5f9; color: #64748
     animation: none;
   }
   .ch-head, .nav-btn, .rail .btn.ghost { transition: none; }
+}
+
+/* —— Logistics delivery portal —— */
+.ld-card { display: grid; gap: 14px; }
+.ld-card-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+}
+.ld-card-head h3 { margin: 2px 0 0; }
+.ld-search-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 12px 14px;
+  align-items: end;
+}
+.ld-search-grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.ld-search-grid-link { grid-template-columns: repeat(4, minmax(0, 1fr)) auto; }
+.ld-search-grid-tracker { grid-template-columns: repeat(4, minmax(0, 1fr)) auto; }
+.ld-field {
+  display: grid; gap: 4px;
+  font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted);
+}
+.ld-field input, .ld-field select {
+  font: inherit; font-size: 13px; font-weight: 500; text-transform: none; letter-spacing: normal;
+  color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+  padding: 9px 10px; width: 100%;
+}
+.ld-field input[readonly] {
+  background: #f8fafc;
+  color: #0f172a;
+  font-weight: 700;
+  border-color: #cbd5e1;
+}
+html[data-theme="light"] .ld-field input[readonly] {
+  background: #f1f5f9;
+  color: #0f172a;
+}
+.ld-search-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.ld-filters-panel {
+  display: none; padding-top: 12px; border-top: 1px solid var(--line);
+}
+.ld-filters-panel.is-open { display: block; }
+.ld-clear-link {
+  justify-self: start; margin-top: 2px; padding: 0; border: 0; background: none;
+  color: #2c5e58; font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.ld-table-scroll {
+  overflow: auto; border: 1px solid var(--line); border-radius: 10px;
+}
+.ld-table {
+  width: 100%; border-collapse: collapse; font-size: 12.5px; min-width: 720px;
+}
+.ld-tracker-table { min-width: 1100px; }
+.ld-table thead th {
+  background: rgba(44, 94, 88, .08); color: var(--ink);
+  font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em;
+  padding: 10px 8px; text-align: left; white-space: nowrap; border-bottom: 1px solid var(--line);
+}
+.ld-th-sub span {
+  display: block; margin-top: 3px; font-size: 9.5px; font-weight: 600;
+  text-transform: none; letter-spacing: .02em; color: var(--muted);
+}
+.ld-table tbody td {
+  padding: 9px 8px; border-bottom: 1px solid rgba(148, 163, 184, .2); vertical-align: middle;
+}
+.ld-table tbody tr:nth-child(even) { background: rgba(248, 250, 252, .55); }
+.ld-result-row { cursor: pointer; }
+.ld-result-row:hover { background: rgba(44, 94, 88, .06) !important; }
+.ld-result-row.is-selected {
+  background: rgba(44, 94, 88, .12) !important;
+  box-shadow: inset 3px 0 0 #2c5e58;
+}
+.ld-row-pick { width: 28px; }
+.ld-row-pick::before {
+  content: ""; display: inline-block; width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid rgba(44, 94, 88, .45); vertical-align: middle;
+}
+.ld-result-row.is-selected .ld-row-pick::before {
+  background: #2c5e58; box-shadow: inset 0 0 0 2px #fff;
+}
+.ld-clip {
+  max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ld-badge {
+  display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px;
+  font-size: 10.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+}
+.ld-badge--delivered { background: #dcfce7; color: #15803d; }
+.ld-badge--manifested { background: #dbeafe; color: #1d4ed8; }
+.ld-badge--transit { background: #fef9c3; color: #854d0e; }
+.ld-badge--rto { background: #fee2e2; color: #b91c1c; }
+.ld-badge--other { background: #f1f5f9; color: #475569; }
+.ld-badge--sap-ok { background: #dcfce7; color: #15803d; }
+.ld-badge--sap-failed { background: #fee2e2; color: #b91c1c; }
+.ld-badge--sap-stale { background: #ffedd5; color: #c2410c; }
+.ld-sap-card {
+  background: linear-gradient(160deg, #fff 0%, #f4fcf9 45%, #eef6f4 100%);
+  border: 1px solid rgba(44, 94, 88, .18); border-radius: 10px; padding: 8px 10px;
+  display: inline-flex; min-width: 4.5rem; justify-content: center;
+}
+.ld-sap-pod-cell { display: grid; gap: 4px; justify-items: start; }
+.ld-cell-sub { font-size: 10px; color: #b91c1c; font-weight: 600; }
+.ld-actions {
+  display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+  min-width: 9rem; white-space: nowrap;
+}
+.ld-pager { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.ld-alerts { display: grid; gap: 6px; max-height: 180px; overflow: auto; }
+.ld-alert-row {
+  text-align: left; border: 1px solid #fdba74; background: #fff7ed; color: #9a3412;
+  border-radius: 8px; padding: 8px 10px; cursor: pointer; display: grid; gap: 2px;
+  font: inherit;
+}
+.ld-alert-row.is-danger { border-color: #fca5a5; background: #fef2f2; color: #991b1b; }
+.ld-alert-row strong { font-size: 12px; }
+.ld-alert-row span { font-size: 12px; opacity: .92; }
+.ld-json-block {
+  margin: 0; padding: 12px; border-radius: 10px; background: #0f172a; color: #e2e8f0;
+  font-size: 11.5px; line-height: 1.45; overflow: auto; max-height: 320px;
+  white-space: pre-wrap; word-break: break-word;
+}
+html[data-theme="light"] .ld-json-block,
+html[data-theme="light"] .ld-json-block.muted {
+  background: #0f172a;
+  color: #e2e8f0;
+}
+.ld-admin-card {
+  width: min(920px, 96vw); max-height: min(88vh, 900px); overflow: hidden;
+  display: flex; flex-direction: column; padding: 0;
+}
+.ld-admin-head { padding: 16px 18px 8px; }
+.ld-admin-tabs {
+  display: flex; gap: 6px; flex-wrap: wrap; padding: 0 18px 10px; border-bottom: 1px solid var(--line);
+}
+.ld-admin-tab {
+  border: 0; background: transparent; color: var(--muted); font: inherit; font-weight: 700;
+  font-size: 12px; padding: 8px 12px; border-radius: 8px; cursor: pointer;
+}
+.ld-admin-tab.is-active {
+  background: linear-gradient(180deg, #2c5e58, #1a2f2b); color: #fff;
+}
+.ld-admin-body {
+  padding: 14px 18px 18px; overflow: auto; flex: 1; display: grid; gap: 12px;
+}
+.ld-admin-section-label {
+  margin: 4px 0 0; font-size: 11px; font-weight: 700; letter-spacing: .07em;
+  text-transform: uppercase; color: var(--muted);
+}
+.ld-overview-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;
+}
+.ld-overview-grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.ld-ov-item {
+  background: rgba(148, 163, 184, .12); border-radius: 8px; padding: 8px 10px; display: grid; gap: 3px;
+}
+.ld-ov-k { font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.ld-ov-v { font-size: 13px; font-weight: 600; color: var(--ink); word-break: break-word; }
+.ld-event-card {
+  border: 1px solid var(--line); border-radius: 12px; padding: 12px; display: grid; gap: 10px;
+  background: var(--card);
+}
+.ld-event-card header { font-size: 12px; font-weight: 700; color: var(--ink); }
+.ld-warn {
+  margin: 0; padding: 8px 10px; border-radius: 8px; background: #fff7ed; color: #9a3412;
+  border: 1px solid #fdba74; font-size: 12px;
+}
+.btn.small { padding: 5px 10px; font-size: 12px; }
+#ld-toggle-filters.is-active { border-color: #2c5e58; background: rgba(44, 94, 88, .1); }
+
+@media (max-width: 980px) {
+  .ld-search-grid,
+  .ld-search-grid-4,
+  .ld-search-grid-link,
+  .ld-search-grid-tracker { grid-template-columns: 1fr; }
+  .ld-overview-grid, .ld-overview-grid-3 { grid-template-columns: 1fr; }
+  .ld-admin-card { width: 100%; max-height: 94vh; border-radius: 12px 12px 0 0; }
 }

@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=20260831v" />
+  <link rel="stylesheet" href="styles.css?v=20260906q" />
 </head>
 <body>
   <div id="login-screen" class="login-page">
@@ -144,8 +144,10 @@
   <div id="app-shell" class="app hidden">
     <aside class="rail" id="sidebar">
       <div class="brand"><span class="brand-mark">K</span><div><strong>Khanal B2B</strong><small>PO automation</small></div></div>
-      <p class="nav-label">Channels</p>
+      <p class="nav-label" id="channels-nav-label">Channels</p>
       <nav id="channel-nav" class="channel-nav"></nav>
+      <p class="nav-label logistics-nav-label hidden" id="logistics-nav-label">Logistics</p>
+      <nav id="logistics-nav" class="channel-nav logistics-nav hidden"></nav>
       <button class="nav-btn hidden" data-view="users" data-admin type="button">Team</button>
       <button class="nav-btn hidden" data-view="logs" data-admin type="button">Activity log</button>
       <div class="rail-foot">
@@ -383,6 +385,171 @@
         </article>
       </section>
 
+      <section id="view-logistics-home" class="view hidden logistics-view">
+        <div class="kpis" id="ld-kpi-row"></div>
+        <article class="card ld-card">
+          <h3>Open issues</h3>
+          <div id="ld-alerts-list" class="stack"></div>
+        </article>
+      </section>
+
+      <section id="view-logistics-delivery" class="view hidden logistics-view">
+        <article class="card ld-card">
+          <div class="ld-card-head">
+            <div>
+              <p class="eyebrow">SAP · AR Invoice</p>
+              <h3>Find invoice</h3>
+            </div>
+            <button class="btn ghost small is-active" id="ld-toggle-filters" type="button" title="More filters">Filters</button>
+          </div>
+          <div class="ld-search-grid" id="ld-search-main">
+            <label class="ld-field">DocNum (AR Invoice Num)
+              <input id="ld-doc-num" placeholder="e.g. 150" inputmode="numeric" autocomplete="off" />
+            </label>
+            <label class="ld-field">Series name
+              <input id="ld-series-name" placeholder="Filled when you select a row" autocomplete="off" />
+            </label>
+            <div class="ld-search-actions">
+              <button class="btn primary" id="ld-search-invoices" type="button">Search</button>
+              <button class="btn ghost" id="ld-clear-invoice-search" type="button">Clear</button>
+            </div>
+          </div>
+          <div class="ld-filters-panel is-open" id="ld-filters-panel">
+            <div class="ld-search-grid ld-search-grid-4">
+              <label class="ld-field">Doc date
+                <input id="ld-doc-date" type="date" />
+                <button class="ld-clear-link" id="ld-clear-date" type="button">Clear date</button>
+              </label>
+              <label class="ld-field">DocEntry
+                <input id="ld-doc-entry-search" placeholder="e.g. 41658" inputmode="numeric" autocomplete="off" />
+              </label>
+              <label class="ld-field">Card code
+                <input id="ld-card-code" placeholder="Business partner" autocomplete="off" />
+              </label>
+              <label class="ld-field">Card name
+                <input id="ld-card-name" placeholder="Customer name" autocomplete="off" />
+              </label>
+            </div>
+          </div>
+          <p class="muted small" id="ld-invoice-hint">Enter DocNum (AR Invoice Num) and/or DocEntry, then Search.</p>
+          <div class="ld-table-scroll">
+            <table class="ld-table">
+              <thead>
+                <tr>
+                  <th></th>
+                  <th>DocEntry</th>
+                  <th>DocNum</th>
+                  <th>Series</th>
+                  <th>Date</th>
+                  <th>Card code</th>
+                  <th>Customer</th>
+                  <th>Total</th>
+                </tr>
+              </thead>
+              <tbody id="ld-invoice-body"></tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="card ld-card" id="ld-link-card">
+          <div class="ld-card-head">
+            <div>
+              <p class="eyebrow">Delhivery · SAP</p>
+              <h3>Link LR to invoice</h3>
+            </div>
+            <span class="muted small" id="ld-selected-label">No invoice selected</span>
+          </div>
+          <div class="ld-search-grid ld-search-grid-link">
+            <label class="ld-field">Selected DocEntry
+              <input id="ld-selected-de" placeholder="—" readonly />
+            </label>
+            <label class="ld-field">Selected DocNum
+              <input id="ld-selected-dn" placeholder="—" readonly />
+            </label>
+            <label class="ld-field">Series
+              <input id="ld-selected-series" placeholder="—" readonly />
+            </label>
+            <label class="ld-field">LR number
+              <input id="ld-lrnum" placeholder="Enter Delhivery LR" />
+            </label>
+            <div class="ld-search-actions">
+              <button class="btn ghost" id="ld-verify-lr" type="button">Check LR</button>
+              <button class="btn primary" id="ld-submit-lr" type="button">Submit to SAP</button>
+            </div>
+          </div>
+          <pre id="ld-delivery-status" class="ld-json-block" aria-live="polite"></pre>
+        </article>
+      </section>
+
+      <section id="view-logistics-tracker" class="view hidden logistics-view">
+        <article class="card ld-card" id="ld-tracker-alerts-card">
+          <div class="ld-card-head">
+            <div>
+              <p class="eyebrow">SAP sync</p>
+              <h3>Issues</h3>
+            </div>
+            <div class="ld-search-actions">
+              <button class="btn ghost small" id="ld-retry-all" type="button">Retry all failed SAP</button>
+              <span class="muted small" id="ld-retry-count-label"></span>
+            </div>
+          </div>
+          <div id="ld-tracker-alerts" class="ld-alerts"></div>
+          <p class="hint">Issues appear only when LR→SAP sync failed or POD→SAP needs a fix. Status history in Admin view comes from Delhivery webhooks (not from Check LR).</p>
+        </article>
+
+        <article class="card ld-card">
+          <div class="ld-search-grid ld-search-grid-tracker">
+            <label class="ld-field">LR number
+              <input id="ld-f-lrnum" placeholder="Search LR…" />
+            </label>
+            <label class="ld-field">DocEntry
+              <input id="ld-f-doc-entry" placeholder="e.g. 45350" />
+            </label>
+            <label class="ld-field">DocNum
+              <input id="ld-f-doc-num" placeholder="e.g. 151" />
+            </label>
+            <label class="ld-field">Status
+              <select id="ld-f-status">
+                <option value="">All</option>
+                <option value="Delivered">Delivered</option>
+                <option value="Pending">Pending</option>
+                <option value="Manifested">Manifested</option>
+                <option value="In Transit">In Transit</option>
+                <option value="RTO">RTO</option>
+              </select>
+            </label>
+            <div class="ld-search-actions">
+              <button class="btn primary" id="ld-tracker-search" type="button">Search</button>
+              <button class="btn ghost" id="ld-tracker-clear" type="button">Clear</button>
+            </div>
+          </div>
+          <div class="ld-card-head ld-records-head">
+            <h3 id="ld-tracker-count">Records</h3>
+          </div>
+          <div class="ld-table-scroll">
+            <table class="ld-table ld-tracker-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>LR number</th>
+                  <th>Status</th>
+                  <th>Waybill</th>
+                  <th class="ld-th-sub">LR → SAP<span>tracking only</span></th>
+                  <th>DocEntry</th>
+                  <th>DocNum</th>
+                  <th>Series</th>
+                  <th>SAP POD</th>
+                  <th>Updated</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="ld-tracker-body"></tbody>
+            </table>
+          </div>
+          <div class="ld-pager" id="ld-tracker-pager"></div>
+        </article>
+      </section>
+
       <section id="view-inbox" class="view hidden">
         <p class="hint">Alerts from mail extract and mapping. Mark read clears the highlight; delete removes the alert. Posted POs are marked read automatically.</p>
         <div class="filters"><button class="btn ghost" id="mark-all-read" type="button">Mark all read</button></div>
@@ -392,7 +559,7 @@
       <section id="view-users" class="view hidden">
         <article class="card">
           <h3>Team</h3>
-          <p class="muted">Assign channels and per-area access: purchase orders, item map, and ship-to (view / edit / delete).</p>
+          <p class="muted">Tick channels to assign. For Logistics-only: check <strong>Delivery</strong> alone (use role reviewer, not admin). Marketplace boxes stay unchecked.</p>
           <div class="filters">
             <input id="user-email" placeholder="email" />
             <input id="user-name" placeholder="name" />
@@ -422,6 +589,15 @@
             </label>
             <label>Ship-to
               <select id="perm-ship-to">
+                <option value="">Role default</option>
+                <option value="none">No access</option>
+                <option value="view">View</option>
+                <option value="edit">Edit</option>
+                <option value="delete">Delete</option>
+              </select>
+            </label>
+            <label>Logistics delivery
+              <select id="perm-delivery">
                 <option value="">Role default</option>
                 <option value="none">No access</option>
                 <option value="view">View</option>
@@ -515,6 +691,25 @@
     </div>
   </div>
 
+  <div id="ld-admin-modal" class="modal-overlay hidden">
+    <div class="modal-card ld-admin-card" role="dialog" aria-labelledby="ld-admin-title">
+      <header class="modal-head ld-admin-head">
+        <div>
+          <p class="eyebrow">Admin</p>
+          <h2 id="ld-admin-title">Admin — LR</h2>
+        </div>
+        <button class="btn-x" id="ld-admin-close" type="button" aria-label="Close">×</button>
+      </header>
+      <div class="ld-admin-tabs" id="ld-admin-tabs" role="tablist">
+        <button type="button" class="ld-admin-tab is-active" data-tab="overview">Overview</button>
+        <button type="button" class="ld-admin-tab" data-tab="status">Status history</button>
+        <button type="button" class="ld-admin-tab" data-tab="pods">PODs</button>
+        <button type="button" class="ld-admin-tab" data-tab="raw">Raw JSON</button>
+      </div>
+      <div id="ld-admin-body" class="ld-admin-body"></div>
+    </div>
+  </div>
+
   <div id="confirm-modal" class="modal-overlay hidden">
     <div class="modal-card confirm-card" role="alertdialog" aria-labelledby="confirm-title" aria-describedby="confirm-message">
       <header class="modal-head">
@@ -532,6 +727,7 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <script src="app.js?v=20260831w"></script>
+  <script src="app.js?v=20260906q"></script>
+  <script src="delivery.js?v=20260906q"></script>
 </body>
 </html>

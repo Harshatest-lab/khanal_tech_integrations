@@ -8,6 +8,10 @@ custom:
   # Default IAM + Lambda env bucket name (override with POD_S3_BUCKET at deploy).
   podS3BucketDefault: ${self:service}-${self:provider.stage}-delhivery-epod
   podS3Bucket: ${env:POD_S3_BUCKET, self:custom.podS3BucketDefault}
+  # B2B dashboard Cognito — read from b2b-so stack outputs (deploy B2B first). Override with env if needed.
+  b2bStackName: b2b-so-${self:provider.stage}
+  cognitoUserPoolId: ${env:COGNITO_USER_POOL_ID, cf:${self:custom.b2bStackName}.B2BDashboardUserPoolId}
+  cognitoClientId: ${env:COGNITO_CLIENT_ID, cf:${self:custom.b2bStackName}.B2BDashboardUserPoolClientId}
 
 provider:
   name: aws
@@ -16,6 +20,26 @@ provider:
   region: ${opt:region, 'ap-south-1'}
   memorySize: 512
   timeout: 20
+  httpApi:
+    cors:
+      allowedOrigins:
+        - "*"
+      allowedHeaders:
+        - Content-Type
+        - Authorization
+      allowedMethods:
+        - GET
+        - POST
+        - OPTIONS
+    authorizers:
+      portalCognitoJwt:
+        type: jwt
+        identitySource:
+          - $request.header.Authorization
+        issuerUrl:
+          Fn::Sub: "https://cognito-idp.${AWS::Region}.amazonaws.com/${self:custom.cognitoUserPoolId}"
+        audience:
+          - ${self:custom.cognitoClientId}
   iam:
     role:
       statements:
@@ -32,6 +56,17 @@ provider:
             - arn:aws:ssm:${self:provider.region}:*:parameter/sap/sl_config
             - arn:aws:ssm:${self:provider.region}:*:parameter/sap/credentials
             - arn:aws:ssm:${self:provider.region}:*:parameter/sap/b1_session
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+          Resource:
+            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/hana_config
+            - arn:aws:ssm:${self:provider.region}:*:parameter/sap/hana_credentials
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+          Resource:
+            - arn:aws:ssm:${self:provider.region}:*:parameter/delivery/*
   environment:
     STAGE: ${self:provider.stage}
     LOG_LEVEL: INFO
@@ -79,6 +114,33 @@ functions:
       - sqs:
           arn: !GetAtt DelhiveryWebhookQueue.Arn
           batchSize: 1
+
+  # Logistics portal API (HTTP API + Cognito JWT). Does not touch webhook worker or REST → SQS routes.
+  deliveryPortalApi:
+    handler: src.portal_handlers.portal_handler
+    memorySize: 1024
+    timeout: 60
+    environment:
+      HANA_USE_SSM: '1'
+      DELHIVERY_LTL_USE_SSM: ${env:DELHIVERY_LTL_USE_SSM, '1'}
+      # Optional local override when SSM is not used (prefer SSM in prod).
+      DELHIVERY_LTL_TRACK_BASE_URL: ${env:DELHIVERY_LTL_TRACK_BASE_URL, ''}
+      DELHIVERY_LTL_USERNAME: ${env:DELHIVERY_LTL_USERNAME, ''}
+      DELHIVERY_LTL_PASSWORD: ${env:DELHIVERY_LTL_PASSWORD, ''}
+    layers:
+      - { Ref: SharedLambdaLayer }
+    events:
+      - httpApi: { path: /v1/delivery/invoices, method: get, authorizer: { name: portalCognitoJwt } }
+      - httpApi: { path: "/v1/delivery/invoices/{docEntry}", method: get, authorizer: { name: portalCognitoJwt } }
+      - httpApi: { path: /v1/delivery/lr/verify, method: post, authorizer: { name: portalCognitoJwt } }
+      - httpApi: { path: /v1/delivery/lr/submit, method: post, authorizer: { name: portalCognitoJwt } }
+      - httpApi: { path: /v1/delivery/lr/sap-state, method: get, authorizer: { name: portalCognitoJwt } }
+      - httpApi: { path: /v1/delivery/tracker, method: get, authorizer: { name: portalCognitoJwt } }
+      - httpApi: { path: "/v1/delivery/tracker/{lrnum}", method: get, authorizer: { name: portalCognitoJwt } }
+      - httpApi: { path: /v1/delivery/alerts, method: get, authorizer: { name: portalCognitoJwt } }
+      - httpApi: { path: /v1/delivery/sap-retry/count, method: get, authorizer: { name: portalCognitoJwt } }
+      - httpApi: { path: /v1/delivery/sap-retry, method: post, authorizer: { name: portalCognitoJwt } }
+      - httpApi: { path: /v1/delivery/pod/fix, method: post, authorizer: { name: portalCognitoJwt } }
 
 resources:
   Resources:
@@ -253,3 +315,6 @@ resources:
     DelhiveryWebhookRestApiUrl:
       Description: Base invoke URL for Delhivery REST webhooks (append /v1/webhooks/delhivery/...)
       Value: !Sub https://${DelhiveryRestApi}.execute-api.${AWS::Region}.amazonaws.com/${self:provider.stage}
+    DeliveryPortalHttpApiUrl:
+      Description: HTTP API base URL for logistics portal (/v1/delivery/*). Set as DELIVERY_API_BASE in B2B dashboard.
+      Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com

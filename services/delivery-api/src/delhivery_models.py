@@ -292,8 +292,20 @@ def normalize_shipment_webhook(payload: dict[str, Any]) -> dict[str, Any] | None
     remark_s = remark if isinstance(remark, str) else None
     loc = payload.get("location")
     loc_s = loc if isinstance(loc, str) else None
-    waybill = payload.get("mwn") or payload.get("wbn")
-    waybill_s = waybill.strip() if isinstance(waybill, str) else None
+    waybill = (
+        payload.get("mwn")
+        or payload.get("wbn")
+        or payload.get("waybill")
+        or payload.get("Waybill")
+        or payload.get("WBN")
+        or payload.get("MWN")
+    )
+    if isinstance(waybill, (int, float)) and not isinstance(waybill, bool):
+        waybill_s = str(int(waybill)) if waybill == int(waybill) else str(waybill)
+    else:
+        waybill_s = waybill.strip() if isinstance(waybill, str) else None
+        if waybill_s == "":
+            waybill_s = None
     return {
         "lrnum": lrnum,
         "delhivery_status": status_s,

@@ -37,6 +37,19 @@ def test_normalize_shipment_webhook() -> None:
     assert out["status_date"] == date(2021, 1, 1)
 
 
+def test_normalize_shipment_webhook_accepts_waybill_key() -> None:
+    """Delhivery / test clients often send ``waybill`` instead of ``mwn`` / ``wbn``."""
+    out = normalize_shipment_webhook(
+        {
+            "lrnum": "220308320",
+            "status": "In Transit",
+            "waybill": "85334610001875",
+        }
+    )
+    assert out is not None
+    assert out["waybill"] == "85334610001875"
+
+
 def test_normalize_shipment_webhook_missing_lrnum() -> None:
     assert normalize_shipment_webhook({"status": "X"}) is None
 
