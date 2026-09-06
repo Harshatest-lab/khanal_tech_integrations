@@ -62,18 +62,3 @@ Dashboard **Fetch** runs per channel (passes `channel` to Lambda). Legacy top-le
 No `/b2b/blinkit/customer` param.
 
 Also: `DATABASE_URL`, SES from/to emails, seed SKU + ship-to maps.
-
-## Deploy (GitHub Actions)
-
-Workflow: **Actions → Deploy**. Service folder must be **`B2B_so`** (exact case).
-
-Default PO docs bucket: created by CloudFormation (name in stack **Outputs → B2BDocsBucketName**). Do not set a fixed `B2B_DOCS_BUCKET` at deploy time — that caused `ResourceExistenceCheck` when the name already existed globally.
-
-### `ResourceExistenceCheck` failed
-
-Usually a **stuck partial stack** (only `ServerlessDeploymentBucket` in Resources) or an old deploy that tried a fixed bucket name.
-
-1. AWS Console → **CloudFormation** → delete stack `b2b-so-{stage}`.
-2. Re-run **Actions → Deploy** with service **`B2B_so`**.
-3. Confirm **Resources** shows Lambdas, Cognito, HTTP API — not just the deployment bucket.
-4. Note bucket names from stack **Outputs** (`B2BDocsBucketName`, `B2BDashboardSiteBucketName`).

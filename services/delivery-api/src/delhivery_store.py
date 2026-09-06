@@ -88,8 +88,10 @@ upd AS (
   SET
     latest_pod_id = i.id,
     pod_received = true,
+    waybill = COALESCE(NULLIF(btrim(l.waybill), ''), NULLIF(btrim(b.waybill_in), ''), l.waybill),
     updated_at = now()
   FROM ins i
+  CROSS JOIN bound b
   WHERE l.lrnum = i.lrnum
   RETURNING i.id, i.lrnum
 )

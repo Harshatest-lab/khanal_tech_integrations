@@ -41,6 +41,9 @@ const TITLES = {
   inbox: ["Mailbox", "Alerts"],
   users: ["Team", "Roles, channels & SAP codes"],
   logs: ["Activity log", "Who created and edited"],
+  "logistics-home": ["Logistics", "Delivery overview"],
+  "logistics-delivery": ["Delivery", "Find SAP invoice and link LR"],
+  "logistics-tracker": ["Tracker report", "Delhivery LR status · Admin view"],
 };
 
 let auth = null;
@@ -107,9 +110,9 @@ function canPost() { return Boolean(me.can_post_sap); }
 function canAdmin() { return Boolean(me.can_manage_users); }
 const PERM_RANK = { none: 0, view: 1, edit: 2, delete: 3 };
 const ROLE_PERM_DEFAULTS = {
-  admin: { orders: "delete", sku_map: "delete", ship_to: "delete" },
-  reviewer: { orders: "edit", sku_map: "edit", ship_to: "edit" },
-  viewer: { orders: "view", sku_map: "view", ship_to: "view" },
+  admin: { orders: "delete", sku_map: "delete", ship_to: "delete", delivery: "delete" },
+  reviewer: { orders: "edit", sku_map: "edit", ship_to: "edit", delivery: "edit" },
+  viewer: { orders: "view", sku_map: "view", ship_to: "view", delivery: "none" },
 };
 function permLevel(resource) {
   if (canAdmin()) return "delete";
@@ -127,24 +130,49 @@ function canDeleteSkuMap() { return hasPerm("sku_map", "delete"); }
 function canViewShipTo() { return hasPerm("ship_to", "view"); }
 function canEditShipTo() { return hasPerm("ship_to", "edit"); }
 function canDeleteShipTo() { return hasPerm("ship_to", "delete"); }
+function hasLogisticsModule() {
+  if (canAdmin()) return true;
+  return (me.channels || []).map((c) => String(c).toLowerCase()).includes("logistics");
+}
+function canViewDelivery() { return hasPerm("delivery", "view") && hasLogisticsModule(); }
+function canEditDelivery() { return hasPerm("delivery", "edit") && hasLogisticsModule(); }
 function canEdit() { return canEditOrders(); }
+
+/** Sidebar Logistics links (keep in app.js so nav works even if delivery.js fails to load). */
+function renderLogisticsNav() {
+  const nav = $("logistics-nav");
+  const label = $("logistics-nav-label");
+  if (!nav) return;
+  if (!canViewDelivery()) {
+    nav.classList.add("hidden");
+    label?.classList.add("hidden");
+    return;
+  }
+  nav.classList.remove("hidden");
+  label?.classList.remove("hidden");
+  nav.innerHTML = `
+    <button class="nav-btn" data-view="logistics-home" type="button">Overview</button>
+    <button class="nav-btn" data-view="logistics-delivery" type="button">Delivery</button>
+    <button class="nav-btn" data-view="logistics-tracker" type="button">Tracker report</button>
+  `;
+}
 function permLabel(level) {
   const map = { none: "None", view: "View", edit: "Edit", delete: "Delete" };
   return map[level] || level || "Default";
 }
 function permSummary(u) {
   const p = u.permissions || {};
-  return `PO: ${permLabel(p.orders)} · Map: ${permLabel(p.sku_map)} · Ship: ${permLabel(p.ship_to)}`;
+  return `PO: ${permLabel(p.orders)} · Map: ${permLabel(p.sku_map)} · Ship: ${permLabel(p.ship_to)} · Logistics: ${permLabel(p.delivery)}`;
 }
 function applyRolePermDefaults(role) {
   const d = ROLE_PERM_DEFAULTS[role] || ROLE_PERM_DEFAULTS.viewer;
   $("perm-orders").value = d.orders;
   $("perm-sku-map").value = d.sku_map;
   $("perm-ship-to").value = d.ship_to;
+  if ($("perm-delivery")) $("perm-delivery").value = d.delivery;
 }
 function myChannels() {
-  if (canAdmin()) return CHANNELS.map((c) => c.id);
-  const raw = me.channels || ["blinkit"];
+  const raw = (me.channels || ["blinkit"]).map((c) => String(c).toLowerCase());
   return CHANNELS.map((c) => c.id).filter((id) => raw.includes(id));
 }
 function q(path) {
@@ -555,7 +583,7 @@ function sapPostResponse(raw) {
 function formatSapLive(live) {
   if (!live) return "";
   return `<div class="sap-box">
-    <p class="eyebrow">SAP live (HANA)</p>
+    <p class="eyebrow">SAP</p>
     <p><b>DocNum</b> ${esc(live.DocNum ?? "—")} · <b>DocEntry</b> ${esc(live.DocEntry ?? "—")}</p>
     <p><b>Status</b> ${esc(soStatusLabel(live.DocumentStatus))} · <b>Doc due</b> ${esc(live.DocDueDate || "—")} · <b>Date</b> ${esc(live.DocDate || "—")} · <b>Value</b> ${esc(money(live.DocTotal))}</p>
     <pre>${esc(JSON.stringify(live, null, 2))}</pre>
@@ -881,7 +909,8 @@ function updateFetchButton() {
   const meta = CHANNELS.find((c) => c.id === currentChannel);
   const btn = $("fetch-btn");
   if (!btn) return;
-  btn.classList.toggle("hidden", !channelCanFetch());
+  const show = Boolean(currentChannel) && channelCanFetch();
+  btn.classList.toggle("hidden", !show);
   btn.textContent = meta ? `↻ Fetch ${meta.label}` : "↻ Fetch";
   btn.title = meta ? `Fetch ${meta.label} mailbox` : "Fetch mailbox";
 }
@@ -894,6 +923,8 @@ function navCountHtml(ch, key) {
 
 function renderNav() {
   const allowed = myChannels();
+  const channelsLabel = $("channels-nav-label");
+  if (channelsLabel) channelsLabel.classList.toggle("hidden", !allowed.length);
   $("channel-nav").innerHTML = CHANNELS.filter((c) => allowed.includes(c.id)).map((c) => `
     <div class="ch-block ${currentChannel === c.id ? "open" : ""}" data-ch="${c.id}">
       <button class="ch-head ${currentChannel === c.id ? "open" : ""}" type="button" data-ch-toggle="${c.id}">
@@ -908,6 +939,7 @@ function renderNav() {
       </div>
     </div>
   `).join("");
+  if (typeof renderLogisticsNav === "function") renderLogisticsNav();
   document.querySelectorAll("[data-view]").forEach((b) => {
     b.classList.toggle("active", b.dataset.view === currentView && (b.dataset.ch ? b.dataset.ch === currentChannel : true));
   });
@@ -956,9 +988,11 @@ function setChannel(id) {
 function setView(name) {
   currentView = name;
   document.querySelectorAll(".view").forEach((v) => v.classList.add("hidden"));
-  $(`view-${name}`).classList.remove("hidden");
-  $("page-kicker").textContent = TITLES[name][0];
-  $("page-title").textContent = TITLES[name][1];
+  const el = $(`view-${name}`);
+  if (el) el.classList.remove("hidden");
+  const titles = TITLES[name] || ["Khanal", ""];
+  $("page-kicker").textContent = titles[0];
+  $("page-title").textContent = titles[1];
   $("sidebar").classList.remove("open");
   renderNav();
 }
@@ -1562,33 +1596,107 @@ async function refreshInbox() {
 }
 
 async function refreshNotices() {
-  if (!channelLive()) {
-    $("notice-stack").innerHTML = "";
-    $("bell-count").classList.add("hidden");
-    $("bell-panel").innerHTML = "<p class=\"bell-empty\">No alerts</p>";
-    return;
+  const marketplace = myChannels().filter((id) => CHANNELS.find((c) => c.id === id)?.live);
+  const showB2b = canViewOrders() && marketplace.length > 0;
+  const showDelivery = typeof canViewDelivery === "function" && canViewDelivery();
+
+  let b2bItems = [];
+  if (showB2b) {
+    try {
+      const qs = new URLSearchParams({ unread: "true", channels: marketplace.join(",") });
+      const data = await api(`/v1/b2b/notifications?${qs}`);
+      b2bItems = (data.items || []).filter((n) => n.kind === "error").slice(0, 12);
+    } catch (_) {
+      b2bItems = [];
+    }
   }
-  const data = await api(`${q("/v1/b2b/notifications")}&unread=true`);
-  const items = (data.items || []).filter((n) => n.kind === "error").slice(0, 8);
-  $("nav-alerts").textContent = items.length ? `${items.length} error${items.length === 1 ? "" : "s"}` : "";
-  $("bell-count").textContent = items.length ? String(items.length) : "";
-  $("bell-count").classList.toggle("hidden", !items.length);
-  $("bell-panel").innerHTML = items.length ? items.map((n) => `<div class="bell-item is-error" data-po="${esc(n.po_number || "")}" data-nid="${esc(n.id || "")}">
+
+  let deliveryItems = [];
+  if (showDelivery && typeof deliveryApi === "function") {
+    try {
+      const alerts = await deliveryApi("/v1/delivery/alerts?limit=8");
+      deliveryItems = alerts.alerts || [];
+    } catch (_) {
+      deliveryItems = [];
+    }
+  }
+
+  const total = b2bItems.length + deliveryItems.length;
+  $("nav-alerts").textContent = total ? `${total} alert${total === 1 ? "" : "s"}` : "";
+  $("bell-count").textContent = total ? String(total) : "";
+  $("bell-count").classList.toggle("hidden", !total);
+
+  const parts = [];
+  if (showB2b) {
+    const label = marketplace.length === 1
+      ? (CHANNELS.find((c) => c.id === marketplace[0])?.label || marketplace[0])
+      : "Channels";
+    parts.push(`<p class="bell-section-label">${esc(label)}</p>`);
+    if (b2bItems.length) {
+      parts.push(
+        b2bItems
+          .map((n) => {
+            const ch = esc(n.channel || "");
+            const chLabel = CHANNELS.find((c) => c.id === n.channel)?.label || n.channel || "";
+            return `<div class="bell-item is-error" data-bell="b2b" data-po="${esc(n.po_number || "")}" data-nid="${esc(n.id || "")}" data-channel="${ch}">
     <strong>${esc(n.title || "Could not process mail")}</strong>
+    <p class="bell-meta">${esc(chLabel)}${n.po_number ? ` · ${esc(n.po_number)}` : ""}</p>
     <p class="bell-body">${esc(n.body || "")}</p>
-  </div>`).join("") : "<p class=\"bell-empty\">No new errors</p>";
+  </div>`;
+          })
+          .join("")
+      );
+    } else {
+      parts.push('<p class="bell-empty">No channel errors</p>');
+    }
+  }
+
+  if (showDelivery) {
+    parts.push('<p class="bell-section-label">Logistics</p>');
+    if (deliveryItems.length) {
+      parts.push(
+        deliveryItems
+          .map(
+            (a) => `<div class="bell-item is-error" data-bell="delivery" data-lr="${esc(a.lrnum || "")}">
+    <strong>${esc(a.title || "Logistics")}</strong>
+    <p class="bell-meta">LR ${esc(a.lrnum || "—")}</p>
+    <p class="bell-body">${esc(a.message || "")}</p>
+  </div>`
+          )
+          .join("")
+      );
+    } else {
+      parts.push('<p class="bell-empty">No logistics issues</p>');
+    }
+  }
+
+  if (!showB2b && !showDelivery) {
+    parts.push('<p class="bell-empty">No alerts</p>');
+  }
+
+  $("bell-panel").innerHTML = parts.join("");
   $("notice-stack").innerHTML = "";
 }
 
-async function openAlert(po, nid) {
+async function openAlert(po, nid, channel) {
+  const ch = channel || currentChannel;
   if (nid) {
-    await api("/v1/b2b/notifications/read", { method: "POST", body: JSON.stringify({ id: nid, channel: currentChannel }) });
+    await api("/v1/b2b/notifications/read", { method: "POST", body: JSON.stringify({ id: nid, channel: ch }) });
     await refreshNotices();
-    await refreshInbox();
+    if (typeof refreshInbox === "function" && ch === currentChannel) await refreshInbox();
   }
   if (!po) return;
+  if (ch && myChannels().includes(ch) && ch !== currentChannel) setChannel(ch);
   setView("orders");
   await openPo(po);
+}
+
+async function openDeliveryBellAlert(lr) {
+  if (!lr) return;
+  if (typeof setView === "function") setView("logistics-tracker");
+  if ($("ld-f-lrnum")) $("ld-f-lrnum").value = lr;
+  if (typeof loadLogisticsView === "function") await loadLogisticsView("logistics-tracker");
+  else if (typeof refreshLogisticsTracker === "function") await refreshLogisticsTracker(1);
 }
 
 function pickedChannels() {
@@ -1599,11 +1707,14 @@ async function refreshUsers() {
   const data = await api("/v1/b2b/users");
   const self = (me.email || "").toLowerCase();
   teamUsers = data.items || [];
-  $("user-channel-picks").innerHTML = CHANNELS.map((c) => `<label><input type="checkbox" value="${c.id}" ${c.id === "blinkit" ? "checked" : ""} /> ${c.label}</label>`).join("");
+  $("user-channel-picks").innerHTML = [
+    ...CHANNELS.map((c) => `<label><input type="checkbox" value="${c.id}" ${c.id === "blinkit" ? "checked" : ""} /> ${c.label}</label>`),
+    `<label><input type="checkbox" value="logistics" /> Delivery</label>`,
+  ].join("");
   $("user-body").innerHTML = teamUsers.map((u) => {
     const mine = String(u.email || "").toLowerCase() === self;
     const on = Boolean(u.is_active);
-    const ch = (u.channels || []).join(", ");
+    const ch = (u.channels || []).map((c) => (c === "logistics" ? "Delivery" : c)).join(", ");
     const edit = `<button class="btn ghost" type="button" data-user-act="edit" data-email="${esc(u.email)}">Edit</button>`;
     const toggle = mine ? "" : `<button class="btn ghost" type="button" data-user-act="status" data-email="${esc(u.email)}" data-active="${on ? "0" : "1"}">${on ? "Deactivate" : "Activate"}</button>`;
     const del = mine ? "" : `<button class="btn danger" type="button" data-user-act="delete" data-email="${esc(u.email)}">Delete</button>`;
@@ -1621,6 +1732,7 @@ function fillUserForm(u) {
   $("perm-orders").value = u.perm_orders || "";
   $("perm-sku-map").value = u.perm_sku_map || "";
   $("perm-ship-to").value = u.perm_ship_to || "";
+  if ($("perm-delivery")) $("perm-delivery").value = u.perm_delivery || "";
   const set = new Set(u.channels || []);
   document.querySelectorAll("#user-channel-picks input").forEach((el) => { el.checked = set.has(el.value); });
 }
@@ -1643,6 +1755,7 @@ async function loadView(name) {
   if (name === "maps" && !canViewSkuMap()) { toast("No access to item map", true); return; }
   if (name === "addresses" && !canViewShipTo()) { toast("No access to ship-to", true); return; }
   if (name === "inbox" && !canViewOrders()) { toast("No access to mailbox", true); return; }
+  if (name.startsWith("logistics-") && !canViewDelivery()) { toast("No access to logistics delivery", true); return; }
   setView(name);
   if (name === "home") await refreshHome();
   if (name === "orders") await refreshOrders();
@@ -1651,6 +1764,7 @@ async function loadView(name) {
   if (name === "inbox") await refreshInbox();
   if (name === "users") await refreshUsers();
   if (name === "logs") await refreshLogs();
+  if (name.startsWith("logistics-") && typeof loadLogisticsView === "function") await loadLogisticsView(name);
 }
 
 async function boot() {
@@ -1658,10 +1772,25 @@ async function boot() {
   $("who").innerHTML = `<strong>${esc(me.full_name || me.email)}</strong><small>${esc(me.role || "viewer")}${me.sap_salesperson_code ? " · " + esc(me.sap_salesperson_code) : ""}</small>`;
   document.querySelectorAll("[data-admin]").forEach((el) => el.classList.toggle("hidden", !canAdmin()));
   const allowed = myChannels();
-  currentChannel = allowed.includes("blinkit") ? "blinkit" : (allowed[0] || "blinkit");
-  setChannel(currentChannel);
-  updateFetchButton();
-  const firstView = canViewOrders() ? "home" : canViewSkuMap() ? "maps" : canViewShipTo() ? "addresses" : "home";
+  if (allowed.length) {
+    currentChannel = allowed.includes("blinkit") ? "blinkit" : allowed[0];
+    setChannel(currentChannel);
+  } else {
+    currentChannel = "";
+    const pill = $("channel-pill");
+    if (pill) {
+      pill.className = "chip";
+      pill.textContent = canViewDelivery() ? "Logistics" : "—";
+    }
+    $("channel-soon")?.classList.add("hidden");
+    updateFetchButton();
+    renderNav();
+  }
+  const firstView = canViewOrders() ? "home"
+    : canViewSkuMap() ? "maps"
+    : canViewShipTo() ? "addresses"
+    : canViewDelivery() ? "logistics-home"
+    : "home";
   await loadView(firstView);
   const rest = allowed.filter((id) => id !== currentChannel && CHANNELS.find((c) => c.id === id)?.live);
   rest.forEach((id) => refreshNavCounts(id));
@@ -1862,6 +1991,11 @@ $("channel-nav").addEventListener("click", async (e) => {
 document.querySelectorAll("[data-admin][data-view]").forEach((btn) => {
   btn.addEventListener("click", () => loadView(btn.dataset.view).catch((err) => toast(err.message, true)));
 });
+$("logistics-nav")?.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-view]");
+  if (!btn?.dataset.view?.startsWith("logistics-")) return;
+  loadView(btn.dataset.view).catch((err) => toast(err.message, true));
+});
 $("status-filter").addEventListener("change", () => { resetOrdersPage(); refreshOrders().catch((e) => toast(e.message, true)); });
 $("po-search").addEventListener("change", () => { resetOrdersPage(); refreshOrders().catch((e) => toast(e.message, true)); });
 $("sap-docnum-filter")?.addEventListener("change", () => { resetOrdersPage(); refreshOrders().catch((e) => toast(e.message, true)); });
@@ -2050,10 +2184,16 @@ $("bell-btn").addEventListener("click", (e) => {
   $("bell-panel").classList.toggle("hidden");
 });
 $("bell-panel").addEventListener("click", (e) => {
-  const item = e.target.closest("[data-po]");
+  const delivery = e.target.closest("[data-bell='delivery']");
+  if (delivery) {
+    $("bell-panel").classList.add("hidden");
+    openDeliveryBellAlert(delivery.dataset.lr).catch((err) => toast(err.message, true));
+    return;
+  }
+  const item = e.target.closest("[data-bell='b2b']");
   if (!item) return;
   $("bell-panel").classList.add("hidden");
-  openAlert(item.dataset.po, item.dataset.nid).catch((err) => toast(err.message, true));
+  openAlert(item.dataset.po, item.dataset.nid, item.dataset.channel).catch((err) => toast(err.message, true));
 });
 $("theme-btn")?.addEventListener("click", (e) => {
   e.stopPropagation();
@@ -2350,14 +2490,48 @@ $("user-save").addEventListener("click", async () => {
   try {
     await withBusy($("user-save"), async () => {
       const password = $("user-password").value;
+      const channels = pickedChannels();
+      if (!channels.length) {
+        toast("Pick at least one channel (or Delivery)", true);
+        return;
+      }
+      let role = $("user-role").value;
+      const onlyDelivery = channels.length === 1 && channels[0] === "logistics";
+      // Admin always has Team + full access — Delivery-only must be reviewer/viewer.
+      if (onlyDelivery && role === "admin") {
+        role = "reviewer";
+        $("user-role").value = role;
+        applyRolePermDefaults(role);
+      }
+      let perm_orders = $("perm-orders").value;
+      let perm_sku_map = $("perm-sku-map").value;
+      let perm_ship_to = $("perm-ship-to").value;
+      let perm_delivery = $("perm-delivery")?.value || "";
+      if (!channels.includes("logistics")) {
+        perm_delivery = "none";
+      } else if (!perm_delivery || perm_delivery === "none") {
+        // Delivery checkbox is the assign switch — grant edit unless a higher level is set.
+        perm_delivery = "edit";
+        if ($("perm-delivery")) $("perm-delivery").value = "edit";
+      }
+      if (onlyDelivery) {
+        perm_orders = "none";
+        perm_sku_map = "none";
+        perm_ship_to = "none";
+        $("perm-orders").value = "none";
+        $("perm-sku-map").value = "none";
+        $("perm-ship-to").value = "none";
+      }
       await api("/v1/b2b/users", { method: "PUT", body: JSON.stringify({
         email: $("user-email").value.trim(), full_name: $("user-name").value.trim(),
-        role: $("user-role").value, sap_salesperson_code: $("user-slp").value.trim(),
-        is_active: true, password, channels: pickedChannels(),
-        perm_orders: $("perm-orders").value, perm_sku_map: $("perm-sku-map").value, perm_ship_to: $("perm-ship-to").value,
+        role, sap_salesperson_code: $("user-slp").value.trim(),
+        is_active: true, password, channels,
+        perm_orders, perm_sku_map, perm_ship_to, perm_delivery,
       }) });
       $("user-password").value = "";
-      toast("User saved — they can sign in with that email and password");
+      toast(onlyDelivery
+        ? "Saved as Delivery-only (reviewer) — Logistics sidebar only"
+        : "User saved — they can sign in with that email and password");
       await refreshUsers();
     });
   } catch (e) { toast(e.message, true); }

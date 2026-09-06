@@ -12,7 +12,8 @@ from psycopg.rows import dict_row
 import permissions
 
 CHANNEL_BLINKIT = "blinkit"
-ALL_CHANNELS = ["blinkit", "zepto", "instamart", "bigbasket", "more"]
+CHANNEL_LOGISTICS = "logistics"
+ALL_CHANNELS = ["blinkit", "zepto", "instamart", "bigbasket", "more", CHANNEL_LOGISTICS]
 FETCH_CHANNELS = ["blinkit", "zepto", "instamart", "bigbasket"]
 STATUS_PARSED = "parsed"
 STATUS_NEEDS_REVIEW = "needs_review"
@@ -59,6 +60,9 @@ def _ensure_user_channels(conn: psycopg.Connection) -> None:
         cur.execute(
             "ALTER TABLE b2b.users ADD COLUMN IF NOT EXISTS perm_ship_to text NOT NULL DEFAULT ''"
         )
+        cur.execute(
+            "ALTER TABLE b2b.users ADD COLUMN IF NOT EXISTS perm_delivery text NOT NULL DEFAULT ''"
+        )
     conn.commit()
 
 
@@ -99,11 +103,12 @@ def _ensure_po_columns(conn: psycopg.Connection) -> None:
 
 
 def _normalize_channels(raw: Any, role: str = "") -> list[str]:
-    if str(role or "") == "admin":
-        return list(ALL_CHANNELS)
+    """Keep assigned channels as selected (including logistics-only). Role is unused."""
+    _ = role
     values = [str(c).strip().lower() for c in (raw or []) if str(c).strip()]
     out = [c for c in values if c in ALL_CHANNELS]
-    return out or [CHANNEL_BLINKIT]
+    # Empty assignment → blinkit; logistics alone is a valid Delivery-only user.
+    return out if out else [CHANNEL_BLINKIT]
 
 
 def already_processed(conn: psycopg.Connection, channel: str, email_uid: str) -> bool:
@@ -799,17 +804,35 @@ def list_posted_for_sync(conn: psycopg.Connection, *, channel: str = CHANNEL_BLI
         return [dict(r) for r in cur.fetchall()]
 
 
-def list_notifications(conn: psycopg.Connection, *, unread_only: bool = False, limit: int = 50, channel: str = CHANNEL_BLINKIT) -> list[dict[str, Any]]:
+def list_notifications(
+    conn: psycopg.Connection,
+    *,
+    unread_only: bool = False,
+    limit: int = 50,
+    channel: str = CHANNEL_BLINKIT,
+    channels: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    chans = [str(c).strip().lower() for c in (channels or []) if str(c).strip()]
+    if not chans:
+        chans = [str(channel or CHANNEL_BLINKIT).strip().lower() or CHANNEL_BLINKIT]
     with conn.cursor(row_factory=dict_row) as cur:
         if unread_only:
             cur.execute(
-                "SELECT * FROM b2b.notifications WHERE channel = %s AND is_read = false ORDER BY created_at DESC LIMIT %s",
-                (channel, limit),
+                """
+                SELECT * FROM b2b.notifications
+                WHERE channel = ANY(%s) AND is_read = false
+                ORDER BY created_at DESC LIMIT %s
+                """,
+                (chans, limit),
             )
         else:
             cur.execute(
-                "SELECT * FROM b2b.notifications WHERE channel = %s ORDER BY created_at DESC LIMIT %s",
-                (channel, limit),
+                """
+                SELECT * FROM b2b.notifications
+                WHERE channel = ANY(%s)
+                ORDER BY created_at DESC LIMIT %s
+                """,
+                (chans, limit),
             )
         return _dedupe_notifications([dict(r) for r in cur.fetchall()])
 
@@ -873,6 +896,7 @@ def get_user_by_email(conn: psycopg.Connection, email: str) -> dict[str, Any] | 
                    COALESCE(u.perm_orders, '') AS perm_orders,
                    COALESCE(u.perm_sku_map, '') AS perm_sku_map,
                    COALESCE(u.perm_ship_to, '') AS perm_ship_to,
+                   COALESCE(u.perm_delivery, '') AS perm_delivery,
                    r.can_approve, r.can_post_sap, r.can_manage_users
             FROM b2b.users u
             JOIN b2b.roles r ON r.role = u.role
@@ -897,6 +921,7 @@ def list_users(conn: psycopg.Connection) -> list[dict[str, Any]]:
                    COALESCE(u.perm_orders, '') AS perm_orders,
                    COALESCE(u.perm_sku_map, '') AS perm_sku_map,
                    COALESCE(u.perm_ship_to, '') AS perm_ship_to,
+                   COALESCE(u.perm_delivery, '') AS perm_delivery,
                    r.can_approve, r.can_post_sap, r.can_manage_users
             FROM b2b.users u
             JOIN b2b.roles r ON r.role = u.role
@@ -923,14 +948,15 @@ def upsert_user(
     perm_orders: str = "",
     perm_sku_map: str = "",
     perm_ship_to: str = "",
+    perm_delivery: str = "",
 ) -> None:
     assigned = _normalize_channels(channels, role)
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO b2b.users (email, full_name, role, sap_salesperson_code, is_active, channels,
-              perm_orders, perm_sku_map, perm_ship_to, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+              perm_orders, perm_sku_map, perm_ship_to, perm_delivery, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
             ON CONFLICT (email) DO UPDATE SET
               full_name = EXCLUDED.full_name,
               role = EXCLUDED.role,
@@ -940,6 +966,7 @@ def upsert_user(
               perm_orders = EXCLUDED.perm_orders,
               perm_sku_map = EXCLUDED.perm_sku_map,
               perm_ship_to = EXCLUDED.perm_ship_to,
+              perm_delivery = EXCLUDED.perm_delivery,
               updated_at = now()
             """,
             (
@@ -952,6 +979,7 @@ def upsert_user(
                 permissions.normalize_level(perm_orders),
                 permissions.normalize_level(perm_sku_map),
                 permissions.normalize_level(perm_ship_to),
+                permissions.normalize_level(perm_delivery),
             ),
         )
 
