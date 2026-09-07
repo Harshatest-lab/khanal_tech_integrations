@@ -67,6 +67,7 @@ provider:
             - lambda:InvokeFunction
           Resource:
             - arn:aws:lambda:${self:provider.region}:*:function:${self:service}-${self:provider.stage}-b2bFetch
+            - arn:aws:lambda:${self:provider.region}:*:function:${self:service}-${self:provider.stage}-b2bSapPost
         - Effect: Allow
           Action:
             - cognito-idp:AdminCreateUser
@@ -237,12 +238,20 @@ functions:
             channel: bigbasket
             trigger: schedule
 
+  # Background SAP create/update/cancel (API Gateway ~30s is too short for Service Layer).
+  b2bSapPost:
+    handler: src.handlers.sap_post_handler
+    memorySize: 512
+    timeout: 300
+    layers: [{ Ref: SharedLambdaLayer }]
+
   b2bDashboardApi:
     handler: src.handlers.dashboard_handler
     memorySize: 512
     timeout: 29
     environment:
       B2B_FETCH_FUNCTION_NAME: ${self:service}-${self:provider.stage}-b2bFetch
+      B2B_SAP_POST_FUNCTION_NAME: ${self:service}-${self:provider.stage}-b2bSapPost
     layers: [{ Ref: SharedLambdaLayer }]
     events:
       - httpApi: { path: /v1/b2b/me, method: get, authorizer: { name: dashboardCognitoJwt } }

@@ -71,6 +71,10 @@ Lambda **`b2bFetch`** (`b2b-so-<stage>-b2bFetch`) runs IMAP intake on a schedule
 
 Each run passes `{"channel": "...", "trigger": "schedule"}`. Manual dashboard Fetch still works the same way.
 
+## SAP post (Approve)
+
+Approve / Update SAP / Cancel SAP are **async**: the HTTP API validates and returns `202`, then **`b2bSapPost`** (5 min timeout) talks to Service Layer. The dashboard polls until the PO is posted or `sap_status` shows a failure. This avoids API Gateway’s ~30s cut-off (`{"message":"Internal Server Error"}`).
+
 No `/b2b/blinkit/customer` param.
 
 Also: `DATABASE_URL`, SES from/to emails, seed SKU + ship-to maps.

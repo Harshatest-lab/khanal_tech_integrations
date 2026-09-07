@@ -100,6 +100,61 @@ def _invoke_fetch(payload: dict[str, Any]) -> dict[str, Any]:
     return {"accepted": True, **body}
 
 
+def _invoke_sap_post(payload: dict[str, Any]) -> dict[str, Any]:
+    """Hand off SAP create/update/cancel to b2bSapPost (avoids API Gateway 30s cut-off)."""
+    name = (os.environ.get("B2B_SAP_POST_FUNCTION_NAME") or "").strip()
+    if not name:
+        raise RuntimeError("B2B_SAP_POST_FUNCTION_NAME is not configured")
+    body = {"trigger": "async", **payload}
+    _lambda_client().invoke(
+        FunctionName=name,
+        InvocationType="Event",
+        Payload=json.dumps(body, default=str),
+    )
+    return {
+        "accepted": True,
+        "status": "posting",
+        "message": "Posting to SAP — this can take up to a few minutes. Keep this page open.",
+        "po_number": body.get("po_number"),
+        "channel": body.get("channel"),
+        "action": body.get("action"),
+    }
+
+
+def _mark_sap_posting(conn, po: str, channel: str, pipeline_status: str) -> None:
+    store.set_po_status(
+        conn,
+        po,
+        pipeline_status,
+        channel=channel,
+        sap_status="POSTING",
+        last_error="",
+        sap_response={"status": "posting", "message": "SAP post in progress"},
+    )
+    conn.commit()
+
+
+def _clear_stuck_posting(conn, po: str, channel: str, message: str) -> None:
+    detail = store.get_po(conn, po, channel=channel)
+    if not detail:
+        return
+    header = detail["header"]
+    if str(header.get("sap_status") or "").upper() != "POSTING":
+        return
+    pipe = str(header.get("pipeline_status") or store.STATUS_READY)
+    sap_status = "POST FAILED" if pipe != store.STATUS_POSTED else "SENT TO SAP"
+    store.set_po_status(
+        conn,
+        po,
+        pipe,
+        channel=channel,
+        sap_status=sap_status,
+        last_error=message,
+        sap_response={"status": "error", "message": message},
+    )
+    conn.commit()
+
+
 def fetch_handler(event, context):
     ev = event or {}
     channel = str(ev.get("channel") or store.CHANNEL_BLINKIT).strip().lower()
@@ -107,6 +162,72 @@ def fetch_handler(event, context):
         f"{channel}_fetch",
         lambda: blinkit.run_fetch(channel=channel, max_messages=ev.get("max_messages")),
     )
+
+
+def sap_post_handler(event, context):
+    """Background SAP Operations (approve/create, update, cancel)."""
+    ev = event or {}
+    action = str(ev.get("action") or "approve").strip().lower()
+    po = str(ev.get("po_number") or "").strip()
+    ch = str(ev.get("channel") or store.CHANNEL_BLINKIT).strip().lower()
+    actor = str(ev.get("actor") or "").strip()
+    code = str(ev.get("salesperson_code") or "").strip()
+
+    def work():
+        with store.connect() as conn:
+            try:
+                if action in ("approve", "post"):
+                    result = b2b_sappost.post_purchase_order(
+                        conn, po, actor=actor, salesperson_code=code, channel=ch
+                    )
+                    if result.get("status") == "success":
+                        store.add_audit(
+                            conn,
+                            actor=actor,
+                            action="approve_post",
+                            po_number=po,
+                            channel=ch,
+                            detail=str(result.get("docentry") or ""),
+                        )
+                        conn.commit()
+                    else:
+                        _clear_stuck_posting(
+                            conn, po, ch, str(result.get("message") or result.get("last_error") or "SAP post failed")
+                        )
+                    return result
+                if action == "update":
+                    result = b2b_sappost.update_posted_order(
+                        conn, po, actor=actor, salesperson_code=code, channel=ch
+                    )
+                    if result.get("status") == "success":
+                        try:
+                            sap_hana_sync.sync_po_from_hana(conn, po, channel=ch)
+                            conn.commit()
+                        except Exception:
+                            logger.warning("HANA sync after SAP update skipped for %s", po, exc_info=True)
+                    else:
+                        _clear_stuck_posting(
+                            conn, po, ch, str(result.get("message") or result.get("last_error") or "SAP update failed")
+                        )
+                    return result
+                if action == "cancel":
+                    result = b2b_sappost.cancel_posted_order(conn, po, actor=actor, channel=ch)
+                    if result.get("status") != "success":
+                        _clear_stuck_posting(
+                            conn, po, ch, str(result.get("message") or result.get("last_error") or "SAP cancel failed")
+                        )
+                    return result
+                raise ValueError(f"Unknown SAP action: {action}")
+            except Exception as exc:
+                msg = _scrub(str(exc))
+                detail = store.get_po(conn, po, channel=ch)
+                if detail and action in ("approve", "post"):
+                    b2b_sappost._record_post_failure(conn, po, detail["header"], msg, actor, channel=ch)
+                else:
+                    _clear_stuck_posting(conn, po, ch, msg)
+                raise
+
+    return _run(f"sap_{action}_{ch}_{po}", work)
 
 
 def _json(status: int, body: Any) -> dict[str, Any]:
@@ -342,11 +463,14 @@ def dashboard_handler(event, context):
                     return _json(400, {
                         "error": f"PO is not ready for posting (status={header.get('pipeline_status')}). Click Refetch first.",
                     })
+                # Block validation errors; allow retry after a prior SAP post failure / in-flight POSTING.
                 if (header.get("last_error") or "").strip():
-                    return _json(400, {
-                        "error": "Still blocked. Update maps, then click Refetch. " + header["last_error"],
-                        "last_error": header["last_error"],
-                    })
+                    sap_st = str(header.get("sap_status") or "").upper()
+                    if "FAIL" not in sap_st and sap_st != "POSTING":
+                        return _json(400, {
+                            "error": "Still blocked. Update maps, then click Refetch. " + header["last_error"],
+                            "last_error": header["last_error"],
+                        })
                 tax_gaps = blinkit.tax_code_gap_sap_codes(detail["lines"], header=header)
                 if tax_gaps:
                     return _json(400, {
@@ -355,18 +479,23 @@ def dashboard_handler(event, context):
                         + ". Click Refetch first.",
                         "last_error": header.get("last_error") or "",
                     })
+                _mark_sap_posting(conn, po, ch, str(header.get("pipeline_status") or store.STATUS_READY))
                 try:
-                    post_result = b2b_sappost.post_purchase_order(conn, po, actor=actor, salesperson_code=code, channel=ch)
+                    return _json(
+                        202,
+                        _invoke_sap_post(
+                            {
+                                "action": "approve",
+                                "po_number": po,
+                                "channel": ch,
+                                "actor": actor,
+                                "salesperson_code": code,
+                            }
+                        ),
+                    )
                 except Exception as exc:
-                    logger.exception("approve/post-sap failed for %s", po)
-                    msg = _scrub(str(exc))
-                    detail = store.get_po(conn, po, channel=ch)
-                    if detail:
-                        b2b_sappost._record_post_failure(conn, po, detail["header"], msg, actor)
-                    return _json(200, {"status": "error", "message": msg, "last_error": msg})
-                if post_result.get("status") == "success":
-                    store.add_audit(conn, actor=actor, action="approve_post", po_number=po, channel=ch, detail=str(post_result.get("docentry") or ""))
-                return _json(200, post_result)
+                    _clear_stuck_posting(conn, po, ch, _scrub(str(exc)))
+                    raise
             if path.endswith("/v1/b2b/reject") and method == "POST":
                 if deny := _deny_perm(profile, permissions.RESOURCE_ORDERS, permissions.PERM_EDIT):
                     return deny
@@ -398,16 +527,28 @@ def dashboard_handler(event, context):
                     if detail:
                         b2b_sappost._record_post_failure(conn, po, detail["header"], msg, actor, channel=ch)
                     return _json(200, {"status": "error", "message": msg, "last_error": msg})
+                detail = store.get_po(conn, po, channel=ch) if po else None
+                if not detail:
+                    return _json(404, {"error": "PO not found", "po_number": po})
+                _mark_sap_posting(
+                    conn, po, ch, str(detail["header"].get("pipeline_status") or store.STATUS_READY)
+                )
                 try:
-                    result = b2b_sappost.post_purchase_order(conn, po, actor=actor, salesperson_code=code, channel=ch)
+                    return _json(
+                        202,
+                        _invoke_sap_post(
+                            {
+                                "action": "post",
+                                "po_number": po,
+                                "channel": ch,
+                                "actor": actor,
+                                "salesperson_code": code,
+                            }
+                        ),
+                    )
                 except Exception as exc:
-                    logger.exception("post-sap failed for %s", po)
-                    msg = _scrub(str(exc))
-                    detail = store.get_po(conn, po, channel=ch) if po else None
-                    if detail:
-                        b2b_sappost._record_post_failure(conn, po, detail["header"], msg, actor, channel=ch)
-                    return _json(200, {"status": "error", "message": msg, "last_error": msg})
-                return _json(200, result)
+                    _clear_stuck_posting(conn, po, ch, _scrub(str(exc)))
+                    raise
             if path.endswith("/v1/b2b/update-sap") and method == "POST":
                 if deny := _deny_perm(profile, permissions.RESOURCE_ORDERS, permissions.PERM_EDIT):
                     return deny
@@ -419,13 +560,28 @@ def dashboard_handler(event, context):
                 code = (profile.get("sap_salesperson_code") or "").strip()
                 if not code:
                     return _json(400, {"error": "Your user has no SAP salesperson code. Ask admin to set it."})
-                result = b2b_sappost.update_posted_order(conn, po, actor=actor, salesperson_code=code, channel=ch)
-                if result.get("status") == "success":
-                    try:
-                        sap_hana_sync.sync_po_from_hana(conn, po, channel=ch)
-                    except Exception:
-                        logger.warning("HANA sync after SAP update skipped for %s", po, exc_info=True)
-                return _json(200, result)
+                detail = store.get_po(conn, po, channel=ch)
+                if not detail:
+                    return _json(404, {"error": "PO not found", "po_number": po})
+                _mark_sap_posting(
+                    conn, po, ch, str(detail["header"].get("pipeline_status") or store.STATUS_POSTED)
+                )
+                try:
+                    return _json(
+                        202,
+                        _invoke_sap_post(
+                            {
+                                "action": "update",
+                                "po_number": po,
+                                "channel": ch,
+                                "actor": actor,
+                                "salesperson_code": code,
+                            }
+                        ),
+                    )
+                except Exception as exc:
+                    _clear_stuck_posting(conn, po, ch, _scrub(str(exc)))
+                    raise
             if path.endswith("/v1/b2b/cancel-sap") and method == "POST":
                 if deny := _deny_perm(profile, permissions.RESOURCE_ORDERS, permissions.PERM_EDIT):
                     return deny
@@ -434,8 +590,28 @@ def dashboard_handler(event, context):
                 body = _body(event)
                 po = (body.get("po_number") or q.get("po_number") or "").strip()
                 ch = str(body.get("channel") or q.get("channel") or store.CHANNEL_BLINKIT)
-                result = b2b_sappost.cancel_posted_order(conn, po, actor=actor, channel=ch)
-                return _json(200, result)
+                detail = store.get_po(conn, po, channel=ch)
+                if not detail:
+                    return _json(404, {"error": "PO not found", "po_number": po})
+                _mark_sap_posting(
+                    conn, po, ch, str(detail["header"].get("pipeline_status") or store.STATUS_POSTED)
+                )
+                try:
+                    return _json(
+                        202,
+                        _invoke_sap_post(
+                            {
+                                "action": "cancel",
+                                "po_number": po,
+                                "channel": ch,
+                                "actor": actor,
+                                "salesperson_code": (profile.get("sap_salesperson_code") or "").strip(),
+                            }
+                        ),
+                    )
+                except Exception as exc:
+                    _clear_stuck_posting(conn, po, ch, _scrub(str(exc)))
+                    raise
             if path.endswith("/v1/b2b/users") and method == "GET":
                 if not profile.get("can_manage_users"):
                     return _json(403, {"error": "Not allowed for your role"})

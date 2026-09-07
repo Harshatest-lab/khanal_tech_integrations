@@ -959,7 +959,13 @@ html[data-theme="light"] .inbox-item.unread { background: #fef2f2; }
 html[data-theme="light"] .inbox-item.error.unread strong { color: #991b1b; }
 html[data-theme="light"] .inbox-item.error.unread div { color: #b91c1c; }
 .toast {
-  margin: 0 16px;
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 100;
+  max-width: min(520px, calc(100vw - 32px));
+  margin: 0;
   padding: 10px 14px;
   border-radius: 10px;
   font-size: 13px;
@@ -968,7 +974,7 @@ html[data-theme="light"] .inbox-item.error.unread div { color: #b91c1c; }
   background: #dbeafe;
   color: #1e3a8a;
   border: 1px solid #93c5fd;
-  box-shadow: 0 2px 8px rgba(15, 23, 42, .08);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, .18);
 }
 .toast.bad {
   background: #fee2e2;
@@ -1191,6 +1197,7 @@ html[data-theme="light"] .map-search input[type="search"] {
 }
 .status.s-needs_review, .status.s-failed { background: rgba(227,26,26,.2); color: #fc8181; }
 .status.s-ready, .status.s-approved, .status.s-pending_approval { background: rgba(255,181,71,.18); color: #fbd38d; }
+.status.s-posting { background: rgba(0, 117, 255, .2); color: #93c5fd; }
 .status.s-rejected { background: rgba(160,174,192,.18); color: #cbd5e0; }
 .status.s-cancelled { background: rgba(113,128,150,.22); color: #a0aec0; }
 .status.s-posted_open { background: rgba(1,181,116,.18); color: #9ae6b4; }
