@@ -66,7 +66,7 @@ provider:
           Action:
             - lambda:InvokeFunction
           Resource:
-            - arn:aws:lambda:${self:provider.region}:*:function:${self:service}-${self:provider.stage}-b2bBlinkitFetch
+            - arn:aws:lambda:${self:provider.region}:*:function:${self:service}-${self:provider.stage}-b2bFetch
         - Effect: Allow
           Action:
             - cognito-idp:AdminCreateUser
@@ -129,22 +129,120 @@ package:
     - "!**/*.pyc"
 
 functions:
-  b2bBlinkitFetch:
+  # Channel-agnostic IMAP fetch (Blinkit / Zepto / Instamart / Bigbasket).
+  # Scheduled 3×/day IST; dashboard Fetch also invokes this with {"channel": "..."}.
+  b2bFetch:
     handler: src.handlers.fetch_handler
     memorySize: 512
     timeout: 300
     layers: [{ Ref: SharedLambdaLayer }]
     events:
+      # 10:00 IST — all fetch channels
       - schedule:
-          rate: rate(5 minutes)
-          enabled: false
+          method: scheduler
+          rate: cron(0 10 * * ? *)
+          timezone: Asia/Kolkata
+          enabled: true
+          input:
+            channel: blinkit
+            trigger: schedule
+      - schedule:
+          method: scheduler
+          rate: cron(0 10 * * ? *)
+          timezone: Asia/Kolkata
+          enabled: true
+          input:
+            channel: zepto
+            trigger: schedule
+      - schedule:
+          method: scheduler
+          rate: cron(0 10 * * ? *)
+          timezone: Asia/Kolkata
+          enabled: true
+          input:
+            channel: instamart
+            trigger: schedule
+      - schedule:
+          method: scheduler
+          rate: cron(0 10 * * ? *)
+          timezone: Asia/Kolkata
+          enabled: true
+          input:
+            channel: bigbasket
+            trigger: schedule
+      # 12:00 IST — all fetch channels
+      - schedule:
+          method: scheduler
+          rate: cron(0 12 * * ? *)
+          timezone: Asia/Kolkata
+          enabled: true
+          input:
+            channel: blinkit
+            trigger: schedule
+      - schedule:
+          method: scheduler
+          rate: cron(0 12 * * ? *)
+          timezone: Asia/Kolkata
+          enabled: true
+          input:
+            channel: zepto
+            trigger: schedule
+      - schedule:
+          method: scheduler
+          rate: cron(0 12 * * ? *)
+          timezone: Asia/Kolkata
+          enabled: true
+          input:
+            channel: instamart
+            trigger: schedule
+      - schedule:
+          method: scheduler
+          rate: cron(0 12 * * ? *)
+          timezone: Asia/Kolkata
+          enabled: true
+          input:
+            channel: bigbasket
+            trigger: schedule
+      # 16:30 IST — all fetch channels
+      - schedule:
+          method: scheduler
+          rate: cron(30 16 * * ? *)
+          timezone: Asia/Kolkata
+          enabled: true
+          input:
+            channel: blinkit
+            trigger: schedule
+      - schedule:
+          method: scheduler
+          rate: cron(30 16 * * ? *)
+          timezone: Asia/Kolkata
+          enabled: true
+          input:
+            channel: zepto
+            trigger: schedule
+      - schedule:
+          method: scheduler
+          rate: cron(30 16 * * ? *)
+          timezone: Asia/Kolkata
+          enabled: true
+          input:
+            channel: instamart
+            trigger: schedule
+      - schedule:
+          method: scheduler
+          rate: cron(30 16 * * ? *)
+          timezone: Asia/Kolkata
+          enabled: true
+          input:
+            channel: bigbasket
+            trigger: schedule
 
   b2bDashboardApi:
     handler: src.handlers.dashboard_handler
     memorySize: 512
     timeout: 29
     environment:
-      B2B_FETCH_FUNCTION_NAME: ${self:service}-${self:provider.stage}-b2bBlinkitFetch
+      B2B_FETCH_FUNCTION_NAME: ${self:service}-${self:provider.stage}-b2bFetch
     layers: [{ Ref: SharedLambdaLayer }]
     events:
       - httpApi: { path: /v1/b2b/me, method: get, authorizer: { name: dashboardCognitoJwt } }
