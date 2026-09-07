@@ -186,8 +186,65 @@ function toast(msg, bad) {
   el.textContent = msg;
   el.classList.toggle("bad", Boolean(bad));
   el.classList.remove("hidden");
-  setTimeout(() => el.classList.add("hidden"), 4000);
+  clearTimeout(toast._hide);
+  toast._hide = setTimeout(() => el.classList.add("hidden"), bad ? 8000 : 4500);
 }
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isSapPosting(r) {
+  return String(r?.sap_status || "").toUpperCase() === "POSTING";
+}
+
+async function waitForSapPost(po, { action = "approve" } = {}) {
+  const started = Date.now();
+  const hardMs = 5 * 60 * 1000;
+  const verb = action === "cancel" ? "Cancelling" : action === "update" ? "Updating" : "Posting";
+  toast(`${verb} in SAP — please wait…`);
+  while (Date.now() - started < hardMs) {
+    await sleep(2500);
+    let data;
+    try {
+      data = await api(`/v1/b2b/order-detail?po_number=${encodeURIComponent(po)}&channel=${encodeURIComponent(currentChannel)}`);
+    } catch (_) {
+      continue;
+    }
+    const h = data.header || {};
+    const sap = String(h.sap_status || "").toUpperCase();
+    if (action === "cancel" && h.pipeline_status === "cancelled") {
+      toast(h.message || "SAP order cancelled");
+      try { await openPo(po); } catch (_) {}
+      await refreshOrders();
+      await refreshHome();
+      return h;
+    }
+    if (action !== "cancel" && h.pipeline_status === "posted" && sap !== "POSTING") {
+      const msg = h.sap_docnum
+        ? `Posted to SAP · DocNum ${h.sap_docnum}`
+        : (h.message || "Posted to SAP");
+      toast(action === "update" ? (h.message || "SAP order updated") : msg);
+      try { await openPo(po); } catch (_) {}
+      await refreshOrders();
+      await refreshHome();
+      await refreshNotices();
+      return h;
+    }
+    if (sap.includes("FAIL") || (h.last_error && sap !== "POSTING")) {
+      const err = h.last_error || "SAP operation failed";
+      toast(err, true);
+      try { await openPo(po); } catch (_) {}
+      await refreshOrders();
+      throw new Error(err);
+    }
+  }
+  const timed = "SAP is still working — refresh this PO in a minute. If it stays on Posting, click Approve again.";
+  toast(timed, true);
+  try { await openPo(po); } catch (_) {}
+  throw new Error(timed);
+}
+
 
 let confirmResolve = null;
 
@@ -455,7 +512,13 @@ async function api(path, opts = {}) {
   const res = await fetch(`${API_BASE}${path}`, { ...opts, headers: { ...hdrs(), ...(opts.headers || {}) } });
   const body = await res.json().catch(() => ({}));
   if (res.status === 401) { clearAuth(); showLogin(); throw new Error("Session expired"); }
-  if (!res.ok) throw new Error(body.error || body.message || `${res.status} ${res.statusText || "request failed"}`);
+  if (!res.ok) {
+    const raw = body.error || body.message || `${res.status} ${res.statusText || "request failed"}`;
+    const msg = /internal server error/i.test(String(raw))
+      ? "Server error while talking to SAP (often a timeout). Try again — if it keeps failing, check CloudWatch logs."
+      : raw;
+    throw new Error(msg);
+  }
   return body;
 }
 
@@ -490,6 +553,7 @@ function statusLabel(s) {
     rejected: "Rejected",
     cancelled: "Cancelled",
     pending_approval: "Pending approval",
+    posting: "Posting to SAP…",
     posted_open: "SAP open",
     posted_closed: "SAP closed",
   }[s] || s || "Unknown");
@@ -530,8 +594,15 @@ function isSapPostError(text, r) {
   if (String(r?.sap_status || "").toUpperCase().includes("FAIL")) return true;
   return /SSM |sap_b1_url|companydb|Service Layer|Create Order|Update Order|salesperson code/i.test(String(text || ""));
 }
+function shownStatus(r) {
+  if (isSapPosting(r)) return "posting";
+  if (r?.pipeline_status === "failed") return "failed";
+  if (r?.last_error && (r.pipeline_status === "parsed" || r.pipeline_status === "ready") && !isSapPostError(r.last_error, r)) return "needs_review";
+  return r?.pipeline_status || "";
+}
 function canApproveRow(r) {
   if (!canEditOrders() || !canPost()) return false;
+  if (isSapPosting(r)) return false;
   if (["posted", "failed", "rejected", "cancelled"].includes(r?.pipeline_status)) return false;
   if (["needs_review", "parsed"].includes(r?.pipeline_status)) return false;
   if (isValidationBlockError(r?.last_error)) return false;
@@ -542,15 +613,11 @@ function canApproveRow(r) {
 }
 function canRejectRow(r) {
   if (!canEditOrders()) return false;
+  if (isSapPosting(r)) return false;
   return !["posted", "failed", "rejected", "cancelled"].includes(r?.pipeline_status);
 }
 function canSubmitRow(r) {
   return canApproveRow(r);
-}
-function shownStatus(r) {
-  if (r?.pipeline_status === "failed") return "failed";
-  if (r?.last_error && (r.pipeline_status === "parsed" || r.pipeline_status === "ready") && !isSapPostError(r.last_error, r)) return "needs_review";
-  return r?.pipeline_status || "";
 }
 function soStatusLabel(s) {
   if (!s) return "—";
@@ -568,10 +635,10 @@ function isSapOpen(r) {
   return low === "open" || low === "bost_open" || low.startsWith("bost_open");
 }
 function canUpdateSapRow(r) {
-  return canEditOrders() && canPost() && isSapOpen(r);
+  return canEditOrders() && canPost() && isSapOpen(r) && !isSapPosting(r);
 }
 function canCancelSapRow(r) {
-  return canEditOrders() && canPost() && isSapOpen(r);
+  return canEditOrders() && canPost() && isSapOpen(r) && !isSapPosting(r);
 }
 function sapPostResponse(raw) {
   if (!raw) return null;
@@ -1437,6 +1504,11 @@ async function act(path, po) {
   const isApprove = String(path || "").includes("approve");
   if (isApprove && !requirePoSavedForPo(po, "approve")) return;
   const out = await api(path, { method: "POST", body: JSON.stringify({ po_number: po, channel: currentChannel }) });
+  if (out.accepted || out.status === "posting") {
+    toast(out.message || "Posting to SAP — please wait…");
+    await waitForSapPost(po, { action: "approve" });
+    return out;
+  }
   const failed = out.status === "error";
   toast(out.message || out.error || (failed ? "Failed" : "Done"), failed);
   try { await openPo(po); } catch (_) {}
@@ -1445,6 +1517,7 @@ async function act(path, po) {
   await refreshInbox();
   await refreshNotices();
   if (failed) throw new Error(out.message || out.error || "Failed");
+  return out;
 }
 
 async function rematchPo(po, { openDrawer = true } = {}) {
@@ -1459,6 +1532,11 @@ async function rematchPo(po, { openDrawer = true } = {}) {
 async function updateSapPo(po) {
   if (!requirePoSavedForPo(po, "update SAP")) return;
   const out = await api("/v1/b2b/update-sap", { method: "POST", body: JSON.stringify({ po_number: po, channel: currentChannel }) });
+  if (out.accepted || out.status === "posting") {
+    toast(out.message || "Updating SAP — please wait…");
+    await waitForSapPost(po, { action: "update" });
+    return out;
+  }
   const failed = out.status === "error";
   toast(out.message || out.error || (failed ? "SAP update failed" : "SAP order updated"), failed);
   if (failed) throw new Error(out.message || out.error || "SAP update failed");
@@ -1469,6 +1547,14 @@ async function updateSapPo(po) {
 
 async function cancelSapPo(po) {
   const out = await api("/v1/b2b/cancel-sap", { method: "POST", body: JSON.stringify({ po_number: po, channel: currentChannel }) });
+  if (out.accepted || out.status === "posting") {
+    toast(out.message || "Cancelling SAP — please wait…");
+    await waitForSapPost(po, { action: "cancel" });
+    $("drawer").classList.add("hidden");
+    await refreshOrders();
+    await refreshHome();
+    return out;
+  }
   const failed = out.status === "error";
   toast(out.message || out.error || (failed ? "SAP cancel failed" : "SAP order cancelled"), failed);
   if (failed) throw new Error(out.message || out.error || "SAP cancel failed");
