@@ -59,6 +59,18 @@ Example `/b2b/imap`:
 
 Dashboard **Fetch** runs per channel (passes `channel` to Lambda). Legacy top-level `"folder": "Blinkit"` still works for Blinkit-only setups.
 
+## Scheduled fetch
+
+Lambda **`b2bFetch`** (`b2b-so-<stage>-b2bFetch`) runs IMAP intake on a schedule via EventBridge Scheduler (`Asia/Kolkata`):
+
+| Time (IST) | Channels |
+|---|---|
+| 10:00 | blinkit, zepto, instamart, bigbasket |
+| 12:00 | blinkit, zepto, instamart, bigbasket |
+| 16:30 | blinkit, zepto, instamart, bigbasket |
+
+Each run passes `{"channel": "...", "trigger": "schedule"}`. Manual dashboard Fetch still works the same way.
+
 No `/b2b/blinkit/customer` param.
 
 Also: `DATABASE_URL`, SES from/to emails, seed SKU + ship-to maps.

@@ -4,7 +4,7 @@
  */
 /* global me, hdrs, $, toast, withBusy, esc, canViewDelivery, canEditDelivery, setView */
 
-const DELIVERY_API_BASE = "https://w2tsert3kd.execute-api.ap-south-1.amazonaws.com";
+const DELIVERY_API_BASE = "https://hr1vyas4wj.execute-api.ap-south-1.amazonaws.com";
 
 let ldTrackerPage = 1;
 let ldSelectedInvoice = null;
