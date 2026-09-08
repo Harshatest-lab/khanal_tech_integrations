@@ -536,6 +536,14 @@ def _query_params(event: dict[str, Any]) -> dict[str, str]:
     return {str(k): str(v) for k, v in params.items() if v is not None} if isinstance(params, dict) else {}
 
 
+def _caller_email(event: dict[str, Any]) -> str:
+    """HTTP API JWT authorizer (dashboardCognitoJwt) puts decoded token
+    claims at requestContext.authorizer.jwt.claims -- used to attribute
+    period lock/unlock actions for audit."""
+    claims = (((event.get("requestContext") or {}).get("authorizer") or {}).get("jwt") or {}).get("claims") or {}
+    return str(claims.get("email") or claims.get("sub") or "unknown")
+
+
 def _invoke_retry_batch(function_arn_env: str, q: dict[str, Any]) -> dict[str, Any]:
     payload = {
         "trigger": "manual_retry",
@@ -579,6 +587,25 @@ def dashboard_handler(event, context):
                 with store.connect() as conn:
                     return _json_response(200, credit_notes.post_one_credit_note(conn, q["uc_return_id"].strip()))
             return _json_response(202, _invoke_retry_batch("POST_CREDIT_NOTES_FUNCTION_ARN", q))
+
+        if path.endswith("/v1/unicommerce/period-locks/lock") and method == "POST":
+            period = (q.get("period") or "").strip()
+            if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", period):
+                return _json_response(400, {"error": "period must be 'YYYY-MM'"})
+            actor = _caller_email(event)
+            with store.connect() as conn:
+                return _json_response(200, store.lock_period(conn, period, actor, (q.get("note") or "").strip()))
+
+        if path.endswith("/v1/unicommerce/period-locks/unlock") and method == "POST":
+            period = (q.get("period") or "").strip()
+            if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", period):
+                return _json_response(400, {"error": "period must be 'YYYY-MM'"})
+            actor = _caller_email(event)
+            with store.connect() as conn:
+                result = store.unlock_period(conn, period, actor)
+            if not result["found"]:
+                return _json_response(404, {"error": f"period {period} was never locked", **result})
+            return _json_response(200, result)
 
         if path.endswith("/v1/unicommerce/order-detail") and not (q.get("uniware_id") or "").strip():
             return _json_response(400, {"error": "uniware_id is required"})
@@ -645,6 +672,9 @@ def dashboard_handler(event, context):
                     conn, limit=dashboard_queries._clamp_limit(q.get("limit"), default=20), mode=q.get("mode") or None
                 )
                 return _json_response(200, {"items": items})
+
+            if path.endswith("/v1/unicommerce/period-locks"):
+                return _json_response(200, {"items": store.list_period_locks(conn)})
 
             if path.endswith("/v1/unicommerce/recon-gaps"):
                 return _json_response(

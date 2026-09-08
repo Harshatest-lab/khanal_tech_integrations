@@ -1,5 +1,5 @@
 import { authHeaders, handleUnauthorized } from "./auth";
-import type { OrdersPage, OrderDetail, ReturnRow, SyncLogRow, ReconGapRow, ReconSummary, Stats } from "./types";
+import type { OrdersPage, OrderDetail, ReturnRow, SyncLogRow, ReconGapRow, ReconSummary, Stats, PeriodLock } from "./types";
 
 const API_BASE = "https://coqi1t0nvb.execute-api.ap-south-1.amazonaws.com";
 
@@ -109,4 +109,18 @@ export function retryInvoices() {
 
 export function retryCn() {
   return apiPost<unknown>("/v1/unicommerce/retry-cn?limit=50");
+}
+
+export function getPeriodLocks() {
+  return apiGet<{ items: PeriodLock[] }>("/v1/unicommerce/period-locks");
+}
+
+export function lockPeriod(period: string, note: string) {
+  const params = new URLSearchParams({ period, note });
+  return apiPost<PeriodLock>(`/v1/unicommerce/period-locks/lock?${params.toString()}`);
+}
+
+export function unlockPeriod(period: string) {
+  const params = new URLSearchParams({ period });
+  return apiPost<PeriodLock>(`/v1/unicommerce/period-locks/unlock?${params.toString()}`);
 }

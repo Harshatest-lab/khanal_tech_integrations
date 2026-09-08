@@ -74,3 +74,13 @@ export interface ReconSummary {
   by_channel: ReconSummaryRow[];
   grand_total: { count: number; api_total: number; sap_total: number; diff: number };
 }
+
+export interface PeriodLock {
+  period: string;
+  locked: boolean;
+  locked_by: string;
+  locked_at?: string;
+  unlocked_by?: string | null;
+  unlocked_at?: string | null;
+  note?: string;
+}

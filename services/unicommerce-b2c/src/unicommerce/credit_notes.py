@@ -353,6 +353,10 @@ def post_one_credit_note(conn, uc_return_id: str) -> dict:
     if cn is None:
         return {"status": "not_found", "uc_return_id": uc_return_id}
 
+    cn_doc_date = str(cn.get("return_date") or "")
+    if cn_doc_date and store.is_period_locked(conn, cn_doc_date):
+        return {"status": "period_locked", "uc_return_id": uc_return_id, "return_date": cn_doc_date}
+
     prepare_result = _prepare_credit_note(conn, cn, settings)
     if prepare_result == "stuck":
         return {"status": "stuck", "uc_return_id": uc_return_id}

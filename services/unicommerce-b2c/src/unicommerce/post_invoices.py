@@ -487,6 +487,14 @@ def post_one_order(conn, uniware_id: str, force: bool = False) -> dict:
             "order_date": order_date_str, "cutoff_date": constants.POSTING_CUTOFF_DATE,
         }
 
+    # Unlike the cutoff-date check above, there is no force override for a
+    # locked period -- mirrors SAP B1 itself (a locked period can't be
+    # bypassed doc-by-doc, only by reopening the period). The real gate is
+    # store.claim_ready_order's own lock check; this is just a clear reason
+    # instead of a generic "already_claimed".
+    if store.is_period_locked(conn, order_date_str):
+        return {"status": "period_locked", "uniware_id": uniware_id, "order_date": order_date_str}
+
     settings = get_settings(force_reload=True)
 
     series_ok, series_msg = sap_client.validate_active_series(settings)

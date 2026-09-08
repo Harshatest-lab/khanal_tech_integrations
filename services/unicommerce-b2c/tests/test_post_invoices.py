@@ -278,6 +278,10 @@ def test_post_one_order_force_bypasses_cutoff(monkeypatch):
 
     monkeypatch.setattr(post_invoices.sap_client, "validate_active_series", fake_validate)
     monkeypatch.setattr(post_invoices, "get_settings", lambda **kw: object())
+    # _FakeCursor.fetchone() always returns the order row regardless of
+    # query, which would make the period-lock check's own fetchone() look
+    # "locked" -- stub it directly, same as the other store calls below.
+    monkeypatch.setattr(post_invoices.store, "is_period_locked", lambda conn, d: False)
 
     row = ("UC-OLD", "FLIPKART", "2026-06-04", "{}", 0)
     result = post_invoices.post_one_order(_FakeConn(row), "UC-OLD", force=True)

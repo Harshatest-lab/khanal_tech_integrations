@@ -368,7 +368,11 @@ def get_ready_orders(
     """cutoff_date is a hard floor on order_date (see
     unicommerce.constants.POSTING_CUTOFF_DATE) -- required, not optional,
     so no caller can accidentally sweep in a pre-cutoff order."""
-    where = ["pipeline_status = 'ready'", "order_date >= %s"]
+    where = [
+        "pipeline_status = 'ready'",
+        "order_date >= %s",
+        "NOT EXISTS (SELECT 1 FROM unicommerce_period_locks WHERE period = to_char(order_date, 'YYYY-MM') AND locked)",
+    ]
     params: list = [cutoff_date]
     if ready_before is not None:
         where.append("updated_at < %s")
@@ -425,13 +429,21 @@ def claim_ready_order(conn: psycopg.Connection, uniware_id: str) -> bool:
     worker already claimed it (protects against two concurrent posting
     runs, or a manual retry racing a scheduled run, double-posting the
     same order to SAP -- exactly the class of bug fixed in the Frappe
-    source's khanal_tech_integrations PR #1301-#1304)."""
+    source's khanal_tech_integrations PR #1301-#1304) OR the order's month
+    is locked (see unicommerce_period_locks) -- this is the actual safety
+    boundary for period locks, not just get_ready_orders' soft filter, so
+    no posting path (scheduled, manual retry, future) can ever bypass a
+    locked month even if it skips the read-side filter."""
     with conn.cursor() as cur:
         cur.execute(
             """
             UPDATE unicommerce_orders
             SET pipeline_status = 'posting', posting_started_at = now(), updated_at = now()
             WHERE uniware_id = %s AND pipeline_status = 'ready'
+              AND NOT EXISTS (
+                SELECT 1 FROM unicommerce_period_locks
+                WHERE period = to_char(unicommerce_orders.order_date, 'YYYY-MM') AND locked
+              )
             """,
             (uniware_id,),
         )
@@ -825,7 +837,11 @@ def get_pending_credit_notes(
     never posts even if start_date isn't passed. A CN whose parent order
     isn't in unicommerce_orders at all (not fetched yet) has NULL
     o.order_date, so this excludes it too until the parent exists."""
-    where = ["cn.status IN ('pending', 'failed')", "o.order_date >= %s"]
+    where = [
+        "cn.status IN ('pending', 'failed')",
+        "o.order_date >= %s",
+        "NOT EXISTS (SELECT 1 FROM unicommerce_period_locks WHERE period = to_char(cn.return_date, 'YYYY-MM') AND locked)",
+    ]
     params: list = [cutoff_date]
     if start_date or end_date or channel_name:
         where.append("o.uniware_id IS NOT NULL")
@@ -887,13 +903,20 @@ def claim_credit_note(conn: psycopg.Connection, uc_return_id: str) -> bool:
     does a plain frappe.db.set_value with no WHERE-status guard); added
     here since we're writing this store layer fresh and the invoice
     pipeline already established the atomic-claim pattern for exactly
-    this race shape."""
+    this race shape. Also the real safety boundary for period locks (see
+    claim_ready_order) -- keyed on return_date, which is what actually
+    becomes the CN's SAP DocDate (sap_payload.credit_note_payload), not
+    the parent order's order_date."""
     with conn.cursor() as cur:
         cur.execute(
             """
             UPDATE unicommerce_cn_staging
             SET status = 'posting', updated_at = now()
             WHERE uc_return_id = %s AND status IN ('pending', 'failed')
+              AND NOT EXISTS (
+                SELECT 1 FROM unicommerce_period_locks
+                WHERE period = to_char(unicommerce_cn_staging.return_date, 'YYYY-MM') AND locked
+              )
             """,
             (uc_return_id,),
         )
@@ -988,7 +1011,15 @@ def get_flex_cn_log(conn: psycopg.Connection, refund_id: str) -> dict | None:
 def claim_flex_cn(conn: psycopg.Connection, refund_id: str, amazon_order_id: str, posted_date: str) -> bool:
     """Atomic claim: insert-if-absent, or reclaim a non-'posted' row --
     same double-submission guard as claim_credit_note. Reclaimable after
-    30min so a worker crash mid-flight doesn't wedge the row forever."""
+    30min so a worker crash mid-flight doesn't wedge the row forever.
+
+    Period-lock check is a plain pre-check here (not embedded in the
+    INSERT ... ON CONFLICT below -- there's no INSERT-side WHERE to hang
+    it on) rather than a race-safe UPDATE guard like claim_ready_order/
+    claim_credit_note. Acceptable: locking a month is a rare, deliberate,
+    human-triggered action, not a hot path this needs to race against."""
+    if is_period_locked(conn, posted_date):
+        return False
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -1385,3 +1416,96 @@ def get_order_for_recon(conn: psycopg.Connection, uniware_id: str) -> dict | Non
             return None
         cols = [d.name for d in cur.description]
     return dict(zip(cols, row))
+
+
+# ── Monthly posting-period lock/unlock ─────────────────────────────────────
+# Self-contained mirror of SAP B1's own posting-period lock, controlled
+# entirely from our own dashboard/DB (does not read SAP's actual period-lock
+# state). The real enforcement lives in claim_ready_order/claim_credit_note/
+# claim_flex_cn above -- these functions are the admin surface (lock/unlock/
+# list) plus the in-flight-row relabeling sweep for dashboard visibility.
+
+def is_period_locked(conn: psycopg.Connection, date_val) -> bool:
+    """date_val: a date/str for the doc date about to be used (order_date
+    for invoices, return_date/posted_date for credit notes)."""
+    period = str(date_val)[:7]
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM unicommerce_period_locks WHERE period = %s AND locked", (period,))
+        return cur.fetchone() is not None
+
+
+def list_period_locks(conn: psycopg.Connection) -> list[dict]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT period, locked, locked_by, locked_at, unlocked_by, unlocked_at, note
+            FROM unicommerce_period_locks
+            ORDER BY period DESC
+            """
+        )
+        cols = [d.name for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def lock_period(conn: psycopg.Connection, period: str, actor: str, note: str = "") -> dict:
+    """Locks `period` ('YYYY-MM') and relabels every currently ready/pending
+    order and credit note in that month to 'period_locked' so the dashboard
+    shows why they're stuck. This relabel is a UX convenience only -- the
+    real gate is claim_ready_order/claim_credit_note/claim_flex_cn checking
+    unicommerce_period_locks directly, so a row that stays 'ready' (e.g. a
+    fetch landing after this sweep runs) still can't post."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO unicommerce_period_locks (period, locked, locked_by, locked_at, note, updated_at)
+            VALUES (%s, true, %s, now(), %s, now())
+            ON CONFLICT (period) DO UPDATE SET
+              locked = true, locked_by = %s, locked_at = now(), note = %s,
+              unlocked_by = NULL, unlocked_at = NULL, updated_at = now()
+            """,
+            (period, actor, note, actor, note),
+        )
+        cur.execute(
+            "UPDATE unicommerce_orders SET pipeline_status = 'period_locked', updated_at = now() "
+            "WHERE pipeline_status = 'ready' AND to_char(order_date, 'YYYY-MM') = %s",
+            (period,),
+        )
+        orders_held = cur.rowcount
+        cur.execute(
+            "UPDATE unicommerce_cn_staging SET status = 'period_locked', updated_at = now() "
+            "WHERE status IN ('pending', 'failed') AND to_char(return_date, 'YYYY-MM') = %s",
+            (period,),
+        )
+        cns_held = cur.rowcount
+    conn.commit()
+    return {"period": period, "locked": True, "orders_held": orders_held, "credit_notes_held": cns_held}
+
+
+def unlock_period(conn: psycopg.Connection, period: str, actor: str) -> dict:
+    """Unlocks `period` and flips every 'period_locked' order/CN in that
+    month back to ready/pending so the next scheduled run (or a manual
+    retry) picks them up with no separate replay step."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE unicommerce_period_locks
+            SET locked = false, unlocked_by = %s, unlocked_at = now(), updated_at = now()
+            WHERE period = %s
+            """,
+            (actor, period),
+        )
+        found = cur.rowcount == 1
+        cur.execute(
+            "UPDATE unicommerce_orders SET pipeline_status = 'ready', updated_at = now() "
+            "WHERE pipeline_status = 'period_locked' AND to_char(order_date, 'YYYY-MM') = %s",
+            (period,),
+        )
+        orders_resumed = cur.rowcount
+        cur.execute(
+            "UPDATE unicommerce_cn_staging SET status = 'pending', updated_at = now() "
+            "WHERE status = 'period_locked' AND to_char(return_date, 'YYYY-MM') = %s",
+            (period,),
+        )
+        cns_resumed = cur.rowcount
+    conn.commit()
+    return {"period": period, "locked": False, "found": found, "orders_resumed": orders_resumed, "credit_notes_resumed": cns_resumed}

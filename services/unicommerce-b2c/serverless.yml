@@ -510,6 +510,9 @@ functions:
       - httpApi: { path: /v1/unicommerce/retry-invoices, method: post, authorizer: { name: dashboardCognitoJwt } }
       - httpApi: { path: /v1/unicommerce/retry-cn, method: post, authorizer: { name: dashboardCognitoJwt } }
       - httpApi: { path: /v1/unicommerce/infra, method: get, authorizer: { name: dashboardCognitoJwt } }
+      - httpApi: { path: /v1/unicommerce/period-locks, method: get, authorizer: { name: dashboardCognitoJwt } }
+      - httpApi: { path: /v1/unicommerce/period-locks/lock, method: post, authorizer: { name: dashboardCognitoJwt } }
+      - httpApi: { path: /v1/unicommerce/period-locks/unlock, method: post, authorizer: { name: dashboardCognitoJwt } }
 
 resources:
   Resources:

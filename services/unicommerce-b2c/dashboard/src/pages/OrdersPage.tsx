@@ -19,7 +19,7 @@ import { formatDateOnly, formatDate, formatMoney } from "@/lib/utils";
 import type { OrderRow } from "@/lib/types";
 import { ArrowUp, ArrowDown, ChevronLeft, ChevronRight, RotateCcw, RefreshCcw, Loader2, PackageSearch } from "lucide-react";
 
-const STAGES = ["fetched", "ready", "posting", "verify", "batch_hold", "posted", "failed", "dead"];
+const STAGES = ["fetched", "ready", "posting", "verify", "batch_hold", "period_locked", "posted", "failed", "dead"];
 const SORTABLE: Record<string, string> = { order_date: "Order date", uc_total: "Total", updated_at: "Updated" };
 
 export function OrdersPage({ onStatsRefresh }: { onStatsRefresh: () => void }) {

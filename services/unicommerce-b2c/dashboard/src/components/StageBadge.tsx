@@ -13,6 +13,7 @@ const STAGE_VARIANT: Record<string, "default" | "success" | "warning" | "destruc
   po_created: "warning",
   grn_done: "warning",
   batch_hold: "warning",
+  period_locked: "warning",
   posted: "success",
   failed: "destructive",
   dead: "destructive",
