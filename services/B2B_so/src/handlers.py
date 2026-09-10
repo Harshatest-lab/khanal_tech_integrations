@@ -859,6 +859,7 @@ def dashboard_handler(event, context):
                 if not detail:
                     return _json(404, {"error": "PO not found", "po_number": po})
                 header = dict(detail["header"])
+                header["channel"] = str(ch).strip().lower()
                 lines = list(detail["lines"])
                 header["pdf_url"] = blinkit.public_url(header.get("pdf_s3_key") or header.get("pdf_s3_key") or "")
                 header["xlsx_url"] = blinkit.public_url(header.get("xlsx_s3_key") or header.get("xlsx_s3_key") or "")
