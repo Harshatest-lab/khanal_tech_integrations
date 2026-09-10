@@ -1,4 +1,4 @@
-from bigbasket import extract_from_rows, parse_excel_attachment
+from bigbasket import BIGBASKET_CARD_NAME, extract_from_rows, parse_excel_attachment
 from blinkit import extract_po_header, parse_channel_lines
 
 
@@ -18,6 +18,8 @@ def test_extracts_bigbasket_gstin_after_warehouse_pincode():
         ["1", "40198148", "Honey", "6", "346.99", "364.35", "599", "104.16", "2186.1"],
     ]
     parsed = extract_from_rows(rows)
+    assert parsed["company_name"] == BIGBASKET_CARD_NAME
+    assert parsed["company_name"] == "Innovative Retail Concepts Private Limited"
     assert parsed["gst_no"] == "29AACCI2053A1Z3"
     assert parsed["po_number"] == "IRA30826412"
     assert "560067" in parsed["delivered_to"]

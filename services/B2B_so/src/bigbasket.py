@@ -9,6 +9,9 @@ from typing import Any
 
 from gst_validate import extract_gst_from_text
 
+# SAP CardName for Bigbasket Business Partner (not the channel label).
+BIGBASKET_CARD_NAME = "Innovative Retail Concepts Private Limited"
+
 _SNO_RE = re.compile(r"\b(s(\.?|l)?\.?\s?no)\b", re.I)
 
 
@@ -201,7 +204,7 @@ def extract_from_rows(rows: list[list[str]]) -> dict[str, Any]:
     if po_number in {"Not Found", ""}:
         raise ValueError("Not a Bigbasket PO Excel (missing PO Number)")
     return {
-        "company_name": "Bigbasket",
+        "company_name": BIGBASKET_CARD_NAME,
         "contact_name": "Not Found",
         "po_number": po_number,
         "po_expiry_date": expiry,
@@ -223,7 +226,7 @@ def parse_excel_attachment(excel_bytes: bytes, filename: str = "") -> dict[str, 
 
 def header_from_parsed(parsed: dict[str, Any]) -> dict[str, str]:
     return {
-        "company_name": str(parsed.get("company_name") or "Bigbasket"),
+        "company_name": str(parsed.get("company_name") or BIGBASKET_CARD_NAME),
         "contact_name": str(parsed.get("contact_name") or "Not Found"),
         "po_number": str(parsed.get("po_number") or "Not Found"),
         "po_expiry_date": str(parsed.get("po_expiry_date") or "Not Found"),
