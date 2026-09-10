@@ -153,6 +153,27 @@ def test_bigbasket_sends_price_and_unit_price():
     assert line["UnitPrice"] == 50.0
 
 
+def test_bigbasket_card_name_is_legal_entity():
+    from bigbasket import BIGBASKET_CARD_NAME
+
+    header = {
+        "channel": "bigbasket",
+        "customer_code": "C03569",
+        "company_name": "Bigbasket",  # legacy stored value
+        "po_number": "IRA44122563",
+        "po_expiry_date": "2026-09-15",
+        "billing_from": "KT",
+        "bill_to": "Local",
+        "matched_address_name": "IRCPL - Bangalore - Dasanapura",
+        "pdf_s3_key": "x.pdf",
+    }
+    lines = [{"sap_code": "FGDC0063", "quantity": 12, "basic_cost_price": 126.62, "taxcode": "KACS18"}]
+    payload = build_order_payload(header, lines, "111", skip_enrich=True)
+    assert payload["CardName"] == BIGBASKET_CARD_NAME
+    assert payload["CardName"] == "Innovative Retail Concepts Private Limited"
+    assert payload["CardCode"] == "C03569"
+
+
 def test_zepto_sends_unit_price_only():
     line = _document_line_for_channel("zepto")
     assert "Price" not in line

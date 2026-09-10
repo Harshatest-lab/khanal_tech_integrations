@@ -329,9 +329,14 @@ def build_order_payload(
         if not item_code:
             continue
         sap_lines.append(_build_document_line(line, header, pricing))
+    card_name = _pick(header, "company_name", "company_name")
+    if channel == "bigbasket":
+        import bigbasket as _bigbasket
+
+        card_name = _bigbasket.BIGBASKET_CARD_NAME
     return {
         "CardCode": _pick(header, "customer_code", "customer_code") or "C03570",
-        "CardName": _pick(header, "company_name", "company_name"),
+        "CardName": card_name,
         "Series": 514,
         "NumAtCard": _pick(header, "po_number", "po_number"),
         "DocDueDate": str(due or ""),

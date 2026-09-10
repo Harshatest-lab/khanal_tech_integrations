@@ -969,6 +969,11 @@ def rematch_po(conn, po_number: str, channel: str = store.CHANNEL_BLINKIT) -> di
     header = dict(detail["header"])
     if header.get("pipeline_status") in {store.STATUS_POSTED, store.STATUS_CANCELLED}:
         raise ValueError("Posted POs cannot be rechecked")
+    # Always use the SAP BP legal name for Bigbasket (old rows still say "Bigbasket").
+    if ch == "bigbasket":
+        import bigbasket as bigbasket_parser
+
+        header["company_name"] = bigbasket_parser.BIGBASKET_CARD_NAME
     lines = [dict(r) for r in detail["lines"]]
     pdf_raw = get_bytes(header.get("pdf_s3_key") or "")
     pdf_text: str | None = None
@@ -1007,6 +1012,11 @@ def rematch_po(conn, po_number: str, channel: str = store.CHANNEL_BLINKIT) -> di
 
                     instamart_parser.apply_excel_to_header(header, excel_data)
                 elif ch == "bigbasket":
+                    import bigbasket as bigbasket_parser
+
+                    header["company_name"] = str(
+                        excel_data.get("company_name") or bigbasket_parser.BIGBASKET_CARD_NAME
+                    )
                     main_address = excel_data.get("delivered_to") or excel_data.get("Warehouse Address") or ""
                     if main_address and main_address != "Not Found":
                         header["delivered_to"] = main_address
