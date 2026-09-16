@@ -231,16 +231,41 @@ def _finish_post(
     }
 
 
-def _po_file_url(header: dict[str, Any]) -> str:
+def resolve_po_document_url(header: dict[str, Any]) -> str:
+    """Public S3 URL for SAP U_PO_LINK — PDF first, then Excel/CSV (Bigbasket is Excel-only)."""
     import blinkit as _blinkit
 
-    key = _pick(header, "pdf_s3_key", "pdf_s3_key")
-    if key:
-        return _blinkit.public_url(key)
-    url = str(_pick(header, "po_url", "pdf_url") or "")
+    for key_field in ("pdf_s3_key", "xlsx_s3_key"):
+        key = str(_pick(header, key_field, key_field) or "").strip()
+        if key:
+            url = _blinkit.public_url(key)
+            if url:
+                return url
+    url = str(_pick(header, "po_url", "pdf_url", "xlsx_url") or "").strip()
     if "X-Amz-" in url:
         return url.split("?", 1)[0]
     return url
+
+
+def po_link_error(header: dict[str, Any]) -> str:
+    """Return a user-facing error when U_PO_LINK cannot be resolved, else empty string."""
+    if resolve_po_document_url(header):
+        return ""
+    ch = str(header.get("channel") or "").strip().lower()
+    if ch == "bigbasket":
+        doc = "Excel file"
+    elif ch in {"instamart", "zepto"}:
+        doc = "PDF or Excel/CSV file"
+    else:
+        doc = "PDF file"
+    return (
+        f"PO document link (SAP U_PO_LINK) is empty — no {doc} is stored on this order. "
+        "Click Refetch from mailbox."
+    )
+
+
+def _po_file_url(header: dict[str, Any]) -> str:
+    return resolve_po_document_url(header)
 
 
 def _matched_state_for_tax(header: dict[str, Any]) -> str:
@@ -303,6 +328,8 @@ def _sap_post_precheck(header: dict[str, Any], payload: dict[str, Any]) -> str:
     blank_tax = [str(l.get("ItemCode") or "") for l in lines if not str(l.get("TaxCode") or "").strip()]
     if blank_tax:
         return f"Missing TaxCode for SAP items: {', '.join(blank_tax)}"
+    if not str(payload.get("U_PO_LINK") or "").strip():
+        return po_link_error(header)
     return ""
 
 
@@ -368,13 +395,7 @@ def post_purchase_order(
         return _record_post_failure(conn, po_number, header, "PO has no lines", actor, channel=channel)
     if not salesperson_code:
         return _record_post_failure(conn, po_number, header, "Logged-in user has no SAP salesperson code", actor, channel=channel)
-    if not header.get("po_url") or "X-Amz-" in str(header.get("po_url") or ""):
-        try:
-            import blinkit as _blinkit
-
-            header["po_url"] = _blinkit.public_url(header.get("pdf_s3_key") or header.get("pdf_s3_key") or "")
-        except Exception:
-            header["po_url"] = header.get("pdf_s3_key") or header.get("pdf_s3_key") or ""
+    header["po_url"] = resolve_po_document_url(header)
     try:
         tax_err = _stored_lines_tax_error(header, lines)
         if tax_err:
