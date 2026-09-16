@@ -1487,7 +1487,7 @@ async function savePo(po, lines) {
   await refreshHome();
 }
 
-async function savePo(po, lines) {
+async function rejectPo(po, reason = "Rejected by reviewer") {
   const out = await api("/v1/b2b/reject", {
     method: "POST",
     body: JSON.stringify({ po_number: po, channel: currentChannel, reason: reason || "Rejected by reviewer" }),

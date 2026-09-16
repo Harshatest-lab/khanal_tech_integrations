@@ -392,6 +392,7 @@ def dashboard_handler(event, context):
                 header = dict(header)
                 header["pdf_url"] = blinkit.public_url(header.get("pdf_s3_key") or "")
                 header["xlsx_url"] = blinkit.public_url(header.get("xlsx_s3_key") or "")
+                header["po_url"] = b2b_sappost.resolve_po_document_url(header)
                 sap_live = None
                 if header.get("sap_docentry"):
                     try:
@@ -477,6 +478,11 @@ def dashboard_handler(event, context):
                         "error": "Missing tax code on PO lines for: "
                         + ", ".join(tax_gaps)
                         + ". Click Refetch first.",
+                        "last_error": header.get("last_error") or "",
+                    })
+                if link_err := b2b_sappost.po_link_error(header):
+                    return _json(400, {
+                        "error": link_err,
                         "last_error": header.get("last_error") or "",
                     })
                 _mark_sap_posting(conn, po, ch, str(header.get("pipeline_status") or store.STATUS_READY))
@@ -863,7 +869,7 @@ def dashboard_handler(event, context):
                 lines = list(detail["lines"])
                 header["pdf_url"] = blinkit.public_url(header.get("pdf_s3_key") or header.get("pdf_s3_key") or "")
                 header["xlsx_url"] = blinkit.public_url(header.get("xlsx_s3_key") or header.get("xlsx_s3_key") or "")
-                header["po_url"] = header["pdf_url"]
+                header["po_url"] = b2b_sappost.resolve_po_document_url(header)
                 code = str(profile.get("sap_salesperson_code") or "")
                 payload = b2b_sappost.build_order_payload(header, lines, code, skip_enrich=True)
                 extract = {"header": header, "lines": lines}
