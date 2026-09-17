@@ -1,4 +1,4 @@
-from blinkit import extract_po_header, parse_channel_lines
+from blinkit import extract_po_header, match_ship_to, parse_channel_lines
 from zepto import (
     extract_header_from_text,
     is_valid_zepto_pdf_text,
@@ -104,3 +104,38 @@ def test_parse_channel_lines_zepto():
     rows = parse_channel_lines(csv_bytes, channel="zepto", filename="po.csv")
     assert rows[0]["item_code"] == "SKU1"
     assert rows[0]["total_amount"] == 22
+
+
+def test_zepto_ship_to_uses_pincode_not_wrong_hub():
+    header = extract_header_from_text(ZEPTO_SAMPLE)
+    aliases = [
+        {
+            "address_id": "Zepto Hub Dasanapura",
+            "address_entry": "Zepto Dark Store Dasanapura Bengaluru Karnataka 562162",
+        },
+        {
+            "address_id": "Zepto Hub Whitefield",
+            "address_entry": "Zepto Dark Store Whitefield Bengaluru Karnataka 560066",
+        },
+    ]
+    result = match_ship_to(header["delivered_to"], aliases)
+    assert result["ok"] is True
+    assert result["address_id"] == "Zepto Hub Whitefield"
+    assert "560066" in header["delivered_to"]
+
+
+def test_zepto_ship_to_same_pincode_picks_correct_warehouse():
+    delivered = "Zepto Dark Store Whitefield\nBengaluru Karnataka 560066"
+    aliases = [
+        {
+            "address_id": "Zepto Hub Hoskote",
+            "address_entry": "Zepto Dark Store Hoskote Rural Koralur Bengaluru Karnataka 560066",
+        },
+        {
+            "address_id": "Zepto Hub Whitefield",
+            "address_entry": "Zepto Dark Store Whitefield Bengaluru Karnataka 560066",
+        },
+    ]
+    result = match_ship_to(delivered, aliases)
+    assert result["ok"] is True
+    assert result["address_id"] == "Zepto Hub Whitefield"

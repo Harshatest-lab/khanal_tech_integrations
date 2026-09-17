@@ -623,7 +623,10 @@ function soStatusLabel(s) {
   if (!s) return "—";
   const map = { bost_Open: "Open", bost_Close: "Closed", bost_Paid: "Paid", cancelled: "Cancelled" };
   if (map[s]) return map[s];
-  return String(s).replace(/^bost_/, "").replace(/_/g, " ");
+  const lowMap = { bost_open: "Open", bost_close: "Closed", bost_paid: "Paid", cancelled: "Cancelled", open: "Open", closed: "Closed", paid: "Paid" };
+  const low = String(s).trim().toLowerCase();
+  if (lowMap[low]) return lowMap[low];
+  return String(s).replace(/^bost_/i, "").replace(/_/g, " ");
 }
 function isSapOpen(r) {
   if (!r || r.pipeline_status === "cancelled") return false;
@@ -631,8 +634,18 @@ function isSapOpen(r) {
   const st = String(r.sap_document_status || r.DocumentStatus || "").trim();
   if (!st) return true;
   const low = st.toLowerCase();
-  if (["cancelled", "bost_close", "closed", "bost_paid", "paid"].includes(low)) return false;
-  return low === "open" || low === "bost_open" || low.startsWith("bost_open");
+  if (["cancelled", "bost_close", "closed", "bost_paid", "paid", "c"].includes(low)) return false;
+  return low === "open" || low === "bost_open" || low === "o" || low.startsWith("bost_open");
+}
+function sapDocStatus(r, sapLive) {
+  return sapLive?.DocumentStatus || r?.sap_document_status || r?.DocumentStatus || "";
+}
+function orderAmount(r, sapLive) {
+  if (sapLive?.DocTotal != null && sapLive.DocTotal !== "") return sapLive.DocTotal;
+  if (r?.pipeline_status === "posted" || r?.pipeline_status === "cancelled") {
+    if (r?.sap_doc_total != null && r.sap_doc_total !== "") return r.sap_doc_total;
+  }
+  return r?.total_amount;
 }
 function canUpdateSapRow(r) {
   return canEditOrders() && canPost() && isSapOpen(r) && !isSapPosting(r);
@@ -1133,7 +1146,7 @@ function statusBadge(r) {
   if (status === "posted") {
     const open = isSapOpen(r);
     const key = open ? "posted_open" : "posted_closed";
-    const label = soStatusLabel(r.sap_document_status) || (open ? "Open" : "Closed");
+    const label = soStatusLabel(sapDocStatus(r)) || (open ? "Open" : "Closed");
     return `<span class="${statusClass(key)}">${esc(label === "—" ? (open ? "Open" : "Closed") : label)}</span>`;
   }
   return `<span class="${statusClass(status)}">${esc(statusLabel(status))}</span>`;
@@ -1149,7 +1162,7 @@ function orderCard(r, index = 0) {
   const amend = String(r.duplicate_records_status || "").startsWith("Amended/") ? r.duplicate_records_status : "";
   const soLabel = String(r.sap_status || "").toUpperCase().includes("FAIL")
     ? "Post failed"
-    : (status === "cancelled" ? "Cancelled" : soStatusLabel(r.sap_document_status));
+    : (status === "cancelled" ? "Cancelled" : soStatusLabel(sapDocStatus(r)));
   const tone = orderTone(r);
   return `<article class="po-card tone-${tone}${hasIssue(r) ? " has-error" : ""}" data-open="${esc(r.po_number)}">
     <div class="po-card-grid">
@@ -1167,7 +1180,7 @@ function orderCard(r, index = 0) {
       <div class="col-status">${statusBadge(r)}</div>
       <div class="col-so">${status === "cancelled" ? `<span class="${statusClass("cancelled")}">Cancelled</span>` : esc(soLabel)}</div>
       <div class="col-docnum">${r.sap_docnum ? `<span>${esc(r.sap_docnum)}</span>${r.sap_docentry ? `<span class="cell-sub">Entry ${esc(r.sap_docentry)}</span>` : ""}` : "—"}</div>
-      <div class="col-amt">${esc(money(r.total_amount))}</div>
+      <div class="col-amt">${esc(money(orderAmount(r)))}</div>
       <div class="col-items">${Number(r.total_items || 0)}</div>
       <div class="col-when">${esc(timeAgo(r.created_at) || "—")}</div>
     </div>
@@ -1312,10 +1325,12 @@ async function openPo(po) {
   currentPo = data;
   const h = data.header || {};
   const sapLive = data.sap_live || null;
+  // Detail sync may have refreshed Closed/Open from HANA — refresh list in background.
+  refreshOrders().catch(() => {});
   const failed = h.pipeline_status === "failed";
   const posted = h.pipeline_status === "posted" || h.pipeline_status === "cancelled";
   const rejected = h.pipeline_status === "rejected";
-  const sapRow = { ...h, sap_document_status: sapLive?.DocumentStatus || h.sap_document_status };
+  const sapRow = { ...h, sap_document_status: sapDocStatus(h, sapLive) };
   const sapOpen = isSapOpen(sapRow);
   const editable = canEditOrders() && !failed && !rejected && (!posted || sapOpen);
   const deletable = canDeleteOrders() && !failed && !rejected && (!posted || sapOpen);
@@ -1331,7 +1346,7 @@ async function openPo(po) {
   const xlsx = h.xlsx_url || h.excel_url || "";
   const pdfName = String(h.pdf_s3_key || "").split("/").pop() || "PO.pdf";
   const xlsxName = String(h.xlsx_s3_key || "").split("/").pop() || "PO.xlsx";
-  const sapAmount = sapLive?.DocTotal ?? h.sap_doc_total ?? h.total_amount;
+  const sapAmount = orderAmount(h, sapLive);
   const due = docDueDate(h, sapLive);
   const amendRows = data.amend_history || [];
   const activityLog = data.activity_log || [];
@@ -1351,7 +1366,7 @@ async function openPo(po) {
       <span>${Number(h.total_items || lines.length || 0)} items</span>
       ${h.sap_docnum ? `<span>DocNum ${esc(h.sap_docnum)}</span>` : ""}
       ${h.sap_docentry ? `<span>DocEntry ${esc(h.sap_docentry)}</span>` : ""}
-      <span>${esc(String(h.sap_status || "").toUpperCase().includes("FAIL") ? "Post failed" : soStatusLabel(h.sap_document_status || sapLive?.DocumentStatus))}</span>
+      <span>${esc(String(h.sap_status || "").toUpperCase().includes("FAIL") ? "Post failed" : soStatusLabel(sapDocStatus(h, sapLive)))}</span>
     </div>
     ${amendRows.length ? `<div class="amend-history-box">
       <p class="section-h">Historical data (archived before amend)</p>
@@ -1383,7 +1398,7 @@ async function openPo(po) {
       <p class="eyebrow">SAP post response (at approval)</p>
       ${h.sap_docnum ? `<p><b>DocNum</b> ${esc(h.sap_docnum)}</p>` : ""}
       ${h.sap_docentry ? `<p><b>DocEntry</b> ${esc(h.sap_docentry)}</p>` : ""}
-      ${h.sap_document_status ? `<p><b>Status</b> ${esc(soStatusLabel(h.sap_document_status))}</p>` : ""}
+      ${sapDocStatus(h, sapLive) ? `<p><b>Status</b> ${esc(soStatusLabel(sapDocStatus(h, sapLive)))}</p>` : ""}
       <pre>${esc(JSON.stringify(postResp, null, 2))}</pre>
     </div>` : ""}
     <p class="section-h">Customer</p>

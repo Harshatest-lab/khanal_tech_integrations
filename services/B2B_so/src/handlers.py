@@ -353,11 +353,17 @@ def dashboard_handler(event, context):
             if path.endswith("/v1/b2b/orders") and method == "GET":
                 if deny := _deny_perm(profile, permissions.RESOURCE_ORDERS, permissions.PERM_VIEW):
                     return deny
+                ch = q.get("channel") or store.CHANNEL_BLINKIT
+                try:
+                    sap_hana_sync.sync_posted_orders(conn, channel=ch)
+                    conn.commit()
+                except Exception:
+                    logger.warning("SAP HANA bulk sync skipped on orders list", exc_info=True)
                 return _json(
                     200,
                     store.list_pos(
                         conn,
-                        channel=q.get("channel") or store.CHANNEL_BLINKIT,
+                        channel=ch,
                         pipeline_status=q.get("status") or None,
                         po_number=(q.get("po_number") or "").strip() or None,
                         sap_docnum=(q.get("sap_docnum") or "").strip() or None,
@@ -401,6 +407,17 @@ def dashboard_handler(event, context):
                         )
                     except Exception:
                         logger.warning("Could not load live SAP row for PO %s", po, exc_info=True)
+                if sap_live:
+                    # Prefer live HANA status/total even if DB row is stale.
+                    header["sap_document_status"] = str(
+                        sap_live.get("DocumentStatus") or header.get("sap_document_status") or ""
+                    )
+                    if sap_live.get("DocTotal") is not None:
+                        header["sap_doc_total"] = float(sap_live.get("DocTotal") or 0)
+                    if sap_live.get("DocDate"):
+                        header["sap_doc_date"] = str(sap_live.get("DocDate") or "")
+                    if sap_live.get("DocNum") is not None:
+                        header["sap_docnum"] = sap_live.get("DocNum")
                 post_resp = header.get("sap_response")
                 amend_history = store.list_po_amend_history(conn, po, channel=ch, include_record_data=True)
                 activity_log = store.list_po_audit(conn, po, channel=ch)

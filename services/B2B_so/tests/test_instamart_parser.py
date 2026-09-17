@@ -1,3 +1,4 @@
+from blinkit import match_ship_to
 from instamart import (
     extract_delivered_to_from_text,
     extract_header_from_text,
@@ -169,3 +170,59 @@ def test_instamart_lines_map_to_pipeline_rows():
     assert rows[0]["quantity"] == 10
     assert rows[0]["basic_cost_price"] == 120.5
     assert rows[0]["total_amount"] == 1265.25
+
+
+def test_instamart_ship_to_uses_pincode_not_wrong_bangalore_dc():
+    """Same matcher as Bigbasket: 560067 must not map to Dasanapura 562162."""
+    delivered = (
+        "SCOOTSY LOGISTICS PRIVATE LIMITED ECOM EXPRESS LIMITED "
+        "2/3, 3/1, 3/2, 21/1, 21/3, Ekarajapura Village, Sulibele Hobli, "
+        "Bangalore, Karnataka - 560067"
+    )
+    aliases = [
+        {
+            "address_id": "IRCPL - Bangalore - Dasanapura",
+            "address_entry": (
+                "Bangalore-FMCG-DC Innovative Retail Concepts Pvt Ltd , SyNo12 1 2 4 "
+                "SyNo14 1 Adakimaranhalli 1 1 1 Dasanpura Hobli , Makli Post North Taluk "
+                "Bengaluru - 562162."
+            ),
+        },
+        {
+            "address_id": "Scootsy BLR Ecom2",
+            "address_entry": (
+                "SCOOTSY LOGISTICS PRIVATE LIMITED ECOM EXPRESS LIMITED 2/3, 3/1, 3/2, "
+                "21/1, 21/3, Ekarajapura Village, Sulibele Hobli, Bangalore, Karnataka - 560067."
+            ),
+        },
+    ]
+    result = match_ship_to(delivered, aliases)
+    assert result["ok"] is True
+    assert result["address_id"] == "Scootsy BLR Ecom2"
+
+
+def test_instamart_ship_to_same_pincode_picks_correct_warehouse():
+    """Two warehouses at 560067: fuzzy text among pin-matched aliases decides."""
+    delivered = (
+        "SCOOTSY LOGISTICS PRIVATE LIMITED ECOM EXPRESS LIMITED "
+        "Ekarajapura Village, Sulibele Hobli, Bangalore, Karnataka - 560067"
+    )
+    aliases = [
+        {
+            "address_id": "Scootsy BLR Ecom1",
+            "address_entry": (
+                "SCOOTSY LOGISTICS PRIVATE LIMITED Some Other Hub "
+                "Hoskate Rural, Koralur Village, Bengaluru Urban Karnataka - 560067."
+            ),
+        },
+        {
+            "address_id": "Scootsy BLR Ecom2",
+            "address_entry": (
+                "SCOOTSY LOGISTICS PRIVATE LIMITED ECOM EXPRESS LIMITED "
+                "Ekarajapura Village, Sulibele Hobli, Bangalore, Karnataka - 560067."
+            ),
+        },
+    ]
+    result = match_ship_to(delivered, aliases)
+    assert result["ok"] is True
+    assert result["address_id"] == "Scootsy BLR Ecom2"
