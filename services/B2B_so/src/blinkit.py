@@ -502,6 +502,13 @@ def skip_duplicate_without_amend(
     }
 
 
+_PINCODE_RE = re.compile(r"\b\d{6}\b")
+
+
+def _pincodes(text: str) -> set[str]:
+    return set(_PINCODE_RE.findall(text or ""))
+
+
 def _ship_to_match_candidates(delivered_to: str) -> list[str]:
     """Variants of PO ship-to text (Frappe compares multi-line warehouse block)."""
     text = (delivered_to or "").strip()
@@ -527,24 +534,64 @@ def _ship_to_match_candidates(delivered_to: str) -> list[str]:
     return out
 
 
-def match_ship_to(delivered_to: str, aliases: list[dict[str, str]]) -> dict[str, Any]:
-    best = None
-    best_score = 0.0
+def _fuzzy_address_score(delivered_to: str, haystack: str) -> float:
+    hay = (haystack or "").lower()
+    best = 0.0
     for candidate in _ship_to_match_candidates(delivered_to):
-        for entry in aliases:
-            haystack = entry.get("address_entry") or entry.get("address_entry") or ""
-            score = SequenceMatcher(None, candidate.lower(), haystack.lower()).ratio()
-            if score > best_score:
-                best_score = score
-                best = entry
-    if not best or best_score <= 0.6:
-        return {"ok": False, "message": "No sufficiently similar address entry found."}
+        score = SequenceMatcher(None, candidate.lower(), hay).ratio()
+        if score > best:
+            best = score
+    return best
+
+
+def match_ship_to(delivered_to: str, aliases: list[dict[str, str]]) -> dict[str, Any]:
+    """Match PO warehouse text to a mapped SAP ship-to.
+
+    Pincode is the hard key. IRCPL Bangalore-2-FV-FMCG-DC (560067) must not
+    beat Scootsy BLR Ecom2 just because SequenceMatcher likes "Innovative
+    Retail Concepts" / "Bangalore-FMCG-DC" on Dasanapura (562162).
+    """
+    no_match: dict[str, Any] = {"ok": False, "message": "No sufficiently similar address entry found."}
+    if not aliases:
+        return no_match
+
+    delivered_pins = _pincodes(delivered_to)
+    pin_matched: list[dict[str, str]] = []
+    pinless: list[dict[str, str]] = []
+    for entry in aliases:
+        pins = _pincodes(entry.get("address_entry") or "")
+        if delivered_pins and delivered_pins & pins:
+            pin_matched.append(entry)
+        elif not pins:
+            pinless.append(entry)
+
+    if pin_matched:
+        pool = pin_matched
+        min_score = -1.0
+    elif delivered_pins:
+        pool = pinless
+        min_score = 0.6
+    else:
+        pool = list(aliases)
+        min_score = 0.6
+
+    best = None
+    best_score = -1.0
+    for entry in pool:
+        score = _fuzzy_address_score(delivered_to, entry.get("address_entry") or "")
+        if score > best_score:
+            best_score = score
+            best = entry
+    if not best or best_score <= min_score:
+        return no_match
     return {
         "ok": True,
-        "address_id": best.get("address_id") or best.get("address_id"),
-        "address_entry": best.get("address_entry") or best.get("address_entry") or "",
+        "address_id": best.get("address_id") or "",
+        "address_entry": best.get("address_entry") or "",
         "score": best_score,
     }
+
+
 def pick_sap_address(addresses: list[dict[str, Any]], address_id: str) -> dict[str, Any] | None:
     want = (address_id or "").strip()
     for address in addresses:

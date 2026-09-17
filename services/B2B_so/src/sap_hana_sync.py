@@ -35,10 +35,18 @@ def _as_date(value: Any) -> str:
 def document_status(doc_status: str, canceled: str) -> str:
     if str(canceled or "").upper() in {"Y", "YES", "T"}:
         return "cancelled"
-    code = str(doc_status or "").upper()
-    if code == "C":
+    code = str(doc_status or "").strip()
+    low = code.lower()
+    if low in {"bost_close", "closed", "c"}:
         return "bost_Close"
-    if code == "O":
+    if low in {"bost_open", "open", "o"}:
+        return "bost_Open"
+    if low in {"bost_paid", "paid"}:
+        return "bost_Paid"
+    upper = code.upper()
+    if upper == "C":
+        return "bost_Close"
+    if upper == "O":
         return "bost_Open"
     return code or ""
 
