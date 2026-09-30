@@ -29,11 +29,21 @@ from amazon_us.hana_access import get_bom_children, resolve_acct_code
 logger = logging.getLogger(__name__)
 
 
-def post_refunds(conn, posted_after: str, posted_before: str | None = None, dry_run: bool = False) -> dict:
-    """posted_after/posted_before: UTC ISO 8601."""
+def post_refunds(
+    conn,
+    posted_after: str,
+    posted_before: str | None = None,
+    dry_run: bool = False,
+    only_refund_ids: set[str] | None = None,
+) -> dict:
+    """posted_after/posted_before: UTC ISO 8601. only_refund_ids: when given,
+    process just those refund events from the window (used after re-queueing
+    specific failed_permanent rows)."""
     run_id = store.start_sync_log(conn, "cn", posted_after, posted_before)
     try:
         events = finances_api.list_refund_events(posted_after, posted_before)
+        if only_refund_ids is not None:
+            events = [e for e in events if e.refund_id in only_refund_ids]
         logger.info("%s refund events (dry_run=%s)", len(events), dry_run)
         mapping = store.get_sku_mapping(conn)
 

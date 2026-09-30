@@ -512,6 +512,28 @@ def claim_cn(conn: psycopg.Connection, refund_id: str, amazon_order_id: str, pos
     return claimed
 
 
+def requeue_failed_permanent_cns(conn: psycopg.Connection, refund_ids: list[str]) -> list[str]:
+    """Ops helper: move exactly these refund_ids from 'failed_permanent' back
+    to 'failed' so claim_cn will reclaim them. Only for when the cause of the
+    permanent failure has been fixed outside the pipeline (e.g. Finance
+    reopened the closed base invoices). Never touches any other status, and
+    never a refund_id that wasn't named. Returns the ids actually moved."""
+    if not refund_ids:
+        return []
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE amazon_us_cn_log SET status = 'failed', updated_at = now()
+            WHERE refund_id = ANY(%s) AND status = 'failed_permanent'
+            RETURNING refund_id
+            """,
+            (list(refund_ids),),
+        )
+        moved = [r[0] for r in cur.fetchall()]
+    conn.commit()
+    return moved
+
+
 def upsert_cn_log(
     conn: psycopg.Connection,
     refund_id: str,

@@ -746,6 +746,29 @@ def post_credit_notes_handler(event, context):
                     for l in (body.get("DocumentLines") or [])
                 ],
             }
+        if ev.get("mode") == "requeue_failed_permanent_and_post":
+            # {"mode", "refund_ids": [str], "posted_after": ISO, "posted_before": ISO?,
+            #  "dry_run": bool?}. Manual ops helper for when the cause of a
+            # 'failed_permanent' CN was fixed outside the pipeline (e.g. Finance
+            # reopened the closed base invoices): resets exactly these refund_ids
+            # to 'failed', then posts only those refund events. Scoped to the
+            # explicit id list; dry_run builds payloads without touching the log.
+            refund_ids = ev.get("refund_ids") or []
+            if not refund_ids or not ev.get("posted_after"):
+                return {"status": "error", "error": "refund_ids and posted_after are required"}
+            with store.connect() as conn:
+                if ev.get("dry_run"):
+                    requeued = []
+                    result = post_credit_notes.post_refunds(
+                        conn, ev["posted_after"], ev.get("posted_before"), dry_run=True,
+                        only_refund_ids=set(refund_ids),
+                    )
+                else:
+                    requeued = store.requeue_failed_permanent_cns(conn, refund_ids)
+                    result = post_credit_notes.post_refunds(
+                        conn, ev["posted_after"], ev.get("posted_before"), only_refund_ids=set(requeued),
+                    )
+            return {"requested": len(refund_ids), "requeued": requeued, "result": result}
 
         posted_after = ev.get("posted_after") or (
             datetime.now(timezone.utc) - timedelta(days=45)
