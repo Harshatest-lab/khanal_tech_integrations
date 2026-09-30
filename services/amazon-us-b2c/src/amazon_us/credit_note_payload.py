@@ -76,6 +76,14 @@ def build_credit_note_payload(
     for line in invoice_lines:
         lines_by_item_code.setdefault(line.get("ItemCode"), []).append(line)
 
+    # Invoiced quantity still available per invoice line, for this document
+    # only (earlier CNs' consumption isn't tracked here). None = the line
+    # carries no Quantity, so it can't be capped.
+    remaining_qty: dict[int, float | None] = {
+        id(line): (float(line["Quantity"]) if line.get("Quantity") not in (None, "") else None)
+        for line in invoice_lines
+    }
+
     line_udfs = build_line_udfs(order)
 
     doc_lines: list[dict] = []
@@ -220,7 +228,14 @@ def build_credit_note_payload(
                 line_num += 1
             continue
 
-        invoice_line = _pop_matching_invoice_line(lines_by_item_code, item_code)
+        # Fill same-item invoice lines up to each one's invoiced Quantity,
+        # splitting one adjustment across lines when it has to. Popping a
+        # single line per adjustment sent a 4-unit refund to a 1-unit base
+        # line (order 112-7159795-8197858: invoice lines FGDC0824 x1 and
+        # x29, 12-unit refund rejected -10 "Quantity cannot exceed the
+        # quantity in the base document", 2026-09-25).
+        parts = _allocate_invoice_lines(lines_by_item_code.get(item_code) or [], remaining_qty, qty)
+        invoice_line = parts[0][0] if parts else None
         actual_item_code = item_code
         if invoice_line is None:
             # The SKU->item mapping can drift after an invoice posts (SAP
@@ -233,26 +248,28 @@ def build_credit_note_payload(
             fallback = _pop_line_by_price_fallback(lines_by_item_code, unit_price)
             if fallback:
                 actual_item_code, invoice_line = fallback
+                parts = [(invoice_line, qty)]
         if invoice_line is None:
             skipped.append({"seller_sku": adj.seller_sku, "reason": "No matching invoice line found"})
             continue
 
-        doc_lines.append(
-            {
-                "LineNum": line_num,
-                "BaseType": 13,  # AR Invoice
-                "BaseEntry": int(base_doc_entry),
-                "BaseLine": invoice_line.get("LineNum"),
-                "ItemCode": actual_item_code,
-                "Quantity": qty,
-                "UnitPrice": unit_price,
-                "WarehouseCode": constants.SAP_WAREHOUSE,
-                "TaxCode": constants.SAP_TAX_CODE,
-                "WithoutInventoryMovement": "tYES",
-                **line_udfs,
-            }
-        )
-        line_num += 1
+        for part_line, part_qty in parts:
+            doc_lines.append(
+                {
+                    "LineNum": line_num,
+                    "BaseType": 13,  # AR Invoice
+                    "BaseEntry": int(base_doc_entry),
+                    "BaseLine": part_line.get("LineNum"),
+                    "ItemCode": actual_item_code,
+                    "Quantity": part_qty,
+                    "UnitPrice": unit_price,
+                    "WarehouseCode": constants.SAP_WAREHOUSE,
+                    "TaxCode": constants.SAP_TAX_CODE,
+                    "WithoutInventoryMovement": "tYES",
+                    **line_udfs,
+                }
+            )
+            line_num += 1
 
     if not doc_lines:
         return None, skipped
@@ -318,6 +335,43 @@ def build_credit_note_payload(
 def _pop_matching_invoice_line(lines_by_item_code: dict[str, list[dict]], item_code: str) -> dict | None:
     lines = lines_by_item_code.get(item_code)
     return lines.pop(0) if lines else None
+
+
+def _allocate_invoice_lines(
+    lines: list[dict], remaining_qty: dict[int, float | None], qty: float
+) -> list[tuple[dict, float]]:
+    """Split `qty` over the same-item invoice `lines`, filling each up to its
+    invoiced Quantity. Returns [(invoice_line, part_qty), ...]; empty when
+    there is no line for the item. Exhausted lines are dropped from `lines`
+    so the next adjustment moves on to the next one.
+
+    A line with no known Quantity takes the whole amount and is consumed
+    (the old one-line-per-adjustment behaviour). If `qty` exceeds everything
+    the invoice has, the excess goes on the last line so SAP rejects the
+    document loudly (-10) instead of a silent partial credit."""
+    parts: list[tuple[dict, float]] = []
+    left = qty
+    for line in list(lines):
+        cap = remaining_qty.get(id(line))
+        if cap is None:
+            parts.append((line, round(left, 6)))
+            lines.remove(line)
+            left = 0.0
+            break
+        take = round(min(left, cap), 6)
+        if take >= _MIN_POSTABLE_QTY:
+            parts.append((line, take))
+            remaining_qty[id(line)] = round(cap - take, 6)
+            left = round(left - take, 6)
+        if remaining_qty[id(line)] < _MIN_POSTABLE_QTY:
+            lines.remove(line)
+        if left < _MIN_POSTABLE_QTY:
+            left = 0.0
+            break
+    if parts and left >= _MIN_POSTABLE_QTY:
+        last_line, last_qty = parts[-1]
+        parts[-1] = (last_line, round(last_qty + left, 6))
+    return parts
 
 
 def _pop_line_by_price_fallback(

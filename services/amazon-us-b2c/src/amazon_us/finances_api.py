@@ -19,6 +19,7 @@ monthly MTR reconciliation is the safety net that catches those.
 
 from __future__ import annotations
 
+import html
 import logging
 import time
 from dataclasses import dataclass, field
@@ -138,7 +139,11 @@ def _parse_refund_event(raw: dict) -> RefundEvent | None:
 
     adjustments = []
     for item in raw.get("ShipmentItemAdjustmentList") or []:
-        sku = (item.get("SellerSKU") or "").strip()
+        # The Finances API returns the SKU HTML-escaped ("Foodtopper_S&amp;C")
+        # while the Orders API / our staged lines carry it raw ("Foodtopper_S&C"),
+        # so the SKU never matched and the refund was skipped "no unit price
+        # or SAP mapping" (orders 111-2977129-8568210, 113-1823665-9234661).
+        sku = html.unescape(item.get("SellerSKU") or "").strip()
         if not sku:
             continue
 
