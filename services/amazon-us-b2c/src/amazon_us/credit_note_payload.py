@@ -84,6 +84,8 @@ def build_credit_note_payload(
         for line in invoice_lines
     }
 
+    merged_lines: dict[tuple, dict] = {}
+
     line_udfs = build_line_udfs(order)
 
     doc_lines: list[dict] = []
@@ -254,21 +256,30 @@ def build_credit_note_payload(
             continue
 
         for part_line, part_qty in parts:
-            doc_lines.append(
-                {
-                    "LineNum": line_num,
-                    "BaseType": 13,  # AR Invoice
-                    "BaseEntry": int(base_doc_entry),
-                    "BaseLine": part_line.get("LineNum"),
-                    "ItemCode": actual_item_code,
-                    "Quantity": part_qty,
-                    "UnitPrice": unit_price,
-                    "WarehouseCode": constants.SAP_WAREHOUSE,
-                    "TaxCode": constants.SAP_TAX_CODE,
-                    "WithoutInventoryMovement": "tYES",
-                    **line_udfs,
-                }
-            )
+            # One document line per base invoice row: SAP rejects a second
+            # line pointing at the same BaseLine ("Invalid value
+            # [DocumentLines.BaseLine]", order 112-7159795-8197858 on
+            # 2026-09-30), so quantities aimed at the same row are summed.
+            merge_key = (part_line.get("LineNum"), actual_item_code, unit_price)
+            existing = merged_lines.get(merge_key)
+            if existing is not None:
+                existing["Quantity"] = round(existing["Quantity"] + part_qty, 6)
+                continue
+            doc_line = {
+                "LineNum": line_num,
+                "BaseType": 13,  # AR Invoice
+                "BaseEntry": int(base_doc_entry),
+                "BaseLine": part_line.get("LineNum"),
+                "ItemCode": actual_item_code,
+                "Quantity": part_qty,
+                "UnitPrice": unit_price,
+                "WarehouseCode": constants.SAP_WAREHOUSE,
+                "TaxCode": constants.SAP_TAX_CODE,
+                "WithoutInventoryMovement": "tYES",
+                **line_udfs,
+            }
+            merged_lines[merge_key] = doc_line
+            doc_lines.append(doc_line)
             line_num += 1
 
     if not doc_lines:

@@ -69,12 +69,12 @@ def test_refund_larger_than_first_line_spills_onto_the_next_same_item_line():
     payload, skipped = _build([4, 1, 1, 1, 2, 1, 1, 1])
     assert skipped == []
     lines = _item_lines(payload)
-    assert lines[0] == (0, 1.0)  # first unit fills the 1-unit line
-    assert lines[1] == (1, 3.0)  # rest of the 4-unit adjustment spills to line 1
-    per_line: dict[int, float] = {}
-    for base_line, qty in lines:
-        per_line[base_line] = per_line.get(base_line, 0) + qty
-    assert per_line == {0: 1.0, 1: 11.0}  # 12 units, no line above its invoiced qty
+    # 12 units, no row above its invoiced qty, and ONE document line per base
+    # row: a repeated BaseLine made SAP answer "Invalid value
+    # [DocumentLines.BaseLine]" on the first live attempt (2026-09-30).
+    assert lines == [(0, 1.0), (1, 11.0)]
+    base_lines = [b for b, _ in lines]
+    assert len(base_lines) == len(set(base_lines))
 
 
 def test_single_unit_refund_still_links_to_the_first_line():
@@ -86,7 +86,7 @@ def test_two_adjustments_fit_one_multi_unit_invoice_line():
     # Used to skip the second adjustment ("No matching invoice line found").
     payload, skipped = _build([1, 1], [{"LineNum": 0, "ItemCode": "FGDC0001", "Quantity": 2, "UnitPrice": 19.09}])
     assert skipped == []
-    assert _item_lines(payload) == [(0, 1.0), (0, 1.0)]
+    assert _item_lines(payload) == [(0, 2.0)]  # summed onto the one base row, not two lines
 
 
 def test_refund_beyond_everything_invoiced_fails_loudly_not_as_a_partial_credit():
