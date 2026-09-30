@@ -15,6 +15,7 @@ from unicommerce.mappers import (  # noqa: E402
     build_line_items,
     compute_uc_financials,
     eligible_line_items,
+    extract_shipping_package_fields,
     extract_uc_order_id,
     order_ready_for_invoice,
     safe_str,
@@ -82,9 +83,16 @@ def test_eligible_line_items_quantity_zero_bug_inherited_from_frappe():
     assert [i["itemSku"] for i in active] == ["D"]
 
 
+_SHIPPED_PKG = [{"dispatched": "2026-09-12T02:30:00Z", "status": "DISPATCHED"}]
+
+
 def test_order_ready_for_invoice_requires_complete_status_and_lines():
     ready, _ = order_ready_for_invoice(
-        {"status": "COMPLETE", "saleOrderItems": [{"itemSku": "A", "quantity": 1, "statusCode": "COMPLETE"}]}
+        {
+            "status": "COMPLETE",
+            "shippingPackages": _SHIPPED_PKG,
+            "saleOrderItems": [{"itemSku": "A", "quantity": 1, "statusCode": "COMPLETE"}],
+        }
     )
     assert ready is True
 
@@ -92,9 +100,73 @@ def test_order_ready_for_invoice_requires_complete_status_and_lines():
     assert not_ready is False
     assert "PROCESSING" in reason
 
-    no_lines, reason2 = order_ready_for_invoice({"status": "COMPLETE", "saleOrderItems": []})
+    no_lines, reason2 = order_ready_for_invoice(
+        {"status": "COMPLETE", "shippingPackages": _SHIPPED_PKG, "saleOrderItems": []}
+    )
     assert no_lines is False
     assert "no invoice-eligible" in reason2
+
+
+# ── Ship date = SAP DocDate: extraction, skip-if-missing, Flex ─────────────────
+
+_ONE_LINE = [{"itemSku": "A", "quantity": 1, "statusCode": "COMPLETE"}]
+
+
+def test_order_without_ship_date_is_not_ready_even_if_complete():
+    ready, reason = order_ready_for_invoice({"status": "COMPLETE", "saleOrderItems": _ONE_LINE})
+    assert ready is False
+    assert "No shipment/dispatch date" in reason
+
+    ready2, _ = order_ready_for_invoice(
+        {"status": "COMPLETE", "shippingPackages": [{"status": "CREATED"}], "saleOrderItems": _ONE_LINE}
+    )
+    assert ready2 is False
+
+
+def test_shipment_date_uses_latest_dispatched_across_all_packages_in_utc():
+    order = {
+        "shippingPackages": [
+            {"dispatched": "2026-09-08T10:00:00Z"},
+            {"dispatched": "2026-09-12T10:00:00+05:30"},  # 04:30Z, later than the 08th
+            {"dispatched": None},
+        ]
+    }
+    fields = extract_shipping_package_fields(order)
+    assert fields["shipment_date"] == "2026-09-12 04:30:00"  # stored as UTC, tz-normalised
+
+
+def test_shipment_date_epoch_millis_dispatched():
+    # 2026-06-30T19:00:00Z
+    fields = extract_shipping_package_fields({"shippingPackages": [{"dispatched": 1782846000000}]})
+    assert fields["shipment_date"] == "2026-06-30 19:00:00"
+
+
+def test_flex_uses_amazon_shipment_date_from_synthetic_order():
+    order = {
+        "channel": "AMAZON_FLEX",
+        "created": "2026-09-09T05:00:00+00:00",  # purchase-date
+        "updated": "2026-09-11T08:15:00+00:00",  # Amazon shipment-date
+        "saleOrderItems": _ONE_LINE,
+        "status": "COMPLETE",
+    }
+    assert extract_shipping_package_fields(order)["shipment_date"] == "2026-09-11 08:15:00"
+    ready, _ = order_ready_for_invoice(order)
+    assert ready is True
+
+
+def test_non_flex_order_never_treats_updated_as_a_ship_date():
+    order = {"channel": "FLIPKART", "updated": "2026-09-11T08:15:00+00:00", "status": "COMPLETE", "saleOrderItems": _ONE_LINE}
+    assert extract_shipping_package_fields(order) == {}
+    ready, _ = order_ready_for_invoice(order)
+    assert ready is False
+
+
+def test_flex_cutoff_applies_to_ship_date_not_order_date():
+    base = {"channel": "AMAZON_FLEX", "status": "COMPLETE", "saleOrderItems": _ONE_LINE, "created": "2026-07-30T05:00:00+00:00"}
+    shipped_before = dict(base, updated="2026-07-31T08:00:00+00:00")
+    shipped_after = dict(base, updated="2026-08-02T08:00:00+00:00")
+    assert order_ready_for_invoice(shipped_before)[0] is False
+    assert order_ready_for_invoice(shipped_after)[0] is True
 
 
 def test_build_line_items_maps_batch_and_return_status():

@@ -73,7 +73,7 @@ def test_ar_invoice_payload_fills_batch_numbers_for_fefo_line_without_explicit_b
         ],
     }
     payload, _tax = ar_invoice_payload(
-        uniware_id="SO-1", channel="FLIPKART", order_json="{}", uc_data=uc_data, order_date="2026-07-20",
+        uniware_id="SO-1", channel="FLIPKART", order_json="{}", uc_data=uc_data, order_date="2026-07-20", doc_date="2026-07-20",
         settings=settings,
         batch_managed_cache={"SKU-A": True},
         fefo_rows_cache={("SKU-A", "EC-FG"): [{"batch_number": "B1", "quantity": 10}]},
@@ -102,7 +102,7 @@ def test_ar_invoice_payload_pools_fefo_across_sibling_lines_same_sku():
         ],
     }
     payload, _tax = ar_invoice_payload(
-        uniware_id="SO-MULTI-LINE", channel="FLIPKART", order_json="{}", uc_data=uc_data, order_date="2026-09-01",
+        uniware_id="SO-MULTI-LINE", channel="FLIPKART", order_json="{}", uc_data=uc_data, order_date="2026-09-01", doc_date="2026-09-01",
         settings=settings,
         batch_managed_cache={"FGHN0051": True},
         fefo_rows_cache={
@@ -134,7 +134,7 @@ def test_ar_invoice_payload_batch_numbers_empty_without_fefo_cache():
         ],
     }
     payload, _tax = ar_invoice_payload(
-        uniware_id="SO-1", channel="FLIPKART", order_json="{}", uc_data=uc_data, order_date="2026-07-20",
+        uniware_id="SO-1", channel="FLIPKART", order_json="{}", uc_data=uc_data, order_date="2026-07-20", doc_date="2026-07-20",
         settings=settings,
         batch_managed_cache={"SKU-A": True},
     )
@@ -162,7 +162,7 @@ def test_ar_invoice_payload_ignores_ucs_batch_number_uses_fefo_instead():
         ],
     }
     payload, _tax = ar_invoice_payload(
-        uniware_id="SO-1", channel="FLIPKART", order_json="{}", uc_data=uc_data, order_date="2026-07-20",
+        uniware_id="SO-1", channel="FLIPKART", order_json="{}", uc_data=uc_data, order_date="2026-07-20", doc_date="2026-07-20",
         settings=settings,
         batch_managed_cache={"SKU-A": True},
         # Note: no "OLD-BATCH-NOW-DEPLETED" row here at all -- only a
@@ -194,7 +194,7 @@ def test_zero_discount_floor_discounts_gross_price_to_zero_when_order_has_a_paid
         ],
     }
     payload, _tax = ar_invoice_payload(
-        uniware_id="SO-1", channel="DOGSEE_SITE_IN", order_json="{}", uc_data=uc_data, order_date="2026-08-20",
+        uniware_id="SO-1", channel="DOGSEE_SITE_IN", order_json="{}", uc_data=uc_data, order_date="2026-08-20", doc_date="2026-08-20",
         settings=settings,
     )
     lines = {line["ItemCode"]: line for line in payload["DocumentLines"]}
@@ -223,7 +223,7 @@ def test_zero_discount_floor_charges_zero_tax_on_the_discounted_free_line():
         ],
     }
     payload, total_tax_expected = ar_invoice_payload(
-        uniware_id="SO-1", channel="DOGSEE_SITE_IN", order_json="{}", uc_data=uc_data, order_date="2026-08-20",
+        uniware_id="SO-1", channel="DOGSEE_SITE_IN", order_json="{}", uc_data=uc_data, order_date="2026-08-20", doc_date="2026-08-20",
         settings=settings,
     )
     lines = {line["ItemCode"]: line for line in payload["DocumentLines"]}
@@ -248,7 +248,7 @@ def test_zero_discount_floor_off_for_channels_not_opted_in():
         ],
     }
     payload, _tax = ar_invoice_payload(
-        uniware_id="SO-1", channel="FLIPKART", order_json="{}", uc_data=uc_data, order_date="2026-08-20",
+        uniware_id="SO-1", channel="FLIPKART", order_json="{}", uc_data=uc_data, order_date="2026-08-20", doc_date="2026-08-20",
         settings=settings,
     )
     prices = {line["ItemCode"]: line["UnitPrice"] for line in payload["DocumentLines"]}
@@ -276,7 +276,7 @@ def test_zero_discount_floor_stays_off_when_every_line_is_free():
         ],
     }
     payload, _tax = ar_invoice_payload(
-        uniware_id="SO-1", channel="DOGSEE_SITE_IN", order_json="{}", uc_data=uc_data, order_date="2026-08-20",
+        uniware_id="SO-1", channel="DOGSEE_SITE_IN", order_json="{}", uc_data=uc_data, order_date="2026-08-20", doc_date="2026-08-20",
         settings=settings,
     )
     assert payload["DocumentLines"][0]["UnitPrice"] == 0.0
@@ -297,7 +297,7 @@ def test_zero_discount_floor_does_not_affect_normal_partial_discounts():
         ],
     }
     payload, _tax = ar_invoice_payload(
-        uniware_id="SO-1", channel="DOGSEE_SITE_IN", order_json="{}", uc_data=uc_data, order_date="2026-08-20",
+        uniware_id="SO-1", channel="DOGSEE_SITE_IN", order_json="{}", uc_data=uc_data, order_date="2026-08-20", doc_date="2026-08-20",
         settings=settings,
     )
     assert payload["DocumentLines"][0]["UnitPrice"] == pytest.approx(84.32)
@@ -495,3 +495,38 @@ def test_sum_tax_total_uses_first_matching_key_per_line():
 
 def test_sum_tax_total_ignores_lines_with_no_tax_key():
     assert sum_tax_total([{"Quantity": 1}]) == 0.0
+
+
+# ── Invoice dates: DocDate = ship date, TaxDate = order date ─────────────────
+
+_DATE_SETTINGS = UnicommerceSettings(
+    channel_customer_map={"default": "C-DEFAULT"}, ar_invoice_series=10, tax_code_map={"0_intra": "GST0"}
+)
+_DATE_UC = {
+    "code": "SO-DATES",
+    "items": [{"itemSku": "SKU-A", "quantity": 1, "unitPrice": 100, "taxPercent": 0, "warehouseCode": "EC-FG"}],
+}
+
+
+def test_ar_invoice_payload_docdate_is_ship_date_and_taxdate_is_order_date():
+    payload, _tax = ar_invoice_payload(
+        uniware_id="SO-DATES", channel="FLIPKART", order_json="{}", uc_data=_DATE_UC,
+        order_date="2026-08-30", doc_date="2026-09-12", settings=_DATE_SETTINGS,
+        batch_managed_cache={"SKU-A": False},
+    )
+    assert payload["DocDate"] == "2026-09-12"
+    assert payload["DocDueDate"] == "2026-09-12"
+    assert payload["TaxDate"] == "2026-08-30"
+
+
+def test_ar_invoice_payload_refuses_without_ship_date_no_order_date_fallback():
+    with pytest.raises(ValueError, match="No ship date"):
+        ar_invoice_payload(
+            uniware_id="SO-DATES", channel="FLIPKART", order_json="{}", uc_data=_DATE_UC,
+            order_date="2026-08-30", settings=_DATE_SETTINGS, batch_managed_cache={"SKU-A": False},
+        )
+    with pytest.raises(ValueError, match="No ship date"):
+        ar_invoice_payload(
+            uniware_id="SO-DATES", channel="FLIPKART", order_json="{}", uc_data=_DATE_UC,
+            order_date="2026-08-30", doc_date="", settings=_DATE_SETTINGS, batch_managed_cache={"SKU-A": False},
+        )

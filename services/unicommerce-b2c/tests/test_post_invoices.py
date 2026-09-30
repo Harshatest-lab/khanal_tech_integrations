@@ -45,6 +45,65 @@ def test_post_order_defers_to_verify_when_duplicate_check_fails(monkeypatch):
     assert calls["unclaim"] == ("UC-1", "verify")
 
 
+def _no_post_no_build(monkeypatch):
+    """Any attempt to build a payload, hit SAP with a POST, or claim batches
+    fails the test -- the idempotency guard must short-circuit before all of it."""
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("must not build/post when SAP already has an invoice for this order")
+
+    monkeypatch.setattr(post_invoices.sap_client, "post_invoice_with_series_fallback", fail_if_called)
+    monkeypatch.setattr(post_invoices.sap_payload, "ar_invoice_payload", fail_if_called)
+    monkeypatch.setattr(post_invoices, "_check_batches", fail_if_called)
+
+
+def test_post_order_links_existing_sap_invoice_and_never_posts_again(monkeypatch):
+    """Double-post guard for orders made newly eligible by the ship-date rule
+    (ordered before the cutoff, shipped after it): if the legacy pipeline
+    already invoiced them in SAP, link the existing DocEntry -- do not post."""
+    marked = {}
+    _no_post_no_build(monkeypatch)
+    monkeypatch.setattr(
+        post_invoices.sap_client, "find_invoice_by_uc_order_id",
+        lambda uid: {"doc_entry": 71887, "doc_num": 68832, "doc_tax_amount": 35.85},
+    )
+    monkeypatch.setattr(
+        post_invoices.store, "mark_posted",
+        lambda conn, uid, de, dn, tax, x: marked.update(uid=uid, de=de, dn=dn),
+    )
+
+    row = {"uniware_id": "UC-JULY", "channel_name": "FLIPKART", "order_date": "2026-07-30", "doc_date": "2026-08-03"}
+    outcome, shortages = post_invoices._post_order(
+        conn=None, row=row, settings=object(),
+        batch_managed_cache={}, fefo_cache={}, series_cache={}, reservation_ctx={},
+    )
+
+    assert outcome == "posted" and shortages == []
+    assert marked == {"uid": "UC-JULY", "de": "71887", "dn": "68832"}
+
+
+def test_post_order_flex_uses_numatcard_guard_and_never_posts_again(monkeypatch):
+    marked = {}
+    _no_post_no_build(monkeypatch)
+    monkeypatch.setattr(
+        post_invoices.sap_client, "find_invoice_by_uc_order_id",
+        lambda uid: (_ for _ in ()).throw(AssertionError("Flex must not use the U_Order lookup")),
+    )
+    monkeypatch.setattr(
+        post_invoices.sap_client, "find_invoice_by_num_at_card",
+        lambda uid: {"doc_entry": 77216, "doc_num": 72001, "doc_tax_amount": 0},
+    )
+    monkeypatch.setattr(post_invoices.store, "mark_posted", lambda conn, uid, de, dn, tax, x: marked.update(de=de))
+
+    row = {"uniware_id": "FLEX-403-1-T1", "channel_name": "AMAZON_FLEX", "order_date": "2026-09-01", "doc_date": "2026-09-03"}
+    outcome, _ = post_invoices._post_order(
+        conn=None, row=row, settings=object(),
+        batch_managed_cache={}, fefo_cache={}, series_cache={}, reservation_ctx={},
+    )
+    assert outcome == "posted"
+    assert marked == {"de": "77216"}
+
+
 def test_post_ready_orders_passes_posting_cutoff_to_get_ready_orders(monkeypatch):
     import types
     calls = {}
@@ -228,7 +287,10 @@ class _FakeCursor:
 
     @property
     def description(self):
-        return [types.SimpleNamespace(name=n) for n in ("uniware_id", "channel_name", "order_date", "order_json", "attempt_count")]
+        return [
+            types.SimpleNamespace(name=n)
+            for n in ("uniware_id", "channel_name", "order_date", "doc_date", "order_json", "attempt_count")
+        ]
 
     def fetchone(self):
         return self._row
@@ -257,12 +319,55 @@ def test_post_one_order_blocks_pre_cutoff_orders_by_default(monkeypatch):
     monkeypatch.setattr(post_invoices.store, "unclaim_order", fail_if_called)
     monkeypatch.setattr(post_invoices.store, "claim_ready_order", fail_if_called)
 
-    row = ("UC-OLD", "FLIPKART", "2026-06-04", "{}", 0)
+    row = ("UC-OLD", "FLIPKART", "2026-06-04", "2026-06-06", "{}", 0)
     result = post_invoices.post_one_order(_FakeConn(row), "UC-OLD")
 
     assert result["status"] == "pre_cutoff_blocked"
     assert result["order_date"] == "2026-06-04"
+    assert result["doc_date"] == "2026-06-06"
     assert result["cutoff_date"] == constants.POSTING_CUTOFF_DATE
+
+
+def test_post_one_order_cutoff_is_judged_on_ship_date_not_order_date(monkeypatch):
+    """Ordered in July but shipped after the floor is postable; ordered after
+    the floor but shipped before it is not."""
+    monkeypatch.setattr(post_invoices.store, "is_period_locked", lambda conn, d: False)
+    monkeypatch.setattr(post_invoices, "get_settings", lambda **kw: object())
+    monkeypatch.setattr(post_invoices.sap_client, "validate_active_series", lambda s: (False, "stop-after-cutoff-check"))
+
+    shipped_after = ("UC-A", "FLIPKART", "2026-07-30", "2026-08-03", "{}", 0)
+    assert post_invoices.post_one_order(_FakeConn(shipped_after), "UC-A")["status"] == "series_guard_failed"
+
+    shipped_before = ("UC-B", "FLIPKART", "2026-08-02", "2026-07-31", "{}", 0)
+    assert post_invoices.post_one_order(_FakeConn(shipped_before), "UC-B")["status"] == "pre_cutoff_blocked"
+
+
+def test_post_one_order_without_ship_date_never_posts_even_with_force(monkeypatch):
+    def fail_if_called(*a, **k):
+        raise AssertionError("must not proceed for an unshipped order")
+
+    monkeypatch.setattr(post_invoices.sap_client, "validate_active_series", fail_if_called)
+    monkeypatch.setattr(post_invoices.store, "unclaim_order", fail_if_called)
+    monkeypatch.setattr(post_invoices.store, "claim_ready_order", fail_if_called)
+
+    row = ("UC-NOSHIP", "FLIPKART", "2026-09-10", None, "{}", 0)
+    for force in (False, True):
+        result = post_invoices.post_one_order(_FakeConn(row), "UC-NOSHIP", force=force)
+        assert result["status"] == "no_ship_date"
+
+
+def test_post_one_order_period_lock_is_checked_on_ship_month(monkeypatch):
+    seen = {}
+
+    def fake_locked(conn, d):
+        seen["date"] = d
+        return True
+
+    monkeypatch.setattr(post_invoices.store, "is_period_locked", fake_locked)
+    row = ("UC-L", "FLIPKART", "2026-08-30", "2026-09-12", "{}", 0)
+    result = post_invoices.post_one_order(_FakeConn(row), "UC-L")
+    assert seen["date"] == "2026-09-12"  # ship date, not the August order date
+    assert result["status"] == "period_locked"
 
 
 def test_post_one_order_force_bypasses_cutoff(monkeypatch):
@@ -283,7 +388,7 @@ def test_post_one_order_force_bypasses_cutoff(monkeypatch):
     # "locked" -- stub it directly, same as the other store calls below.
     monkeypatch.setattr(post_invoices.store, "is_period_locked", lambda conn, d: False)
 
-    row = ("UC-OLD", "FLIPKART", "2026-06-04", "{}", 0)
+    row = ("UC-OLD", "FLIPKART", "2026-06-04", "2026-06-06", "{}", 0)
     result = post_invoices.post_one_order(_FakeConn(row), "UC-OLD", force=True)
 
     assert calls.get("reached_series_guard") is True

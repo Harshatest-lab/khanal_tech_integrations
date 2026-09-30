@@ -43,8 +43,12 @@ class _FakeStore:
         pass
 
 
+# SAP DocDate is the ship date, so only dispatched orders can be promoted.
+_SHIPPED = [{"dispatched": "2026-09-12T02:30:00Z", "status": "DISPATCHED"}]
+
+
 def _order(status, items):
-    return json.dumps({"status": status, "saleOrderItems": items})
+    return json.dumps({"status": status, "shippingPackages": _SHIPPED, "saleOrderItems": items})
 
 
 _ITEM_OK = {"statusCode": "COMPLETE", "quantity": 1}
@@ -77,7 +81,7 @@ def test_promotes_only_complete_orders_with_eligible_items(monkeypatch):
 def test_handles_dict_order_json_not_just_str(monkeypatch):
     # psycopg returns jsonb columns as dicts already, not JSON strings --
     # promote must handle both.
-    fetched = [{"uniware_id": "A", "order_json": {"status": "COMPLETE", "saleOrderItems": [_ITEM_OK]}}]
+    fetched = [{"uniware_id": "A", "order_json": {"status": "COMPLETE", "shippingPackages": _SHIPPED, "saleOrderItems": [_ITEM_OK]}}]
     fake = _FakeStore(fetched)
     monkeypatch.setattr(fetch_sync, "store", fake)
 
@@ -116,7 +120,7 @@ class _FakeUcClient:
         pass
 
     def get_order_detail(self, uniware_id):
-        return {"status": "COMPLETE", "saleOrderItems": [_ITEM_OK]}
+        return {"status": "COMPLETE", "shippingPackages": _SHIPPED, "saleOrderItems": [_ITEM_OK]}
 
 
 def test_stale_fetched_row_triggers_live_refetch_and_upsert(monkeypatch):

@@ -153,6 +153,11 @@ def _recon_invoice(conn, uniware_id: str, settings) -> None:
         uniware_id=uniware_id, channel=row.get("channel_name") or "", order_json=order_json_str,
         uc_data=uc_data, order_date=order_date_str, settings=settings, batch_managed_cache=batch_managed_cache,
         fefo_rows_cache=fefo_cache,
+        # Read-only rebuild of an ALREADY-POSTED invoice for a price/tax diff
+        # (DocDate is not compared). Legacy invoices may predate the ship-date
+        # rule or have no shipment_date at all, so fall back to the order date
+        # here only -- the real posting path never falls back.
+        doc_date=row.get("doc_date") or order_date_str,
     )
     payload_lines = payload.get("DocumentLines", [])
     expected_unit = sap_payload.sum_unit_price_total(payload_lines)

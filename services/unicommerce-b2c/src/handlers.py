@@ -330,6 +330,10 @@ def post_invoices_handler(event, context):
     attempt/hold budget, then runs the normal ready-order sweep in
     the same invocation so they get retried immediately instead of
     waiting for the next cron tick.
+    {"backfill_flex_shipment_dates": true, "apply": bool?} — one-off for the
+    ship-date DocDate rule: fills shipment_date on pre-existing, not-yet-
+    posted AMAZON_FLEX rows from Amazon's shipment-date in order_json
+    (see store.backfill_flex_shipment_dates). Dry run unless apply=true.
     {"delete_pre_cutoff_ready": true} — one-off cleanup, user-requested
     2026-08-25: permanently deletes every 'ready' order with order_date
     before POSTING_CUTOFF_DATE (see store.delete_pre_cutoff_ready_orders
@@ -344,6 +348,9 @@ def post_invoices_handler(event, context):
         with store.connect() as conn:
             if ev.get("uniware_id"):
                 return post_invoices.post_one_order(conn, ev["uniware_id"], force=bool(ev.get("force") or False))
+            if ev.get("backfill_flex_shipment_dates"):
+                # Dry run unless "apply": true is passed explicitly.
+                return store.backfill_flex_shipment_dates(conn, dry_run=not bool(ev.get("apply")))
             if ev.get("delete_pre_cutoff_ready"):
                 deleted = store.delete_pre_cutoff_ready_orders(conn, constants.POSTING_CUTOFF_DATE)
                 return {"deleted_count": len(deleted), "deleted_orders": deleted}

@@ -362,16 +362,30 @@ def mark_live_checked(conn: psycopg.Connection, uniware_id: str) -> None:
 # Ported from khanal_tech_integrations/unicommerce/workers/invoice.py's
 # store-layer operations (frappe.db.set_value / frappe.db.sql calls).
 
+# The SAP AR Invoice DocDate is the SHIP date (shipment_date, an IST business
+# date), not the channel order date -- same rule as Walmart and amazon-us-b2c;
+# the order date goes to TaxDate/U_OrderedOn. shipment_date is timestamptz
+# holding the true dispatch instant, so convert to IST before taking the
+# date (a plain ::date would use the DB session zone and shift late-evening
+# IST dispatches by a day). Every posting gate -- cutoff floor, period lock,
+# claim -- keys off this same expression so they always agree with the date
+# the invoice is actually posted on. NULL = not shipped = not postable.
+DOC_DATE_SQL = "(shipment_date AT TIME ZONE 'Asia/Kolkata')::date"
+DOC_DATE_SELECT = "to_char((shipment_date AT TIME ZONE 'Asia/Kolkata')::date, 'YYYY-MM-DD') AS doc_date"
+
+
 def get_ready_orders(
     conn: psycopg.Connection, limit: int, cutoff_date: str, ready_before=None, channel_name: str | None = None
 ) -> list[dict]:
-    """cutoff_date is a hard floor on order_date (see
-    unicommerce.constants.POSTING_CUTOFF_DATE) -- required, not optional,
-    so no caller can accidentally sweep in a pre-cutoff order."""
+    """cutoff_date is a hard floor on the invoice date = ship date (see
+    DOC_DATE_SQL and unicommerce.constants.POSTING_CUTOFF_DATE) -- required,
+    not optional, so no caller can accidentally sweep in a pre-cutoff
+    order. Orders with no ship date are never returned."""
     where = [
         "pipeline_status = 'ready'",
-        "order_date >= %s",
-        "NOT EXISTS (SELECT 1 FROM unicommerce_period_locks WHERE period = to_char(order_date, 'YYYY-MM') AND locked)",
+        "shipment_date IS NOT NULL",
+        f"{DOC_DATE_SQL} >= %s",
+        f"NOT EXISTS (SELECT 1 FROM unicommerce_period_locks WHERE period = to_char({DOC_DATE_SQL}, 'YYYY-MM') AND locked)",
     ]
     params: list = [cutoff_date]
     if ready_before is not None:
@@ -384,10 +398,10 @@ def get_ready_orders(
     with conn.cursor() as cur:
         cur.execute(
             f"""
-            SELECT uniware_id, channel_name, order_date, order_json, attempt_count
+            SELECT uniware_id, channel_name, order_date, {DOC_DATE_SELECT}, order_json, attempt_count
             FROM unicommerce_orders
             WHERE {' AND '.join(where)}
-            ORDER BY order_date ASC, created_at ASC
+            ORDER BY shipment_date ASC, created_at ASC
             LIMIT %s
             """,
             params,
@@ -429,20 +443,23 @@ def claim_ready_order(conn: psycopg.Connection, uniware_id: str) -> bool:
     worker already claimed it (protects against two concurrent posting
     runs, or a manual retry racing a scheduled run, double-posting the
     same order to SAP -- exactly the class of bug fixed in the Frappe
-    source's khanal_tech_integrations PR #1301-#1304) OR the order's month
-    is locked (see unicommerce_period_locks) -- this is the actual safety
-    boundary for period locks, not just get_ready_orders' soft filter, so
-    no posting path (scheduled, manual retry, future) can ever bypass a
-    locked month even if it skips the read-side filter."""
+    source's khanal_tech_integrations PR #1301-#1304) OR the invoice's month
+    (ship date, see DOC_DATE_SQL) is locked (see unicommerce_period_locks)
+    OR the order has no ship date -- this is the actual safety boundary for
+    period locks and for "no ship date, no post", not just
+    get_ready_orders' soft filter, so no posting path (scheduled, manual
+    retry, force, future) can ever bypass them even if it skips the
+    read-side filter."""
     with conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             UPDATE unicommerce_orders
             SET pipeline_status = 'posting', posting_started_at = now(), updated_at = now()
             WHERE uniware_id = %s AND pipeline_status = 'ready'
+              AND shipment_date IS NOT NULL
               AND NOT EXISTS (
                 SELECT 1 FROM unicommerce_period_locks
-                WHERE period = to_char(unicommerce_orders.order_date, 'YYYY-MM') AND locked
+                WHERE period = to_char({DOC_DATE_SQL}, 'YYYY-MM') AND locked
               )
             """,
             (uniware_id,),
@@ -450,6 +467,50 @@ def claim_ready_order(conn: psycopg.Connection, uniware_id: str) -> bool:
         claimed = cur.rowcount == 1
     conn.commit()
     return claimed
+
+
+_FLEX_BACKFILL_STATUSES = ("fetched", "ready", "failed", "dead", "batch_hold", "verify", "period_locked")
+
+
+def backfill_flex_shipment_dates(conn: psycopg.Connection, dry_run: bool = True) -> dict:
+    """One-off for the ship-date DocDate rule. AMAZON_FLEX orders staged
+    before it have shipment_date NULL (flex_fetch builds a synthetic order
+    with no UC shippingPackages); Amazon's own shipment-date sits in
+    order_json->>'updated'. Without this, in-flight Flex rows older than
+    flex_fetch's 2-day re-fetch lookback would be skipped forever as
+    "no ship date". Only touches rows still in a pre-posting state -- never
+    a 'posted' row, so no existing invoice/DocEntry linkage is affected --
+    and only fills NULLs, never overwrites. Only ISO-formatted `updated`
+    values are cast (flex_fetch writes Amazon's ISO shipment-date; a
+    non-ISO value, e.g. epoch-millis on AMAZON_FLEX_XFZQ, would make the
+    ::timestamptz cast abort the entire UPDATE, so it is excluded up
+    front). Returns the matching ids so a dry run (the default) can be
+    reviewed before applying."""
+    where = """
+        channel_name = 'AMAZON_FLEX'
+        AND shipment_date IS NULL
+        AND pipeline_status = ANY(%s)
+        AND order_json->>'updated' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T'
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT uniware_id, pipeline_status, order_date, order_json->>'updated' FROM unicommerce_orders WHERE {where} ORDER BY order_date",
+            (list(_FLEX_BACKFILL_STATUSES),),
+        )
+        rows = [
+            {"uniware_id": r[0], "pipeline_status": r[1], "order_date": str(r[2]), "amazon_shipment_date": r[3]}
+            for r in cur.fetchall()
+        ]
+        updated = 0
+        if not dry_run and rows:
+            cur.execute(
+                f"UPDATE unicommerce_orders SET shipment_date = (order_json->>'updated')::timestamptz, updated_at = now() WHERE {where}",
+                (list(_FLEX_BACKFILL_STATUSES),),
+            )
+            updated = cur.rowcount
+    if not dry_run:
+        conn.commit()
+    return {"dry_run": dry_run, "matched": len(rows), "updated": updated, "orders": rows}
 
 
 def unclaim_order(conn: psycopg.Connection, uniware_id: str, to_status: str = "ready") -> None:
@@ -1406,7 +1467,9 @@ def get_order_for_recon(conn: psycopg.Connection, uniware_id: str) -> dict | Non
         cur.execute(
             """
             SELECT uniware_id, channel_name, order_date, order_json,
-                   sap_ar_invoice_docentry, sap_ar_creditnote_docentry
+                   sap_ar_invoice_docentry, sap_ar_creditnote_docentry,
+                   CASE WHEN shipment_date IS NULL THEN NULL
+                        ELSE to_char((shipment_date AT TIME ZONE 'Asia/Kolkata')::date, 'YYYY-MM-DD') END AS doc_date
             FROM unicommerce_orders WHERE uniware_id = %s
             """,
             (uniware_id,),
@@ -1426,7 +1489,7 @@ def get_order_for_recon(conn: psycopg.Connection, uniware_id: str) -> dict | Non
 # list) plus the in-flight-row relabeling sweep for dashboard visibility.
 
 def is_period_locked(conn: psycopg.Connection, date_val) -> bool:
-    """date_val: a date/str for the doc date about to be used (order_date
+    """date_val: a date/str for the doc date about to be used (ship date
     for invoices, return_date/posted_date for credit notes)."""
     period = str(date_val)[:7]
     with conn.cursor() as cur:
@@ -1467,7 +1530,7 @@ def lock_period(conn: psycopg.Connection, period: str, actor: str, note: str = "
         )
         cur.execute(
             "UPDATE unicommerce_orders SET pipeline_status = 'period_locked', updated_at = now() "
-            "WHERE pipeline_status = 'ready' AND to_char(order_date, 'YYYY-MM') = %s",
+            f"WHERE pipeline_status = 'ready' AND shipment_date IS NOT NULL AND to_char({DOC_DATE_SQL}, 'YYYY-MM') = %s",
             (period,),
         )
         orders_held = cur.rowcount
@@ -1497,7 +1560,7 @@ def unlock_period(conn: psycopg.Connection, period: str, actor: str) -> dict:
         found = cur.rowcount == 1
         cur.execute(
             "UPDATE unicommerce_orders SET pipeline_status = 'ready', updated_at = now() "
-            "WHERE pipeline_status = 'period_locked' AND to_char(order_date, 'YYYY-MM') = %s",
+            f"WHERE pipeline_status = 'period_locked' AND shipment_date IS NOT NULL AND to_char({DOC_DATE_SQL}, 'YYYY-MM') = %s",
             (period,),
         )
         orders_resumed = cur.rowcount

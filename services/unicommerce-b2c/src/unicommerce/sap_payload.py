@@ -672,8 +672,16 @@ def ar_invoice_payload(
     settings: UnicommerceSettings,
     batch_managed_cache: dict | None = None,
     fefo_rows_cache: dict | None = None,
+    doc_date: str | None = None,
 ) -> tuple[dict, float]:
     """Build the SAP AR Invoice payload from a staged UC order.
+
+    Dates: DocDate = DocDueDate = doc_date (the SHIP date, IST -- same rule
+    as Walmart and amazon-us-b2c), TaxDate = order_date (channel order
+    date, as Walmart does), and U_OrderedOn stays the order date. doc_date
+    is required: there is deliberately no fallback to order_date, since
+    that would silently book an unshipped/undated order into the order's
+    month -- callers must skip orders with no ship date instead.
 
     batch_managed_cache is a tri-state dict (True/False/None) shared with
     the pre-post validator. When the SAP ManageBatchNumbers lookup for an
@@ -682,6 +690,8 @@ def ar_invoice_payload(
 
     Returns (payload, total_tax_expected).
     """
+    if not doc_date:
+        raise ValueError(f"No ship date (DocDate) for order {uniware_id}; refusing to build invoice payload")
     tax_inclusive_map = settings.tax_inclusive_map
     customer_code = resolve_customer_code(settings, channel)
 
@@ -830,8 +840,9 @@ def ar_invoice_payload(
 
     payload = {
         "CardCode": customer_code,
-        "DocDate": order_date,
-        "DocDueDate": order_date,
+        "DocDate": doc_date,
+        "TaxDate": order_date,
+        "DocDueDate": doc_date,
         "Series": series,
         "GSTTransactionType": _resolve_gst_transaction_type(uc_data, total_tax_expected),
         "U_UCOrderID": uniware_id,

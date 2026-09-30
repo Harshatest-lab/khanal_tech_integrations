@@ -7,9 +7,10 @@ no Frappe dependency, so these carried over almost verbatim.
 
 from __future__ import annotations
 
+from datetime import timezone
 from typing import Any
 
-from unicommerce.dates import extract_order_date, format_cursor, parse_source_datetime
+from unicommerce.dates import IST, extract_order_date, format_cursor, parse_source_datetime
 from unicommerce.geo import resolve_mapped_value
 from unicommerce.settings import get_settings
 
@@ -88,10 +89,16 @@ def order_ready_for_invoice(order: dict) -> tuple[bool, str]:
     order_status = str(order.get("status") or "").strip().upper()
     if order_status not in {"COMPLETE", "COMPLETED"}:
         return False, f"Order status is {order_status or 'unknown'} (requires COMPLETE)"
+    # The SAP invoice is dated on the ship date (DocDate), so an order with
+    # no dispatch date cannot be posted -- skip it (stays 'fetched' with this
+    # reason) instead of guessing a date. Same rule as amazon-us-b2c.
+    shipped_at = extract_shipment_datetime(order)
+    if shipped_at is None:
+        return False, "No shipment/dispatch date yet (SAP DocDate is the ship date)"
     if extract_channel(order) == "AMAZON_FLEX":
-        order_date = extract_order_date(order)
-        if order_date < FLEX_POSTING_CUTOFF_DATE:
-            return False, f"AMAZON_FLEX order_date {order_date} is before posting cutoff {FLEX_POSTING_CUTOFF_DATE}"
+        ship_date = shipped_at.astimezone(IST).date().isoformat()
+        if ship_date < FLEX_POSTING_CUTOFF_DATE:
+            return False, f"AMAZON_FLEX ship date {ship_date} is before posting cutoff {FLEX_POSTING_CUTOFF_DATE}"
     if not eligible_line_items(order):
         return False, "Order has no invoice-eligible line items"
     return True, ""
@@ -110,20 +117,43 @@ def extract_billing_address(order: dict) -> dict:
     }
 
 
+def extract_shipment_datetime(order: dict):
+    """Latest dispatch instant for the order as an aware UTC datetime, or
+    None if it has not shipped. This is what drives the SAP DocDate (see
+    store.DOC_DATE_SQL), same rule as Walmart (latest shipDateTime across
+    lines) and amazon-us-b2c (actual_ship_date).
+
+    Real UC orders: max of `dispatched` across ALL shipping packages (the
+    old code only read packages[0], so a split order could be dated by its
+    earliest package). AMAZON_FLEX has no UC packages (flex_fetch builds a
+    synthetic order from Amazon's fulfilled-shipments report); Amazon's own
+    shipment-date is carried in the synthetic order's `updated` field, so
+    use that -- restricted to Flex because on a real UC order `updated` is
+    just the last-modified time, not a ship date."""
+    candidates = []
+    for pkg in order.get("shippingPackages") or []:
+        dt = parse_source_datetime((pkg or {}).get("dispatched"))
+        if dt:
+            candidates.append(dt)
+    if not candidates and extract_channel(order) == "AMAZON_FLEX":
+        dt = parse_source_datetime(order.get("updated"))
+        if dt:
+            candidates.append(dt)
+    if not candidates:
+        return None
+    return max(candidates).astimezone(timezone.utc)
+
+
 def extract_shipping_package_fields(order: dict) -> dict:
     packages = order.get("shippingPackages") or []
-    if not packages:
+    pkg = (packages[0] or {}) if packages else {}
+    shipped_at = extract_shipment_datetime(order)
+    if not pkg and shipped_at is None:
         return {}
-    pkg = packages[0] or {}
-    dispatched = pkg.get("dispatched")
-    shipment_date = None
-    if dispatched:
-        dt = parse_source_datetime(dispatched)
-        shipment_date = format_cursor(dt) if dt else None
     return {
         "shippingpackages": pkg,
         "shipment_status": safe_str(pkg.get("status")),
-        "shipment_date": shipment_date,
+        "shipment_date": format_cursor(shipped_at) if shipped_at else None,
     }
 
 

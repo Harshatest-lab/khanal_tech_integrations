@@ -275,13 +275,14 @@ def _post_order(conn, row: dict, settings, batch_managed_cache: dict, fefo_cache
 
     order_date = row.get("order_date")
     order_date_str = order_date.isoformat() if hasattr(order_date, "isoformat") else str(order_date)
+    doc_date_str = row.get("doc_date")  # ship date (IST); None = not shipped -> payload builder refuses
     order_json_str = row["order_json"] if isinstance(row["order_json"], str) else json.dumps(row["order_json"], default=str)
 
     try:
         payload, tax_expected = sap_payload.ar_invoice_payload(
             uniware_id=uniware_id, channel=channel_name, order_json=order_json_str, uc_data=uc_data,
-            order_date=order_date_str, settings=settings, batch_managed_cache=batch_managed_cache,
-            fefo_rows_cache=fefo_cache,
+            order_date=order_date_str, doc_date=doc_date_str, settings=settings,
+            batch_managed_cache=batch_managed_cache, fefo_rows_cache=fefo_cache,
         )
     except Exception as e:
         _release_for_order(reservation_ctx, uniware_id)
@@ -472,7 +473,11 @@ def post_one_order(conn, uniware_id: str, force: bool = False) -> dict:
     future remediation that genuinely needs to post a pre-cutoff order
     -- never the default."""
     with conn.cursor() as cur:
-        cur.execute("SELECT uniware_id, channel_name, order_date, order_json, attempt_count FROM unicommerce_orders WHERE uniware_id = %s", (uniware_id,))
+        cur.execute(
+            f"SELECT uniware_id, channel_name, order_date, {store.DOC_DATE_SELECT}, order_json, attempt_count "
+            "FROM unicommerce_orders WHERE uniware_id = %s",
+            (uniware_id,),
+        )
         cols = [d.name for d in cur.description]
         r = cur.fetchone()
         row = dict(zip(cols, r)) if r else None
@@ -481,10 +486,15 @@ def post_one_order(conn, uniware_id: str, force: bool = False) -> dict:
 
     order_date = row.get("order_date")
     order_date_str = order_date.isoformat() if hasattr(order_date, "isoformat") else str(order_date)
-    if not force and order_date_str < constants.POSTING_CUTOFF_DATE:
+    doc_date_str = row.get("doc_date")
+    # No ship date, no post -- even with force=True (force only overrides the
+    # cutoff floor, never the requirement that the invoice has a real date).
+    if not doc_date_str:
+        return {"status": "no_ship_date", "uniware_id": uniware_id, "order_date": order_date_str}
+    if not force and doc_date_str < constants.POSTING_CUTOFF_DATE:
         return {
             "status": "pre_cutoff_blocked", "uniware_id": uniware_id,
-            "order_date": order_date_str, "cutoff_date": constants.POSTING_CUTOFF_DATE,
+            "order_date": order_date_str, "doc_date": doc_date_str, "cutoff_date": constants.POSTING_CUTOFF_DATE,
         }
 
     # Unlike the cutoff-date check above, there is no force override for a
@@ -492,8 +502,8 @@ def post_one_order(conn, uniware_id: str, force: bool = False) -> dict:
     # bypassed doc-by-doc, only by reopening the period). The real gate is
     # store.claim_ready_order's own lock check; this is just a clear reason
     # instead of a generic "already_claimed".
-    if store.is_period_locked(conn, order_date_str):
-        return {"status": "period_locked", "uniware_id": uniware_id, "order_date": order_date_str}
+    if store.is_period_locked(conn, doc_date_str):
+        return {"status": "period_locked", "uniware_id": uniware_id, "order_date": order_date_str, "doc_date": doc_date_str}
 
     settings = get_settings(force_reload=True)
 

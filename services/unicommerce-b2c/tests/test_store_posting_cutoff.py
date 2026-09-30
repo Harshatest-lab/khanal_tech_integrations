@@ -88,15 +88,37 @@ def test_get_ready_orders_applies_cutoff_as_hard_floor():
     conn = _FakeConn(["uniware_id", "channel_name", "order_date", "order_json", "attempt_count"])
     store.get_ready_orders(conn, limit=10, cutoff_date="2026-08-01")
     cur = conn._cursor
-    assert "order_date >= %s" in cur.last_sql
+    # The floor is on the invoice date = IST ship date, not the order date.
+    assert f"{store.DOC_DATE_SQL} >= %s" in cur.last_sql
+    assert "order_date >= %s" not in cur.last_sql
     assert cur.last_params[0] == "2026-08-01"
+
+
+def test_get_ready_orders_requires_ship_date_and_locks_on_ship_month():
+    conn = _FakeConn(["uniware_id", "channel_name", "order_date", "doc_date", "order_json", "attempt_count"])
+    store.get_ready_orders(conn, limit=10, cutoff_date="2026-08-01")
+    sql = conn._cursor.last_sql
+    assert "shipment_date IS NOT NULL" in sql
+    assert f"to_char({store.DOC_DATE_SQL}, 'YYYY-MM')" in sql  # period lock keys off ship month
+    assert "AS doc_date" in sql  # row carries the date the invoice will be posted on
+    assert "Asia/Kolkata" in store.DOC_DATE_SQL  # IST, never the DB session zone
+
+
+def test_claim_ready_order_refuses_unshipped_and_locks_on_ship_month():
+    conn = _FakeConn([])
+    conn._cursor.rowcount = 0
+    conn.commit = lambda: None
+    assert store.claim_ready_order(conn, "UC-1") is False
+    sql = conn._cursor.last_sql
+    assert "shipment_date IS NOT NULL" in sql
+    assert f"to_char({store.DOC_DATE_SQL}, 'YYYY-MM')" in sql
 
 
 def test_get_ready_orders_cutoff_combines_with_optional_filters():
     conn = _FakeConn(["uniware_id", "channel_name", "order_date", "order_json", "attempt_count"])
     store.get_ready_orders(conn, limit=10, cutoff_date="2026-08-01", channel_name="MEESHO")
     cur = conn._cursor
-    assert "order_date >= %s" in cur.last_sql
+    assert f"{store.DOC_DATE_SQL} >= %s" in cur.last_sql
     assert "channel_name = %s" in cur.last_sql
     assert cur.last_params[0] == "2026-08-01"
     assert "MEESHO" in cur.last_params
