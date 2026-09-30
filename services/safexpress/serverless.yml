@@ -82,13 +82,11 @@ custom:
     dev: /sap/india_test
     prod: /sap/unicommerce
   currentHanaPrefix: ${self:custom.hanaPrefixByStage.${self:provider.stage}, '/sap/india_test'}
-  # Schedules stay off on every stage until dev testing against the TEST
-  # SAP company has verified the HANA candidate query and SafeExpress
-  # calls — same dual-run-safe default every other cutover in this repo
-  # uses.
+  # dev stays off (no dev stage in practice). prod enabled 2026-09-30 after
+  # a manual backfill + poll run posted 171 PODs to SAP with 0 SAP failures.
   scheduleEnabledByStage:
     dev: false
-    prod: false
+    prod: true
   currentScheduleEnabled: ${self:custom.scheduleEnabledByStage.${self:provider.stage}, false}
 
 layers:
