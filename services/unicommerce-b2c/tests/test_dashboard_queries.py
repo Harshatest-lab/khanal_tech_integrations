@@ -77,6 +77,81 @@ def test_fetch_orders_envelope_and_row_mapping():
     assert out["items"][0] == {"uniware_id": "A", "channel_name": "FLIPKART", "pipeline_status": "fetched"}
 
 
+class _RecordingCursor(_FakeCursor):
+    def __init__(self, script, calls):
+        super().__init__(script)
+        self._calls = calls
+
+    def execute(self, sql, params=None):
+        self._calls.append((sql, params))
+        super().execute(sql, params)
+
+
+class _RecordingConn:
+    def __init__(self, script):
+        self.calls: list = []
+        self._script = script
+
+    def cursor(self):
+        return _RecordingCursor(self._script, self.calls)
+
+
+def test_fetch_stats_excluding_cancelled_is_additive_and_consistent():
+    script = [
+        (["pipeline_status", "count"], [("fetched", 5), ("posted", 4)]),
+        ([None], [(9,)]),
+        (["channel_name", "count"], [("FLIPKART", 7), ("CRED", 2)]),
+        (["status", "count"], [("posted", 1)]),
+        (
+            ["pipeline_status", "channel_name", "cancelled", "count"],
+            [
+                ("fetched", "FLIPKART", True, 3),   # cancelled in UC, never posted
+                ("fetched", "FLIPKART", False, 1),  # genuinely waiting
+                ("fetched", "CRED", False, 1),
+                ("posted", "FLIPKART", False, 2),
+                ("posted", "CRED", False, 2),
+            ],
+        ),
+        (["mode", "status"], []),  # sync log
+    ]
+    out = dq.fetch_stats(_FakeConn(script))
+
+    # Existing fields are untouched (old frontend keeps working).
+    assert out["total_orders"] == 9
+    assert out["by_pipeline_status"] == {"fetched": 5, "posted": 4}
+    assert out["by_channel"] == {"FLIPKART": 7, "CRED": 2}
+
+    # New, additive view leaves the cancelled ones out.
+    assert out["cancelled_orders"] == 3
+    ex = out["excluding_cancelled"]
+    assert ex["total_orders"] == 6
+    assert ex["by_pipeline_status"] == {"fetched": 2, "posted": 4}
+    assert ex["by_channel"] == {"FLIPKART": 3, "CRED": 3}
+    assert ex["total_orders"] + out["cancelled_orders"] == out["total_orders"]
+
+
+def test_cancelled_definition_never_hides_a_posted_order():
+    # If a posted order later turns CANCELLED in UC it is an anomaly (an SAP
+    # invoice exists) and must stay visible, so 'posted' is never "cancelled".
+    assert "pipeline_status <> 'posted'" in dq.CANCELLED_SQL
+    assert "LIKE 'CANCEL" in dq.CANCELLED_SQL
+
+
+def test_fetch_orders_exclude_cancelled_and_status_filters():
+    script = [([None], [(0,)]), (["uniware_id"], [])]
+    conn = _RecordingConn(script)
+    dq.fetch_orders(conn, limit=25, offset=0, exclude_cancelled=True, order_status=" cancelled ", pipeline_status="fetched")
+    count_sql, count_params = conn.calls[0]
+    assert f"NOT {dq.CANCELLED_SQL}" in count_sql
+    assert "UPPER(status) = %s" in count_sql
+    assert count_params == ["CANCELLED", "fetched"]  # status is normalised; order preserved
+
+    # Default behaviour is unchanged: no cancelled filtering unless asked.
+    conn2 = _RecordingConn([([None], [(0,)]), (["uniware_id"], [])])
+    dq.fetch_orders(conn2, limit=25, offset=0)
+    assert "CANCEL" not in conn2.calls[0][0]
+
+
 def test_fetch_returns_envelope():
     script = [
         ([None], [(1,)]),

@@ -43,6 +43,15 @@ def _clamp_offset(raw: str | None) -> int:
     return max(0, value)
 
 
+# A "cancelled" order is one Unicommerce itself cancelled (status CANCELLED).
+# The pipeline never posts these (mappers.order_ready_for_invoice requires
+# COMPLETE), so they sit in 'fetched' forever and inflate every count that
+# is meant to show work-in-flight. An order that is already 'posted' is never
+# treated as cancelled here: if a posted order later turns CANCELLED in UC
+# that is a real anomaly (an SAP invoice exists) and must stay visible.
+CANCELLED_SQL = "(UPPER(COALESCE(status, '')) LIKE 'CANCEL%%' AND pipeline_status <> 'posted')"
+
+
 def _rows_to_dicts(cur: psycopg.Cursor) -> list[dict[str, Any]]:
     columns = [desc[0] for desc in cur.description] if cur.description else []
     return [dict(zip(columns, row)) for row in cur.fetchall()]
@@ -62,6 +71,28 @@ def fetch_stats(conn: psycopg.Connection) -> dict[str, Any]:
         cur.execute("SELECT status, COUNT(*)::int AS count FROM unicommerce_cn_staging GROUP BY status")
         cn_by_status = {r["status"]: r["count"] for r in _rows_to_dicts(cur)}
 
+        # One grouped pass splits every order into cancelled vs active, so the
+        # "excluding cancelled" view below is always internally consistent
+        # (active + cancelled == total_orders).
+        cur.execute(
+            f"""
+            SELECT pipeline_status, channel_name, {CANCELLED_SQL} AS cancelled, COUNT(*)::int AS count
+            FROM unicommerce_orders
+            GROUP BY pipeline_status, channel_name, {CANCELLED_SQL}
+            """
+        )
+        cancelled_orders = 0
+        active_orders = 0
+        active_by_status: dict[str, int] = {}
+        active_by_channel: dict[str, int] = {}
+        for r in _rows_to_dicts(cur):
+            if r["cancelled"]:
+                cancelled_orders += r["count"]
+                continue
+            active_orders += r["count"]
+            active_by_status[r["pipeline_status"]] = active_by_status.get(r["pipeline_status"], 0) + r["count"]
+            active_by_channel[r["channel_name"]] = active_by_channel.get(r["channel_name"], 0) + r["count"]
+
         cur.execute(
             """
             SELECT DISTINCT ON (mode) mode, status, started_at, finished_at,
@@ -78,6 +109,15 @@ def fetch_stats(conn: psycopg.Connection) -> dict[str, Any]:
         "by_channel": by_channel,
         "cn_by_status": cn_by_status,
         "last_run_by_mode": last_run_by_mode,
+        # Additive: every field above is unchanged, so an older frontend keeps
+        # working. The console reads these to show counts that leave out orders
+        # Unicommerce cancelled (never posted, so not "work in flight").
+        "cancelled_orders": cancelled_orders,
+        "excluding_cancelled": {
+            "total_orders": active_orders,
+            "by_pipeline_status": active_by_status,
+            "by_channel": active_by_channel,
+        },
     }
 
 
@@ -93,9 +133,16 @@ def fetch_orders(
     order_date_to: str | None = None,
     sort_by: str | None = None,
     sort_dir: str | None = None,
+    exclude_cancelled: bool = False,
+    order_status: str | None = None,
 ) -> dict[str, Any]:
     where = []
     params: list[Any] = []
+    if exclude_cancelled:
+        where.append(f"NOT {CANCELLED_SQL}")
+    if order_status:
+        where.append("UPPER(status) = %s")
+        params.append(order_status.strip().upper())
     if pipeline_status:
         where.append("pipeline_status = %s")
         params.append(pipeline_status)

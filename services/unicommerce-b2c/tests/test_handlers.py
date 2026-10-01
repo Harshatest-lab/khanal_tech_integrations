@@ -43,6 +43,38 @@ def _post_event(path: str, query: dict | None = None) -> dict:
     }
 
 
+def _get_event(path: str, query: dict | None = None) -> dict:
+    return {
+        "requestContext": {"http": {"method": "GET"}},
+        "rawPath": path,
+        "queryStringParameters": query or {},
+    }
+
+
+def test_orders_route_passes_exclude_cancelled_and_status_to_query(monkeypatch):
+    seen = {}
+
+    def fake_fetch_orders(conn, **kwargs):
+        seen.update(kwargs)
+        return {"total": 0, "items": [], "limit": kwargs["limit"], "offset": kwargs["offset"]}
+
+    monkeypatch.setattr(handlers.store, "connect", lambda: _FakeConnCtx())
+    monkeypatch.setattr(handlers.dashboard_queries, "fetch_orders", fake_fetch_orders)
+
+    resp = handlers.dashboard_handler(
+        _get_event("/v1/unicommerce/orders", {"exclude_cancelled": "true", "status": "CANCELLED"}), None
+    )
+    assert resp["statusCode"] == 200
+    assert seen["exclude_cancelled"] is True
+    assert seen["order_status"] == "CANCELLED"
+
+    # Absent/false params keep the old behaviour (no filtering).
+    seen.clear()
+    handlers.dashboard_handler(_get_event("/v1/unicommerce/orders", {"exclude_cancelled": "0"}), None)
+    assert seen["exclude_cancelled"] is False
+    assert seen["order_status"] is None
+
+
 def test_invoke_retry_batch_invokes_correct_function_with_manual_retry_trigger(monkeypatch):
     fake_client = _FakeLambdaClient()
     monkeypatch.setattr(handlers, "_lambda_client", fake_client)

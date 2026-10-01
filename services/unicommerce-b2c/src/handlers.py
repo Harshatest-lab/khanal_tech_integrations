@@ -648,6 +648,8 @@ def dashboard_handler(event, context):
                         order_date_to=q.get("order_date_to") or None,
                         sort_by=q.get("sort_by") or None,
                         sort_dir=q.get("sort_dir") or None,
+                        exclude_cancelled=(q.get("exclude_cancelled") or "").strip().lower() in ("1", "true", "yes"),
+                        order_status=(q.get("status") or "").strip() or None,
                     ),
                 )
 
