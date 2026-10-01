@@ -20,6 +20,7 @@ from walmart.walmart_store import (
     _as_list,
     order_ship_date_time_ms,
     order_shipping_state,
+    valid_order_date_ms,
 )
 
 # SAP B1 constants (Walmart B2C)
@@ -150,8 +151,12 @@ def build_sap_invoice_payload(
     if not purchase_order_id or not customer_order_id:
         raise ValueError("Order missing purchaseOrderId or customerOrderId")
 
-    order_date_ms = order.get("orderDate")
-    order_date_ms_int = int(order_date_ms) if order_date_ms is not None else None
+    order_date_ms_int = valid_order_date_ms(order.get("orderDate"))
+    if order_date_ms_int is None:
+        raise ValueError(
+            f"Invalid Walmart orderDate {order.get('orderDate')!r} for PO {purchase_order_id}; "
+            "use 'Refetch from Walmart' on the order, then post again"
+        )
     doc_date = _ship_date_pacific_str(order, order_date_ms_int)
     tax_date = _order_date_pacific_str(order_date_ms_int)
     ship_node_type = (order.get("shipNode") or {}).get("type")

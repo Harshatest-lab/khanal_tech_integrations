@@ -1938,7 +1938,10 @@ function renderTracePanel(detail, highlightLine) {
             · ${escapeHtml(formatOrderDatePacific(detail.order_date_ms))}
           </div>
         </div>
-        <button type="button" class="btn-outline btn-hide-trace">Hide trace</button>
+        <div class="trace-actions">
+          <button type="button" class="btn-outline btn-refetch-order" title="Re-pull this order from Walmart and overwrite the stored JSON">Refetch from Walmart</button>
+          <button type="button" class="btn-outline btn-hide-trace">Hide trace</button>
+        </div>
       </div>
 
       <div class="trace-cards">
@@ -1996,16 +1999,48 @@ async function toggleOrderDetail(btn, po) {
 
   try {
     const data = await fetchOrderDetail(po);
-    detailTr.querySelector("td").innerHTML = (typeof renderTracePanelWithReturns === "function")
-      ? renderTracePanelWithReturns(data, null)
-      : renderTracePanel(data, null);
-    detailTr.querySelector(".btn-hide-trace")?.addEventListener("click", () => {
-      detailTr.remove();
-      btn.textContent = "View";
-      btn.classList.remove("active");
-    });
+    renderOrderDetailInto(detailTr, btn, po, data);
   } catch (err) {
     detailTr.querySelector("td").innerHTML = `<div class="trace-panel trace-error">${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function renderOrderDetailInto(detailTr, viewBtn, po, data) {
+  detailTr.querySelector("td").innerHTML = (typeof renderTracePanelWithReturns === "function")
+    ? renderTracePanelWithReturns(data, null)
+    : renderTracePanel(data, null);
+  detailTr.querySelector(".btn-hide-trace")?.addEventListener("click", () => {
+    detailTr.remove();
+    viewBtn.textContent = "View";
+    viewBtn.classList.remove("active");
+  });
+  detailTr.querySelector(".btn-refetch-order")?.addEventListener("click", (e) => {
+    refetchOrderFromWalmart(po, e.currentTarget, detailTr, viewBtn);
+  });
+}
+
+async function refetchOrderFromWalmart(po, btn, detailTr, viewBtn) {
+  if (
+    !window.confirm(
+      `Refetch PO ${po} from Walmart?\n\nThis replaces the stored order JSON, order date and line statuses with Walmart's current data.`
+    )
+  ) {
+    return;
+  }
+
+  btn.disabled = true;
+  const originalLabel = btn.textContent;
+  btn.textContent = "Refetching…";
+
+  try {
+    await apiPost(`/v1/walmart/order-refetch?purchase_order_id=${encodeURIComponent(po)}`);
+    hideError();
+    const data = await fetchOrderDetail(po);
+    renderOrderDetailInto(detailTr, viewBtn, po, data);
+  } catch (err) {
+    showError(`Refetch failed for PO ${po}: ${err.message}`);
+    btn.disabled = false;
+    btn.textContent = originalLabel;
   }
 }
 

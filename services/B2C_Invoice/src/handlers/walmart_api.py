@@ -29,6 +29,7 @@ from walmart.dashboard_api import (
     _clamp_limit,
     _clamp_offset,
 )
+from walmart.order_updation import refetch_order
 from walmart.sap_invoice_sync import run_sap_invoice_post_single, run_sap_invoice_retry_sync
 from walmart.sap_credit_note_sync import (
     cancel_posted_credit_note,
@@ -85,6 +86,19 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
                 return json_response(404, result)
             if result.get("status") == "failed":
                 return json_response(502, result)
+            return json_response(200, result)
+
+        if path.endswith("/v1/walmart/order-refetch") and method == "POST":
+            po = (q.get("purchase_order_id") or "").strip()
+            if not po:
+                return json_response(400, {"error": "purchase_order_id is required"})
+            try:
+                result = refetch_order(po)
+            except Exception as exc:
+                log_json(logger, logging.ERROR, "walmart_order_refetch_failed", po=po, error=str(exc))
+                return json_response(
+                    502, {"ok": False, "error": str(exc), "purchase_order_id": po}
+                )
             return json_response(200, result)
 
         if path.endswith("/v1/walmart/sap-retry") and method == "POST":
