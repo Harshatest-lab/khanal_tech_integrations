@@ -20,7 +20,9 @@ from walmart.walmart_store import (
     datetime_to_utc_api_string,
     fetch_last_watermark,
     persist_creation_sync,
+    persist_single_order,
     utc_iso_string_to_datetime,
+    valid_order_date_ms,
 )
 
 logger = logging.getLogger(__name__)
@@ -163,6 +165,90 @@ def _next_orders_url(page: dict[str, Any]) -> str | None:
     return f"{WM_API_BASE}/orders?{next_cursor}"
 
 
+def fetch_single_order(
+    purchase_order_id: str,
+    *,
+    ship_node_type: str = DEFAULT_SHIP_NODE_TYPE,
+    access_token: str | None = None,
+) -> dict[str, Any]:
+    """GET /v3/orders/{purchaseOrderId}; retries without shipNodeType if the filtered call fails."""
+    po = str(purchase_order_id).strip()
+    if not po:
+        raise ValueError("purchase_order_id is required")
+    token = access_token or get_access_token()
+    base = f"{WM_API_BASE}/orders/{po}"
+    urls: list[str] = []
+    if ship_node_type:
+        urls.append(f"{base}?{urlencode({'productInfo': 'true', 'shipNodeType': ship_node_type})}")
+    urls.append(f"{base}?{urlencode({'productInfo': 'true'})}")
+
+    last_exc: Exception | None = None
+    for url in urls:
+        try:
+            # Two attempts must fit inside the 30s API Gateway limit on the dashboard route.
+            payload = _http_json("GET", url, headers=_order_headers(token), timeout_sec=12.0)
+        except RuntimeError as exc:
+            last_exc = exc
+            continue
+        order = payload.get("order")
+        if isinstance(order, dict) and order.get("purchaseOrderId"):
+            return order
+        last_exc = RuntimeError(f"Walmart response missing order for PO {po}: {payload}")
+    raise last_exc or RuntimeError(f"Walmart order {po} not found")
+
+
+def repair_invalid_order_dates(
+    orders: list[dict[str, Any]],
+    *,
+    ship_node_type: str,
+    access_token: str,
+) -> list[str]:
+    """Replace orders whose list-API ``orderDate`` is missing/zero with the single-order response."""
+    repaired: list[str] = []
+    for idx, order in enumerate(orders):
+        if valid_order_date_ms(order.get("orderDate")) is not None:
+            continue
+        po = str(order.get("purchaseOrderId") or "").strip()
+        if not po:
+            continue
+        try:
+            fresh = fetch_single_order(po, ship_node_type=ship_node_type, access_token=access_token)
+        except Exception as exc:
+            logger.warning("orderDate repair failed po=%s error=%s", po, exc)
+            continue
+        if valid_order_date_ms(fresh.get("orderDate")) is None:
+            logger.warning("orderDate still invalid after single-order fetch po=%s", po)
+            continue
+        orders[idx] = fresh
+        repaired.append(po)
+    if repaired:
+        logger.info("Repaired invalid orderDate via single-order fetch: %s", repaired)
+    return repaired
+
+
+def refetch_order(
+    purchase_order_id: str,
+    *,
+    ship_node_type: str = DEFAULT_SHIP_NODE_TYPE,
+) -> dict[str, Any]:
+    """Re-pull one order from Walmart and overwrite the stored header/lines/raw_payload."""
+    order = fetch_single_order(purchase_order_id, ship_node_type=ship_node_type)
+    with get_db_connection() as conn:
+        stored = persist_single_order(conn, order, ship_node_type=ship_node_type)
+    return {
+        "ok": True,
+        **stored,
+        "walmart_order_date_ms": order.get("orderDate"),
+        "statuses": sorted(
+            {
+                str(s.get("status") or "")
+                for line in _as_list(order.get("orderLines", {}).get("orderLine"))
+                for s in _as_list(line.get("orderLineStatuses", {}).get("orderLineStatus"))
+            }
+        ),
+    }
+
+
 def fetch_updated_orders(
     last_modified_start_date: str | datetime,
     last_modified_end_date: str | datetime,
@@ -202,6 +288,8 @@ def fetch_updated_orders(
             len(orders),
         )
         url = _next_orders_url(page)
+
+    repair_invalid_order_dates(orders, ship_node_type=ship_node_type, access_token=token)
 
     summary = summarize_orders(orders)
     logger.info(

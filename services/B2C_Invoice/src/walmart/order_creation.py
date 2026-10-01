@@ -16,6 +16,7 @@ from urllib.parse import urlencode
 import psycopg
 
 from walmart.credentials import DATABASE_URL, WM_API_BASE, WM_BASIC_AUTH, WM_SVC_NAME
+from walmart.order_updation import repair_invalid_order_dates
 from walmart.walmart_store import (
     datetime_to_utc_api_string,
     persist_creation_sync,
@@ -201,6 +202,8 @@ def fetch_orders(
             len(orders),
         )
         url = _next_orders_url(page)
+
+    repair_invalid_order_dates(orders, ship_node_type=ship_node_type, access_token=token)
 
     summary = summarize_orders(orders)
     logger.info(

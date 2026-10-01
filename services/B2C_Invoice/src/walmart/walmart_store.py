@@ -24,6 +24,17 @@ def ms_to_utc_datetime(ms: int) -> datetime:
     return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
 
 
+def valid_order_date_ms(value: Any) -> int | None:
+    """Walmart ``orderDate`` as epoch ms, or None when missing / zero-date (``0001-01-01``)."""
+    if value is None:
+        return None
+    try:
+        ms = int(value)
+    except (TypeError, ValueError):
+        return None
+    return ms if ms > 0 else None
+
+
 def ms_to_utc_api_string(ms: int) -> str:
     """Walmart API UTC param, e.g. ``2026-06-30T11:32:15.925Z`` or ``...T11:32:15Z``."""
     dt = ms_to_utc_datetime(ms)
@@ -189,7 +200,7 @@ def extract_orders_for_storage(
             continue
 
         customer_order_id = order.get("customerOrderId")
-        order_date_ms = order.get("orderDate")
+        order_date_ms = valid_order_date_ms(order.get("orderDate"))
         node_type = (order.get("shipNode") or {}).get("type") or ship_node_type
         order_lines = _as_list(order.get("orderLines", {}).get("orderLine"))
         full_raw_payload = json.dumps({"order": order})
@@ -199,7 +210,7 @@ def extract_orders_for_storage(
                 "purchase_order_id": purchase_order_id,
                 "customer_order_id": customer_order_id,
                 "ship_node_type": node_type,
-                "order_date_ms": int(order_date_ms) if order_date_ms is not None else None,
+                "order_date_ms": order_date_ms,
                 "has_shipping_charges": order_has_shipping_charges(order),
                 "has_county_surcharge_tax": order_has_county_surcharge_tax(order),
                 "has_promotion_discount": order_has_promotion_discount(order),
@@ -311,7 +322,10 @@ INSERT INTO walmart_order_headers (
 ON CONFLICT (purchase_order_id) DO UPDATE SET
   customer_order_id = EXCLUDED.customer_order_id,
   ship_node_type = EXCLUDED.ship_node_type,
-  order_date_ms = EXCLUDED.order_date_ms,
+  order_date_ms = COALESCE(
+    EXCLUDED.order_date_ms,
+    CASE WHEN walmart_order_headers.order_date_ms > 0 THEN walmart_order_headers.order_date_ms END
+  ),
   has_shipping_charges = EXCLUDED.has_shipping_charges,
   has_county_surcharge_tax = EXCLUDED.has_county_surcharge_tax,
   has_promotion_discount = EXCLUDED.has_promotion_discount,
@@ -514,6 +528,30 @@ def upsert_order_lines(
         "changed_lines": changed_lines,
         "refreshed_lines": refreshed_lines,
         "updated_lines": updated_lines,
+    }
+
+
+def persist_single_order(
+    conn: Any, order: dict[str, Any], *, ship_node_type: str
+) -> dict[str, Any]:
+    """Upsert one order (manual refetch). Does not write walmart_log or move the watermark."""
+    header_rows, line_rows = extract_orders_for_storage([order], ship_node_type=ship_node_type)
+    if not header_rows:
+        raise RuntimeError("Walmart order has no purchaseOrderId")
+    try:
+        upsert_order_headers(conn, header_rows, commit=False)
+        upsert_counts = upsert_order_lines(conn, line_rows, commit=False)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return {
+        "purchase_order_id": header_rows[0]["purchase_order_id"],
+        "order_date_ms": header_rows[0]["order_date_ms"],
+        "lines_stored": upsert_counts["lines_stored"],
+        "created_lines": upsert_counts["created_lines"],
+        "changed_lines": upsert_counts["changed_lines"],
+        "refreshed_lines": upsert_counts["refreshed_lines"],
     }
 
 
