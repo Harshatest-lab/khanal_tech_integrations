@@ -74,6 +74,7 @@ class UnicommerceSettings:
     tax_inclusive_map: dict = field(default_factory=dict)
     zero_discount_floor_channels: dict = field(default_factory=dict)
     tax_code_map: dict = field(default_factory=dict)
+    tax_code_map_by_state: dict = field(default_factory=dict)
     warehouse_map: dict = field(default_factory=dict)
     channel_warehouse_map: dict = field(default_factory=dict)
     bill_to_code_map: dict = field(default_factory=dict)
@@ -120,6 +121,7 @@ def _from_dict(data: dict) -> UnicommerceSettings:
         tax_inclusive_map=data.get("tax_inclusive_map") or {},
         zero_discount_floor_channels=data.get("zero_discount_floor_channels") or {},
         tax_code_map=data.get("tax_code_map") or {},
+        tax_code_map_by_state=data.get("tax_code_map_by_state") or {},
         warehouse_map=data.get("warehouse_map") or {},
         channel_warehouse_map=data.get("channel_warehouse_map") or {},
         bill_to_code_map=data.get("bill_to_code_map") or {},

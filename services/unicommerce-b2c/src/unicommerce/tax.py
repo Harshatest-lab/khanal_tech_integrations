@@ -3,7 +3,7 @@ khanal_tech_integrations/unicommerce/mappers/tax.py."""
 
 from __future__ import annotations
 
-from unicommerce.geo import normalize_state_code
+from unicommerce.geo import normalize_state_code, resolve_mapped_value
 from unicommerce.settings import UnicommerceSettings
 
 
@@ -12,9 +12,13 @@ def get_tax_code(tax_percent: float, ship_to_state: str, origin_state: str, sett
     origin_state_code = normalize_state_code(origin_state)
     tx_type = "intra" if ship_to_state_code and ship_to_state_code == origin_state_code else "inter"
     tax_int = int(float(tax_percent))
+    # Per-origin-state codes (HRCS18, MHIG5, TNCS5...) when configured; the
+    # flat map holds the default (KA) codes.
+    state_map = resolve_mapped_value(settings.tax_code_map_by_state, origin_state_code) or {}
+    code_map = {**settings.tax_code_map, **state_map}
 
     if tax_int == 0:
-        code = settings.tax_code_map.get(f"0_{tx_type}") or settings.tax_code_map.get("0_exempt")
+        code = code_map.get(f"0_{tx_type}") or code_map.get("0_exempt")
         if not code:
             raise ValueError(
                 f"No tax code mapped for zero-tax key 0_{tx_type}. Update Unicommerce settings -> tax_code_map."
@@ -22,7 +26,7 @@ def get_tax_code(tax_percent: float, ship_to_state: str, origin_state: str, sett
         return code
 
     key = f"{tax_int}_{tx_type}"
-    code = settings.tax_code_map.get(key)
+    code = code_map.get(key)
     if not code:
         raise ValueError(f"No tax code mapped for key: {key}. Update Unicommerce settings -> tax_code_map.")
     return code
