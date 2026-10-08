@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Amazon UK Orders — Dashboard</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="login-screen" class="login-screen hidden">
+  <div class="login-card">
+    <div class="login-brand">
+      <span class="logo">a</span>
+      <div>
+        <div class="brand-name">Amazon UK</div>
+        <div class="brand-sub">ORDER SYNC</div>
+      </div>
+    </div>
+    <h2 class="login-title">Sign in</h2>
+    <p class="login-subtitle">Single-user dashboard access</p>
+    <form id="login-form" class="login-form" autocomplete="on">
+      <label class="login-field">
+        <span class="login-label">Email</span>
+        <input type="email" id="login-email" name="email" required autocomplete="username">
+      </label>
+      <label class="login-field">
+        <span class="login-label">Password</span>
+        <input type="password" id="login-password" name="password" required autocomplete="current-password">
+      </label>
+      <p class="login-error hidden" id="login-error" role="alert"></p>
+      <button type="submit" class="btn nav-btn login-submit" id="login-submit">Sign in</button>
+    </form>
+  </div>
+</div>
+
+<div class="app-shell hidden" id="app-shell">
+
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      <span class="logo">a</span>
+      <div>
+        <div class="brand-name">Amazon UK</div>
+        <div class="brand-sub">ORDER SYNC</div>
+      </div>
+    </div>
+    <div class="sap-alert-wrap" id="sap-alert-wrap">
+      <button class="sap-alert-bell" id="sap-alert-bell" title="No SAP sync failures" aria-expanded="false">
+        🔔 SAP failures <span class="sap-alert-count hidden" id="sap-alert-count">0</span>
+      </button>
+      <div class="sap-alert-panel hidden" id="sap-alert-panel">
+        <div class="sap-alert-panel-head">
+          <span>SAP sync failures (<span id="sap-alert-panel-count">0</span>)</span>
+          <button class="sap-alert-panel-view" id="sap-alert-view-all">View in Orders →</button>
+        </div>
+        <div class="sap-alert-panel-body" id="sap-alert-panel-body">loading…</div>
+      </div>
+    </div>
+
+    <nav class="sidebar-nav">
+      <button class="nav-item active" data-page="orders">☰ Orders report</button>
+      <button class="nav-item" data-page="refunds">↩ Refunds</button>
+      <button class="nav-item" data-page="sync">↻ Sync history</button>
+      <button class="nav-item" data-page="skumap">◈ SAP FG items</button>
+      <button class="nav-item" id="logout-btn">⎋ Sign out</button>
+    </nav>
+  </aside>
+
+  <main class="content">
+
+    <!-- ============ ORDERS REPORT PAGE ============ -->
+    <section id="page-orders" class="page">
+      <div class="page-head">
+        <div>
+          <h1>Orders report</h1>
+          <p class="page-head-sub" id="orders-count-sub">Records (– of –)</p>
+        </div>
+        <div class="page-head-actions">
+          <button id="export-filtered-btn" class="btn">Export filtered</button>
+          <button id="export-failed-btn" class="btn">Export failed</button>
+        </div>
+      </div>
+
+      <div class="summary-bar">
+        <span class="summary-chip" id="sum-total">– orders</span>
+        <span class="summary-chip" id="sum-lines">– lines</span>
+        <span class="summary-chip good" id="sum-posted">– SAP posted</span>
+        <span class="summary-chip bad" id="sum-failed">– SAP failed</span>
+        <span class="summary-chip muted" id="sum-lastsync">Last sync: –</span>
+      </div>
+
+      <div class="card filters-panel">
+        <div class="filters-grid">
+          <label>Order #<input id="f-q" type="search" placeholder="Search order #…"></label>
+          <label>Status
+            <select id="f-status"><option value="">All statuses</option></select>
+          </label>
+          <label>SKU<input id="f-sku" type="search" placeholder="Search SKU…"></label>
+          <label>Item<input id="f-item" type="search" placeholder="Search product name…"></label>
+          <label>Qty<input id="f-qty" type="number" min="1" placeholder="Exact qty…"></label>
+          <label>Order from (UTC)<input id="f-order-from" type="date"></label>
+          <label>Order to (UTC)<input id="f-order-to" type="date"></label>
+          <label>Updated from (UTC)<input id="f-updated-from" type="date"></label>
+          <label>Updated to (UTC)<input id="f-updated-to" type="date"></label>
+          <label>Line count
+            <select id="f-line-count">
+              <option value="">All orders</option>
+              <option value="single">Single line</option>
+              <option value="multi">Multi line</option>
+            </select>
+          </label>
+          <label>Shipping
+            <select id="f-shipping">
+              <option value="">All orders</option>
+              <option value="yes">Has shipping charge</option>
+              <option value="no">No shipping charge</option>
+            </select>
+          </label>
+          <label>Discount
+            <select id="f-discount">
+              <option value="">All orders</option>
+              <option value="yes">Has discount</option>
+              <option value="no">No discount</option>
+            </select>
+          </label>
+          <label>Tax method
+            <select id="f-tax-method">
+              <option value="">All orders</option>
+              <option value="facilitator">Marketplace Facilitator</option>
+              <option value="seller">Seller</option>
+            </select>
+          </label>
+          <label>SAP sync
+            <select id="f-sap-status">
+              <option value="">All SAP status</option>
+              <option value="posted">Posted</option>
+              <option value="failed">Failed</option>
+              <option value="none">Not synced</option>
+            </select>
+          </label>
+          <label>Refunded?
+            <select id="f-has-refund">
+              <option value="">All orders</option>
+              <option value="yes">Has a refund</option>
+              <option value="no">No refund</option>
+            </select>
+          </label>
+        </div>
+        <div class="filters-actions">
+          <button id="clear-filters-btn" class="btn">Clear filters</button>
+          <button id="apply-filters-btn" class="btn primary">Refresh</button>
+        </div>
+      </div>
+
+      <div class="card table-card">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th class="trace-col"></th>
+                <th>Order #</th><th>Order date (UTC)</th><th>Status</th>
+                <th class="num">Items</th><th>SKU</th><th class="num">Qty</th>
+                <th>Updated (UTC)</th><th>SAP sync</th>
+              </tr>
+            </thead>
+            <tbody id="orders-body"><tr><td colspan="9" class="muted center">loading…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="pagination">
+          <div class="pager-info muted small" id="page-info"></div>
+          <div class="pager-controls">
+            <select id="page-size" title="Rows per page">
+              <option>25</option>
+              <option selected>50</option>
+              <option>100</option>
+              <option>200</option>
+            </select>
+            <button class="btn page-btn" id="prev-btn">← Prev</button>
+            <div id="page-numbers" class="page-numbers"></div>
+            <button class="btn page-btn" id="next-btn">Next →</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ REFUNDS PAGE ============ -->
+    <section id="page-refunds" class="page hidden">
+      <div class="page-head">
+        <div>
+          <h1>Refunds</h1>
+          <p class="page-head-sub" id="refunds-count-sub">Records (– of –)</p>
+        </div>
+      </div>
+
+      <div class="summary-bar">
+        <span class="summary-chip" id="sum-refund-events">– refund events</span>
+        <span class="summary-chip bad" id="sum-refund-amount">– refunded</span>
+        <span class="summary-chip muted" id="sum-refund-fees">– fees</span>
+        <span class="summary-chip muted" id="sum-refund-fetched">Last fetch: –</span>
+      </div>
+
+      <div class="card filters-panel">
+        <div class="filters-grid filters-grid-narrow">
+          <label>Order #<input id="r-q" type="search" placeholder="Search order #…"></label>
+          <label>SKU<input id="r-sku" type="search" placeholder="Search SKU…"></label>
+          <label>Posted from (UTC)<input id="r-posted-from" type="date"></label>
+          <label>Posted to (UTC)<input id="r-posted-to" type="date"></label>
+          <label>Order date from (UTC)<input id="r-order-from" type="date"></label>
+          <label>Order date to (UTC)<input id="r-order-to" type="date"></label>
+        </div>
+        <p class="small muted" style="margin:6px 0 0">
+          "Posted" = date Amazon recorded the refund in the seller ledger (typically ~8-10 days after purchase).
+        </p>
+      </div>
+
+      <div class="card table-card">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th class="trace-col"></th>
+                <th>Order #</th><th>Order date (UTC)</th><th>Posted (UTC)</th>
+                <th>SKU</th><th class="num">Qty</th>
+                <th class="num">Refunded</th><th class="num">Fees</th>
+                <th class="num">Tax withheld</th><th class="num">Net</th>
+                <th>SAP credit note</th>
+              </tr>
+            </thead>
+            <tbody id="refunds-body"><tr><td colspan="11" class="muted center">loading…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="pagination">
+          <div class="pager-info muted small" id="refunds-page-info"></div>
+          <div class="pager-controls">
+            <button class="btn page-btn" id="refunds-prev-btn">← Prev</button>
+            <div id="refunds-page-numbers" class="page-numbers"></div>
+            <button class="btn page-btn" id="refunds-next-btn">Next →</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ SYNC HISTORY PAGE ============ -->
+    <section id="page-sync" class="page hidden">
+      <div class="page-head">
+        <div><h1>Sync history</h1><p class="page-head-sub">amazonuk.sync_log — pipeline run log</p></div>
+      </div>
+      <div class="card filters-panel">
+        <div class="filters-grid filters-grid-narrow">
+          <label>Level
+            <select id="sync-level-filter">
+              <option value="">All levels</option>
+              <option value="INFO">INFO</option>
+              <option value="ERROR">ERROR</option>
+            </select>
+          </label>
+        </div>
+      </div>
+      <div class="card table-card">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Time (UTC)</th><th>Level</th><th>Message</th></tr></thead>
+            <tbody id="sync-log-body"><tr><td colspan="3" class="muted center">loading…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="pagination">
+          <div class="pager-info muted small" id="sync-page-info"></div>
+          <div class="pager-controls">
+            <button class="btn page-btn" id="sync-prev-btn">← Prev</button>
+            <div id="sync-page-numbers" class="page-numbers"></div>
+            <button class="btn page-btn" id="sync-next-btn">Next →</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ SAP FG ITEMS PAGE ============ -->
+    <section id="page-skumap" class="page hidden">
+      <div class="page-head">
+        <div><h1>SAP FG items</h1><p class="page-head-sub">amazonuk.sku_item_map — Amazon SKU → SAP item code</p></div>
+      </div>
+      <div class="card filters-panel">
+        <div class="filters-grid filters-grid-narrow">
+          <label>Search<input id="skumap-search" type="search" placeholder="SKU / item code / description…"></label>
+        </div>
+      </div>
+      <div class="card table-card">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Seller SKU</th><th>SAP item code</th><th>Description</th><th>Active</th></tr></thead>
+            <tbody id="skumap-body"><tr><td colspan="4" class="muted center">loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

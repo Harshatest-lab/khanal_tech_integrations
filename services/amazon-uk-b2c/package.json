@@ -1,0 +1,9 @@
+{
+  "name": "amazon-uk-b2c",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Amazon UK B2C SP-API -> SAP B1 pipeline (single daily Lambda)",
+  "devDependencies": {
+    "serverless": "^3.38.0"
+  }
+}
