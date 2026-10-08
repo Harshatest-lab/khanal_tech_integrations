@@ -25,7 +25,7 @@ def run(monkeypatch):
     calls = {"fetches": [], "logged": [], "upserted": []}
 
     def _run(last_watermark, initial_lookback_days=None, orders=None, raise_on=None, partial=None,
-             time_budget_seconds=None):
+             time_budget_seconds=None, **kw):
         def fake_fetch(after, before=None, deadline=None):
             calls["fetches"].append((after, before))
             calls["deadline"] = deadline
@@ -41,7 +41,7 @@ def run(monkeypatch):
         monkeypatch.setattr(sync_amazonuk, "fetch_and_store_shipments",
                             lambda s, e, **kw: calls.update(ship=(s, e), ship_kw=kw) or {"shipments_stored": 0})
         return sync_amazonuk.sync_incremental(initial_lookback_days,
-                                              time_budget_seconds=time_budget_seconds), calls
+                                              time_budget_seconds=time_budget_seconds, **kw), calls
 
     return _run
 
@@ -55,6 +55,29 @@ def test_normal_daily_run_is_sliced_last_slice_open_ended_watermark_now(run):
     assert result["window_capped"] is False and result["slices"] == 5
     assert result["watermark"] == NOW.isoformat() and c["logged"][-1] == NOW
     assert result["budget_exhausted"] is False
+
+
+def test_resume_exact_skips_lookback_so_a_chain_advances(run):
+    wm = NOW - timedelta(hours=24)
+    _, c = run(wm)
+    assert c["fetches"][0][0] == "2026-09-19T23:00:00Z"               # 6 h buffer
+    c["fetches"].clear()
+    _, c = run(wm, resume_exact=True)
+    assert c["fetches"][0][0] == wm.strftime("%Y-%m-%dT%H:%M:%SZ")    # exact resume: nothing re-fetched
+    assert len(c["fetches"]) == 4                                     # 24 h / 6 h
+
+
+def test_until_bounds_the_window_and_watermark(run):
+    until = NOW - timedelta(hours=10)
+    result, c = run(NOW - timedelta(hours=24), resume_exact=True, until=until)
+    assert c["fetches"][-1][1] == until.strftime("%Y-%m-%dT%H:%M:%SZ")  # bounded, not open-ended
+    assert result["watermark"] == until.isoformat() and c["logged"][-1] == until
+    assert result["window_capped"] is True                              # the next run continues from `until`
+
+
+def test_until_after_now_is_ignored(run):
+    result, c = run(NOW - timedelta(hours=24), until=NOW + timedelta(days=1))
+    assert c["fetches"][-1][1] is None and result["watermark"] == NOW.isoformat()
 
 
 def test_slices_are_contiguous(run):

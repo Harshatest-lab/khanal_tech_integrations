@@ -28,6 +28,7 @@ import json
 import logging
 import sys
 import traceback
+from datetime import datetime
 from pathlib import Path
 
 from khanal_shared.logging import configure_logging
@@ -114,6 +115,10 @@ def fetch_handler(event, context):
             lookback = ev.get("initial_lookback_days")
             budget = _time_budget(context)
             kwargs = {"time_budget_seconds": budget} if budget is not None else {}
+            if ev.get("until"):    # e.g. "2026-10-08T00:00:00Z": stop the window there instead of "now"
+                kwargs["until"] = datetime.fromisoformat(str(ev["until"]).replace("Z", "+00:00"))
+            if int(ev.get("chain_depth") or 0) > 0:
+                kwargs["resume_exact"] = True    # chained from a run that ran out of time: exact resume
             return sync_amazonuk.sync_incremental(int(lookback) if lookback is not None else None, **kwargs)
         if mode == "backfill":
             from_date, to_date = ev.get("from_date"), ev.get("to_date")

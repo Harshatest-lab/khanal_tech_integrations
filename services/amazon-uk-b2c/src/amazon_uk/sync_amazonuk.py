@@ -110,7 +110,8 @@ def sync(start_date: str, end_date: str) -> dict:
     return {**order_result, **shipment_result}
 
 
-def sync_incremental(initial_lookback_days: int | None = None, time_budget_seconds: float | None = None) -> dict:
+def sync_incremental(initial_lookback_days: int | None = None, time_budget_seconds: float | None = None,
+                     until: datetime | None = None, resume_exact: bool = False) -> dict:
     """Incremental sync — scheduled daily via EventBridge.
     Fetches every order UPDATED since the last successful run (fetch_orders_by_update, lastUpdatedAfter) instead of
     orders created "today" — so an order purchased days ago that just
@@ -134,6 +135,14 @@ def sync_incremental(initial_lookback_days: int | None = None, time_budget_secon
     should run again (handlers.fetch_handler chains itself). None = no
     limit (local/manual runs).
 
+    until: stop the window at this UTC datetime instead of "now"; the
+    watermark stops there too, so the next run continues from it.
+    resume_exact: skip the INCREMENTAL_LOOKBACK_HOURS buffer. Only for a run
+    chained from one that ran out of time: its watermark is an exact slice
+    boundary, so there is no gap to cover — and re-fetching the buffer would
+    spend the whole budget on slices already stored (a chain that never
+    advances).
+
     The final slice of an uncapped window is open-ended (no
     lastUpdatedBefore) and its watermark is "now" when it completes, so the
     next run's INCREMENTAL_LOOKBACK_HOURS buffer covers anything updated
@@ -155,14 +164,18 @@ def sync_incremental(initial_lookback_days: int | None = None, time_budget_secon
         fetch_from = now - timedelta(days=lookback_days)
         log.info(f"No watermark found — first run, catching up {lookback_days} days")
     else:
-        fetch_from = last_watermark - timedelta(hours=INCREMENTAL_LOOKBACK_HOURS)
+        fetch_from = last_watermark - timedelta(hours=0 if resume_exact else INCREMENTAL_LOOKBACK_HOURS)
 
     window_end = fetch_from + timedelta(hours=MAX_WINDOW_HOURS)
     capped = window_end < now
-    limit = window_end if capped else now
+    cap_end = window_end if capped else now
+    if until is not None and until < cap_end:
+        limit, bounded = until, True
+    else:
+        limit, bounded = cap_end, capped
     fmt = lambda dt: dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-    log.info(f"LastUpdatedAfter={fmt(fetch_from)} LastUpdatedBefore={fmt(window_end) if capped else 'now'} "
-             f"(watermark={last_watermark}, lookback={INCREMENTAL_LOOKBACK_HOURS}h, slices of {SLICE_HOURS}h)")
+    log.info(f"LastUpdatedAfter={fmt(fetch_from)} LastUpdatedBefore={fmt(limit) if bounded else 'now'} "
+             f"(watermark={last_watermark}, lookback={0 if resume_exact else INCREMENTAL_LOOKBACK_HOURS}h, slices of {SLICE_HOURS}h)")
     if capped:
         log.info(f"Window capped at {MAX_WINDOW_HOURS}h — catching up; the next run continues from "
                  f"{window_end.isoformat()}")
@@ -174,7 +187,7 @@ def sync_incremental(initial_lookback_days: int | None = None, time_budget_secon
     while cursor < limit:
         slice_end = min(cursor + timedelta(hours=SLICE_HOURS), limit)
         final = slice_end >= limit
-        open_ended = final and not capped          # final slice of an uncapped window: no lastUpdatedBefore
+        open_ended = final and not bounded         # final slice of an uncapped window: no lastUpdatedBefore
         try:
             orders = fetch_orders.fetch_orders_by_update(fmt(cursor), None if open_ended else fmt(slice_end),
                                                          orders_deadline)
@@ -216,5 +229,5 @@ def sync_incremental(initial_lookback_days: int | None = None, time_budget_secon
 
     return {"orders": total_orders, "items_stored": total_items,
             "watermark": new_watermark.isoformat() if new_watermark else None,
-            "window_capped": capped, "slices": slices_done, "budget_exhausted": budget_exhausted,
+            "window_capped": bounded, "slices": slices_done, "budget_exhausted": budget_exhausted,
             **shipment_result}
