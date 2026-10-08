@@ -8,7 +8,7 @@ on:
         required: true
         default: dev
       service:
-        description: "Service folder: delivery-api | B2C_Invoice | amazon-us-b2c | dogseeus-invoice | unicommerce-b2c | safexpress | B2B_so"
+        description: "Service folder: delivery-api | B2C_Invoice | amazon-us-b2c | dogseeus-invoice | unicommerce-b2c | safexpress | B2B_so | amazon-uk-b2c"
         required: true
         default: delivery-api
 
@@ -133,6 +133,14 @@ jobs:
           B2B_ALERT_ADMIN_EMAIL: ${{ secrets.B2B_ALERT_ADMIN_EMAIL }}
           B2B_ALERT_FROM_EMAIL: ${{ secrets.B2B_ALERT_FROM_EMAIL }}
           B2B_SES_REGION: ${{ secrets.B2B_SES_REGION }}
+          # amazon-uk-b2c only — falls back to serverless.yml defaults if unset.
+          # AMZ_UK_POSTING_CUTOFF_DATE has NO default: the deploy fails if this
+          # secret is missing (guards against invoicing old orders).
+          AMZ_UK_POSTING_CUTOFF_DATE: ${{ secrets.AMZ_UK_POSTING_CUTOFF_DATE }}
+          AMZ_UK_ALERT_ADMIN_EMAIL: ${{ secrets.AMZ_UK_ALERT_ADMIN_EMAIL }}
+          AMZ_UK_ALERT_FROM_EMAIL: ${{ secrets.AMZ_UK_ALERT_FROM_EMAIL }}
+          AMZ_UK_SES_REGION: ${{ secrets.AMZ_UK_SES_REGION }}
+          HANA_SCHEMA: ${{ secrets.HANA_SCHEMA }}
           HANA_USE_SSM: ${{ secrets.HANA_USE_SSM }}
         run: |
           npm install

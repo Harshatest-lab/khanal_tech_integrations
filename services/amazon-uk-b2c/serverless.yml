@@ -1,0 +1,285 @@
+service: amazon-uk-b2c
+
+frameworkVersion: "3"
+
+provider:
+  name: aws
+  runtime: python3.12
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'ap-south-1'}
+  memorySize: 512
+  timeout: 900
+  httpApi:
+    authorizers:
+      dashboardCognitoJwt:
+        type: jwt
+        identitySource:
+          - $request.header.Authorization
+        issuerUrl:
+          Fn::Sub: "https://cognito-idp.${AWS::Region}.amazonaws.com/${AmazonUkDashboardUserPool}"
+        audience:
+          - Ref: AmazonUkDashboardUserPoolClient
+    # Dashboard now lives on its own S3 website bucket (separate origin), not
+    # served same-origin by this Lambda — so the API needs real CORS. Scoped
+    # to that bucket's exact origin rather than "*" (this API touches SAP/
+    # financial data). HTTP API's native CORS handles OPTIONS preflight
+    # itself, bypassing the JWT authorizer — no extra route/Lambda work needed.
+    cors:
+      allowedOrigins:
+        - http://${self:service}-${self:provider.stage}-dashboard-site.s3-website.${self:provider.region}.amazonaws.com
+      allowedHeaders:
+        - Content-Type
+        - Authorization
+      allowedMethods:
+        - GET
+        - OPTIONS
+  iam:
+    role:
+      statements:
+        # Failure alerts (handlers._run -> alerts.send_alert).
+        - Effect: Allow
+          Action:
+            - ses:SendEmail
+            - ses:SendRawEmail
+          Resource: "*"
+        # Credentials in SSM (amazon_uk.credentials, khanal_shared.hana) —
+        # LWA, DB, and SAP SL creds; HANA host/user/password.
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+          Resource:
+            - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/amazon-uk/*"
+            - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/sap/uk/*"
+  environment:
+    STAGE: ${self:provider.stage}
+    LOG_LEVEL: ${env:LOG_LEVEL, 'INFO'}
+    # SES crash alerts + per-job completion reports (fetched / posted / failed)
+    # — comma-separated recipients; unset FROM = emails skipped (logged only).
+    AMZ_UK_ALERT_ADMIN_EMAIL: ${env:AMZ_UK_ALERT_ADMIN_EMAIL, 'varshap@khanalfoods.com'}
+    AMZ_UK_ALERT_FROM_EMAIL: ${env:AMZ_UK_ALERT_FROM_EMAIL, ''}
+    AMZ_UK_SES_REGION: ${env:AMZ_UK_SES_REGION, 'ap-south-1'}
+    # REQUIRED, no default (deploy fails if not exported): the scheduled post
+    # run only invoices orders shipped on/after this date (YYYY-MM-DD). With
+    # nobody triggering runs by hand, this is the guard against an old order
+    # ever being invoiced automatically.
+    AMZ_UK_POSTING_CUTOFF_DATE: ${env:AMZ_UK_POSTING_CUTOFF_DATE}
+    # Amazon SP-API (LWA) credentials — SSM SecureString JSON by default
+    # (amazon_uk.credentials.get_lwa_credentials); set AMZ_UK_LWA_USE_SSM=false
+    # + the LWA_* vars below to fall back to plain env vars.
+    AMZ_UK_LWA_USE_SSM: ${env:AMZ_UK_LWA_USE_SSM, 'true'}
+    AMZ_UK_LWA_PARAM_NAME: ${env:AMZ_UK_LWA_PARAM_NAME, '/amazon-uk/lwa'}
+    LWA_CLIENT_ID: ${env:LWA_CLIENT_ID, ''}
+    LWA_CLIENT_SECRET: ${env:LWA_CLIENT_SECRET, ''}
+    LWA_REFRESH_TOKEN: ${env:LWA_REFRESH_TOKEN, ''}
+    # RDS Postgres (amazonuk.* schema) — SSM SecureString JSON by default
+    # (amazon_uk.credentials.get_db_credentials); same AMZ_UK_DB_USE_SSM=false
+    # fallback as LWA above.
+    AMZ_UK_DB_USE_SSM: ${env:AMZ_UK_DB_USE_SSM, 'true'}
+    AMZ_UK_DB_PARAM_NAME: ${env:AMZ_UK_DB_PARAM_NAME, '/amazon-uk/db_config'}
+    DB_HOST: ${env:DB_HOST, ''}
+    DB_PORT: ${env:DB_PORT, '5432'}
+    DB_NAME: ${env:DB_NAME, ''}
+    DB_USER: ${env:DB_USER, ''}
+    DB_PASSWORD: ${env:DB_PASSWORD, ''}
+    # SAP HANA (FEFO batches + item-master lookup) — SSM (khanal_shared.hana's
+    # own SSM support) reads host/user/password from /sap/uk/hana_config +
+    # /sap/uk/hana_credentials. HANA_SCHEMA is query-building config, not a
+    # secret — stays a plain env var either way.
+    HANA_USE_SSM: ${env:HANA_USE_SSM, '1'}
+    HANA_PROFILE: ${env:HANA_PROFILE, 'uk'}
+    HANA_SCHEMA: ${env:HANA_SCHEMA, ''}
+    # SAP B1 Service Layer: one fresh Login per run (safe for a once-daily
+    # cron) via khanal_shared.sap_sl's HTTP/cookie machinery, but — unlike
+    # the Walmart / US pipelines — never through their SSM *session* cache,
+    # so this service can't churn or contend on /sap/inc*'s session lock.
+    # Only the credentials come from SSM (amazon_uk.credentials, profile
+    # 'uk' -> /sap/uk/sl_config + /sap/uk/credentials); set SAP_SL_USE_SSM=false
+    # + the SAP_SL_* vars below to fall back to plain env vars.
+    SAP_SL_USE_SSM: ${env:SAP_SL_USE_SSM, 'true'}
+    SAP_SL_PROFILE: ${env:SAP_SL_PROFILE, 'uk'}
+    # UK's SAP B1 server uses a self-signed cert with no CA infra (same
+    # trade-off the standalone pipeline made with verify=False).
+    SAP_SL_VERIFY_SSL: ${env:SAP_SL_VERIFY_SSL, 'false'}
+    SAP_SL_BASE_URL: ${env:SAP_SL_BASE_URL, ''}
+    SAP_SL_COMPANYDB: ${env:SAP_SL_COMPANYDB, ''}
+    SAP_SL_USERNAME: ${env:SAP_SL_USERNAME, ''}
+    SAP_SL_PASSWORD: ${env:SAP_SL_PASSWORD, ''}
+
+layers:
+  shared:
+    name: ${self:service}-${self:provider.stage}-shared
+    path: ../../layers/build
+    package:
+      patterns:
+        - "python/**"
+    compatibleRuntimes:
+      - python3.12
+
+package:
+  patterns:
+    - "!**"
+    - "src/**"
+    - "!**/__pycache__/**"
+    - "!**/*.pyc"
+
+functions:
+  # Orders (lastUpdatedAfter watermark) + shipment report -> amazonuk.* in RDS.
+  # Slow by design (~180 s per orders page) — its own 900 s budget.
+  amazonUkFetch:
+    handler: src.handlers.fetch_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+    events:
+      # Daily. 22:00 UTC = 03:30 IST. Runs unattended — no manual seeding:
+      # each run's window is capped (sync_amazonuk.MAX_WINDOW_HOURS), so a
+      # first run or a gap after downtime drains over consecutive runs.
+      - schedule:
+          rate: cron(0 22 * * ? *)
+          enabled: true
+          input: { mode: incremental }
+
+  # Post every Shipped, not-yet-posted order to SAP B1 as an AR Invoice.
+  # Also the retry path: failed orders are re-attempted on every run.
+  amazonUkPostInvoices:
+    handler: src.handlers.post_invoices_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+    events:
+      # Daily, an hour after the fetch. 23:00 UTC = 04:30 IST. Only posts
+      # orders shipped on/after AMZ_UK_POSTING_CUTOFF_DATE.
+      - schedule:
+          rate: cron(0 23 * * ? *)
+          enabled: true
+          input: { mode: post }
+
+  # RELEASED refund transactions (Finances API) -> amazonuk.refund_events/
+  # refund_items in RDS. Own schedule/budget, separate from the orders
+  # fetch (lightweight — paginated Finances API, not the ~180s/page orders
+  # endpoint).
+  amazonUkFetchRefunds:
+    handler: src.handlers.fetch_refunds_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+    events:
+      # Daily, after invoice posting. 23:30 UTC = 05:00 IST.
+      - schedule:
+          rate: cron(30 23 * * ? *)
+          enabled: true
+          input: { mode: incremental }
+
+  # Post every not-yet-posted RELEASED refund to SAP B1 as an AR Credit
+  # Memo. Also the retry path: failed refunds are re-attempted on every run.
+  amazonUkPostCreditNotes:
+    handler: src.handlers.post_credit_notes_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+    events:
+      # Daily, after the refunds fetch. 00:00 UTC = 05:30 IST. Only posts
+      # refunds posted on/after AMZ_UK_POSTING_CUTOFF_DATE (same cutoff
+      # invoices use).
+      - schedule:
+          rate: cron(0 0 * * ? *)
+          enabled: true
+          input: { mode: post }
+
+  # Cognito-protected READ-ONLY JSON API (GET only) — it triggers nothing;
+  # fetch and post run only from their schedules above. The static frontend
+  # is no longer served here: it's hosted on its own S3 website bucket
+  # (AmazonUkDashboardSiteBucket, below) and calls this API cross-origin.
+  amazonUkDashboardApi:
+    handler: src.handlers.dashboard_handler
+    memorySize: 512
+    timeout: 30
+    layers: [{ Ref: SharedLambdaLayer }]
+    events:
+      - httpApi:
+          path: /api/{proxy+}
+          method: get
+          authorizer:
+            name: dashboardCognitoJwt
+
+resources:
+  Resources:
+    AmazonUkDashboardUserPool:
+      Type: AWS::Cognito::UserPool
+      Properties:
+        UserPoolName: ${self:service}-${self:provider.stage}-dashboard
+        UsernameAttributes:
+          - email
+        AutoVerifiedAttributes:
+          - email
+        Policies:
+          PasswordPolicy:
+            MinimumLength: 10
+            RequireLowercase: true
+            RequireNumbers: true
+            RequireSymbols: false
+            RequireUppercase: true
+        AccountRecoverySetting:
+          RecoveryMechanisms:
+            - Name: verified_email
+              Priority: 1
+
+    AmazonUkDashboardUserPoolClient:
+      Type: AWS::Cognito::UserPoolClient
+      Properties:
+        ClientName: ${self:service}-${self:provider.stage}-dashboard-web
+        UserPoolId: !Ref AmazonUkDashboardUserPool
+        GenerateSecret: false
+        ExplicitAuthFlows:
+          - ALLOW_USER_PASSWORD_AUTH
+          - ALLOW_REFRESH_TOKEN_AUTH
+          - ALLOW_USER_SRP_AUTH
+        PreventUserExistenceErrors: ENABLED
+        SupportedIdentityProviders:
+          - COGNITO
+        AccessTokenValidity: 8
+        IdTokenValidity: 8
+        RefreshTokenValidity: 30
+        TokenValidityUnits:
+          AccessToken: hours
+          IdToken: hours
+          RefreshToken: days
+
+    # Static hosting for services/amazon-uk-b2c/dashboard/ — plain S3 website
+    # hosting (same URL shape as the Walmart dashboard), defined here as IaC
+    # rather than clicked together by hand. Public read is inherent to S3's
+    # website-hosting feature (there's no private/OAC option for it) — the
+    # site only ever contains a Cognito client id and this API's URL, neither
+    # secret. Content is pushed with `aws s3 sync` after deploy (see README),
+    # not managed by this stack.
+    AmazonUkDashboardSiteBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:service}-${self:provider.stage}-dashboard-site
+        WebsiteConfiguration:
+          IndexDocument: index.html
+          ErrorDocument: index.html
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: false
+          BlockPublicPolicy: false
+          IgnorePublicAcls: false
+          RestrictPublicBuckets: false
+
+    AmazonUkDashboardSiteBucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket: !Ref AmazonUkDashboardSiteBucket
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Principal: "*"
+              Action: s3:GetObject
+              Resource: !Sub "${AmazonUkDashboardSiteBucket.Arn}/*"
+
+  Outputs:
+    DashboardUrl:
+      Description: Dashboard base URL (open in a browser)
+      Value:
+        Fn::Sub: "http://${AmazonUkDashboardSiteBucket}.s3-website.${AWS::Region}.amazonaws.com"
+    DashboardApiUrl:
+      Description: Dashboard API base URL (what dashboard/app.js's API_BASE points to)
+      Value:
+        Fn::Sub: "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com"
+    AmazonDashboardUserPoolId:
+      Description: Cognito User Pool ID for dashboard login
+      Value: !Ref AmazonUkDashboardUserPool
+    AmazonDashboardUserPoolClientId:
+      Description: Cognito app client ID for dashboard login
+      Value: !Ref AmazonUkDashboardUserPoolClient
