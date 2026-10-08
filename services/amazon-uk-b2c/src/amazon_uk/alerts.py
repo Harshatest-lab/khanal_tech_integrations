@@ -87,6 +87,8 @@ def build_report(label: str, result) -> tuple[str, str]:
     rows = result.get("results") if isinstance(result.get("results"), list) else None
     failed_n = int(result.get("failed") or 0)
     status = "completed with FAILURES" if failed_n else "completed"
+    if result.get("budget_exhausted"):
+        status = "stopped early (out of time, more orders remain — continuing)"
     lines = [f"Amazon UK {label} {status}", ""]
     for key, value in result.items():
         if key != "results":

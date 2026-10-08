@@ -55,6 +55,46 @@ def _run(label: str, fn):
     return result
 
 
+# Safety margin kept off the Lambda's remaining time when handing a time
+# budget to sync_incremental (cold start overhead, final log/DB writes).
+LAMBDA_SAFETY_SECONDS = 20
+# A run that ran out of time re-invokes itself to keep draining the backlog;
+# capped so a persistent problem cannot loop forever.
+MAX_CHAIN_DEPTH = 12
+
+
+def _time_budget(context) -> float | None:
+    """Seconds this invocation may still use, or None when unknown (local runs/tests)."""
+    remaining_ms = getattr(context, "get_remaining_time_in_millis", None)
+    if not callable(remaining_ms):
+        return None
+    return max(0.0, remaining_ms() / 1000.0 - LAMBDA_SAFETY_SECONDS)
+
+
+def _chain_next_run(event: dict, context, result) -> None:
+    """If the fetch stopped for lack of time, async-invoke this same Lambda to
+    continue from the saved watermark. Best-effort: on failure the next
+    scheduled run picks the backlog up anyway."""
+    if not (isinstance(result, dict) and result.get("budget_exhausted")):
+        return
+    depth = int(event.get("chain_depth") or 0)
+    if depth >= MAX_CHAIN_DEPTH:
+        send_alert("fetch backlog not drained", f"Fetch still has orders left after {depth} chained runs; "
+                                                "the next scheduled run will continue.")
+        return
+    try:
+        import boto3
+
+        boto3.client("lambda").invoke(
+            FunctionName=context.function_name,
+            InvocationType="Event",
+            Payload=json.dumps({**event, "mode": "incremental", "chain_depth": depth + 1}).encode(),
+        )
+        logger.info("fetch: out of time, chained run %d started", depth + 1)
+    except Exception:
+        logger.error("fetch: could not chain the next run", exc_info=True)
+
+
 def fetch_handler(event, context):
     """modes: incremental (default) | backfill.
 
@@ -72,7 +112,9 @@ def fetch_handler(event, context):
     def _go():
         if mode == "incremental":
             lookback = ev.get("initial_lookback_days")
-            return sync_amazonuk.sync_incremental(int(lookback) if lookback is not None else None)
+            budget = _time_budget(context)
+            kwargs = {"time_budget_seconds": budget} if budget is not None else {}
+            return sync_amazonuk.sync_incremental(int(lookback) if lookback is not None else None, **kwargs)
         if mode == "backfill":
             from_date, to_date = ev.get("from_date"), ev.get("to_date")
             if not from_date or not to_date:
@@ -80,7 +122,10 @@ def fetch_handler(event, context):
             return sync_amazonuk.sync(from_date, to_date)
         raise ValueError(f"Unknown fetch mode: {mode}")
 
-    return _run(f"fetch[{mode}]", _go)
+    result = _run(f"fetch[{mode}]", _go)
+    if mode == "incremental":
+        _chain_next_run(ev, context, result)
+    return result
 
 
 def post_invoices_handler(event, context):

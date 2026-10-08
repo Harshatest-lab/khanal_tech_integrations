@@ -25,11 +25,43 @@ INCLUDED_DATA = (
 # so there's no per-order follow-up call to also pace.
 PAGE_PACING_SECONDS = 180
 
+# A page needs PAGE_PACING_SECONDS of waiting plus the request itself; this is
+# the slack kept on top so a page is only started if it can really finish.
+PAGE_REQUEST_MARGIN_SECONDS = 15
 
-def _paginate(params: dict) -> list[dict]:
+_last_request_at: float | None = None
+
+
+class FetchBudgetExceeded(Exception):
+    """The time budget cannot fit another page. ``partial`` holds the orders
+    fetched so far — safe to upsert (idempotent), but the window they came
+    from is NOT complete, so the watermark must not move past it."""
+
+    def __init__(self, partial: list[dict]):
+        super().__init__(f"time budget exhausted after {len(partial)} orders")
+        self.partial = partial
+
+
+def _wait_for_next_page(deadline: float | None, partial: list[dict]) -> None:
+    """Pace requests to PAGE_PACING_SECONDS apart — across slices too, not
+    just across pages of one query. Raises FetchBudgetExceeded instead of
+    starting a page the deadline (time.monotonic() based) cannot cover."""
+    global _last_request_at
+    wait = 0.0
+    if _last_request_at is not None:
+        wait = max(0.0, _last_request_at + PAGE_PACING_SECONDS - time.monotonic())
+    if deadline is not None and time.monotonic() + wait + PAGE_REQUEST_MARGIN_SECONDS > deadline:
+        raise FetchBudgetExceeded(partial)
+    if wait:
+        time.sleep(wait)
+    _last_request_at = time.monotonic()
+
+
+def _paginate(params: dict, deadline: float | None = None) -> list[dict]:
     orders = []
     page = 1
     while True:
+        _wait_for_next_page(deadline, orders)
         payload = sp_api.request("GET", "/orders/2026-01-01/orders", params)
         page_orders = payload.get("orders", [])
         orders += page_orders
@@ -62,7 +94,6 @@ def _paginate(params: dict) -> list[dict]:
         # see github.com/amzn/selling-partner-api-models/discussions/5222.
         params = {**params, "paginationToken": next_token}
         page += 1
-        time.sleep(PAGE_PACING_SECONDS)
 
 
 def fetch_orders(created_after: str, created_before: str) -> list[dict]:
@@ -78,7 +109,8 @@ def fetch_orders(created_after: str, created_before: str) -> list[dict]:
     })
 
 
-def fetch_orders_by_update(last_updated_after: str, last_updated_before: str | None = None) -> list[dict]:
+def fetch_orders_by_update(last_updated_after: str, last_updated_before: str | None = None,
+                           deadline: float | None = None) -> list[dict]:
     """One dict per order, each with 'orderItems' already embedded.
     Incremental mode — every order UPDATED since last_updated_after,
     regardless of when it was created. This is what catches an order
@@ -90,7 +122,10 @@ def fetch_orders_by_update(last_updated_after: str, last_updated_before: str | N
     2026-09-21: accepted, and every returned order's lastUpdatedTime falls
     inside [after, before]. sync_amazonuk.sync_incremental uses it to cap
     one run's work so a long gap is drained over several runs instead of
-    timing out the Lambda in one."""
+    timing out the Lambda in one.
+
+    deadline (time.monotonic() value, optional): raise FetchBudgetExceeded
+    rather than start a page that would run past it."""
     params = {
         "marketplaceIds": sp_api.MARKETPLACE_ID,
         "lastUpdatedAfter": last_updated_after,
@@ -98,4 +133,4 @@ def fetch_orders_by_update(last_updated_after: str, last_updated_before: str | N
     }
     if last_updated_before:
         params["lastUpdatedBefore"] = last_updated_before
-    return _paginate(params)
+    return _paginate(params, deadline)

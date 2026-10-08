@@ -43,6 +43,12 @@ provider:
             - ses:SendEmail
             - ses:SendRawEmail
           Resource: "*"
+        # Fetch chains itself when it runs out of time (handlers._chain_next_run).
+        - Effect: Allow
+          Action:
+            - lambda:InvokeFunction
+          Resource:
+            - Fn::Sub: "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${self:service}-${self:provider.stage}-amazonUkFetch"
         # Credentials in SSM (amazon_uk.credentials, khanal_shared.hana) —
         # LWA, DB, and SAP SL creds; HANA host/user/password.
         - Effect: Allow
