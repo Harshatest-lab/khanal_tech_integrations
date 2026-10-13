@@ -31,12 +31,6 @@ these were ported from for the exact semantics each map drives):
   "vendor_code": "EC-B2C",   -- UC PO vendor code for PoGrn (createApproved);
                              -- matches the Frappe source's po_grn.py VENDOR_CODE,
                              -- not the "EC-DIS" this field previously defaulted to
-  "flex_sku_overrides": {"<amazon seller SKU>": "<SAP FG item code>"}
-                             -- manual tier for Amazon Flex SKUs that have never
-                             -- appeared in an already-UC-synced order (see
-                             -- amazon_flex_items.build_sku_map) -- checked before
-                             -- the live-order-history map, same override-wins
-                             -- precedence as khanal-oms's sku_resolver.py
   "sku_remap": {"<UC itemSku>": "<current SAP ItemCode>"}
                              -- for items retired/renamed in SAP (e.g. dead item
                              -- FGHN0056 replaced by CFGHN0009) while UC's own
@@ -89,7 +83,6 @@ class UnicommerceSettings:
     posting_timeout_mins: int = 5
     ec_fg_fefo_fallback: bool = False
     vendor_code: str = "EC-B2C"
-    flex_sku_overrides: dict = field(default_factory=dict)
     sku_remap: dict = field(default_factory=dict)
 
 
@@ -136,7 +129,6 @@ def _from_dict(data: dict) -> UnicommerceSettings:
         posting_timeout_mins=int(data.get("posting_timeout_mins") or 5),
         ec_fg_fefo_fallback=bool(data.get("ec_fg_fefo_fallback") or False),
         vendor_code=data.get("vendor_code") or "EC-B2C",
-        flex_sku_overrides=data.get("flex_sku_overrides") or {},
         sku_remap=data.get("sku_remap") or {},
     )
 
