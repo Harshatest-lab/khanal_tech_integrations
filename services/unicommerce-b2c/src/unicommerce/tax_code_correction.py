@@ -172,10 +172,9 @@ def correct_one(
         and abs(_f(new_live.get("DocTotal")) - summary["doc_total"]) <= TOTAL_TOLERANCE
         and abs(_f(new_live.get("VatSum")) - old_tax) <= TOTAL_TOLERANCE
         and str(new_live.get("DocDate"))[:10] == doc_date
-        and int(new_live.get("Series") or 0) == int(live.get("Series") or 0)
     )
     details = {
-        "new_doc_entry": new_entry, "new_doc_num": new_live.get("DocNum"), "new_codes": sorted(_codes(new_live)),
+        "new_doc_entry": new_entry, "new_doc_num": new_live.get("DocNum"), "new_series": new_live.get("Series"), "new_codes": sorted(_codes(new_live)),
         "new_doc_total": _f(new_live.get("DocTotal")), "new_vat": _f(new_live.get("VatSum")),
         "cancel_doc": cancel_info, "cancel_series_ok": series_ok,
     }
