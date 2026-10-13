@@ -204,9 +204,17 @@ custom:
   # real SAP PROD (19 real invoices posted, checked line-by-line, all
   # correct) 2026-08-20 -- enabled on prod explicitly, by name, per the
   # user's direct go-ahead, not by flipping a shared flag.
+  #
+  # OFF as of 2026-10-12: Amazon Flex is now integrated into Unicommerce
+  # (channel AMAZON_FLEX_XFZQ, fulfillment centre LB1P), which is the single
+  # source. Amazon's shipments report no longer tags Flex shipments PRCJ, so
+  # this pull returned 0 PRCJ rows from 2026-10-10 on; leaving it scheduled
+  # risks double-posting the same shipments alongside the UC channel. The
+  # code stays as a fallback -- flip back to true only with UC fetch off for
+  # Flex.
   flexFetchEnabledByStage:
-    dev: true
-    prod: true
+    dev: false
+    prod: false
   flexFetchScheduleEnabled: ${self:custom.flexFetchEnabledByStage.${self:provider.stage}, false}
   # Stage-keyed database URL -- only "prod" gets its own dedicated database
   # (UC_PROD_DATABASE_URL); every other stage keeps reading the shared
@@ -394,9 +402,15 @@ functions:
       # postCreditNotes :17/:47, poGrn :22/:52, recon :27/:57 -- leaving
       # exactly two 5-min-clear gaps, at :12 (between :07 and :17) and
       # :42 (between :37 and :47). :12 sits in the first.
+      #
+      # OFF as of 2026-10-12 (all stages): Flex is now fed by Unicommerce
+      # (AMAZON_FLEX_XFZQ), whose returns go through the normal UC credit-note
+      # flow. NOTE this also stops refunds against the ~800 legacy FLEX-*
+      # invoices posted via SP-API (08-20 .. 10-05); re-enable if those need
+      # credit notes.
       - schedule:
           rate: cron(12 */6 * * ? *)
-          enabled: ${self:custom.currentSchedulesEnabled}
+          enabled: false
     # Does not handle CFG bundle or shipping-only refunds in v1 -- see
     # flex_credit_note_payload.py.
 
