@@ -24,7 +24,6 @@ import os
 import re
 import sys
 import traceback
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +32,7 @@ _SRC = Path(__file__).resolve().parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unicommerce import constants, credit_notes, dashboard_queries, fetch_sync, flex_fetch, flex_refunds, infra_status, numatcard_backfill, pogrn, post_invoices, recon, store
+from unicommerce import constants, credit_notes, dashboard_queries, fetch_sync, infra_status, numatcard_backfill, pogrn, post_invoices, recon, store
 from unicommerce.alerts import send_alert
 
 # boto3 isn't a declared dev/CI dependency (only present in the real Lambda
@@ -240,48 +239,6 @@ def debug_invoice_totals_handler(event, context):
         return {"rows": hana_access.bulk_invoice_totals_by_doc_entries(doc_entries)}
 
     return _run("debug_invoice_totals", _go)
-
-
-def flex_fetch_handler(event, context):
-    """{"lookback_days": int? (default 2)} -- pulls the Amazon SP-API
-    fulfilled-shipments report, filters to PRCJ, stages synthetic orders
-    into unicommerce_orders/order_lines (channel_name='AMAZON_FLEX',
-    pipeline_status='fetched'). Posting itself happens on the next
-    post_invoices_handler cycle, same as every other channel -- this
-    handler only fetches/stages."""
-    ev = event or {}
-    lookback_days = int(ev.get("lookback_days") or 2)
-
-    def _go():
-        return flex_fetch.fetch_flex_shipments(lookback_days=lookback_days)
-
-    return _run("flex_fetch", _go)
-
-
-def flex_refunds_handler(event, context):
-    """{"posted_after": "YYYY-MM-DDTHH:MM:SSZ"?, "posted_before": str?,
-    "dry_run": bool? (default false)} -- pulls Amazon Finances API refund
-    events, matches each to its already-posted AMAZON_FLEX invoice, and
-    posts a SAP AR Credit Note (WithoutInventoryMovement, same pattern as
-    amazon-us-b2c). posted_after defaults to a rolling last-45-days window
-    when omitted -- same default amazon-us-b2c's own scheduled refund
-    poster uses, since Finances PostedDate lags the actual refund by up
-    to 1-2 weeks and the duplicate/amendment guards make re-processing
-    the same window free. dry_run logs what would post without writing
-    to SAP or the local log table. v1 does not handle CFG bundle refunds
-    or shipping-only refunds -- see flex_credit_note_payload.py."""
-    ev = event or {}
-    posted_after = ev.get("posted_after") or (
-        datetime.now(timezone.utc) - timedelta(days=45)
-    ).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    def _go():
-        with store.connect() as conn:
-            return flex_refunds.post_flex_refunds(
-                conn, posted_after=posted_after, posted_before=ev.get("posted_before"), dry_run=bool(ev.get("dry_run") or False),
-            )
-
-    return _run("flex_refunds", _go)
 
 
 def post_invoices_handler(event, context):

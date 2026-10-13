@@ -82,15 +82,6 @@ provider:
             - ssm:GetParameter
           Resource:
             - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.ucSettingsParamName}
-        # Amazon Flex (PRCJ) SP-API LWA credentials — one new param, reuses
-        # khanal-oms's already-working refresh token value rather than a
-        # second Amazon app registration. See
-        # docs/superpowers/specs/2026-08-20-amazon-flex-sap-pipeline-design.md.
-        - Effect: Allow
-          Action:
-            - ssm:GetParameter
-          Resource:
-            - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.flexLwaParamName}
         # Infra dashboard page: read-only introspection of this service's
         # own Lambdas/schedules/metrics -- no write actions, no other
         # service's resources. CloudWatch actions don't support
@@ -151,7 +142,6 @@ provider:
     DATABASE_URL: ${self:custom.currentDatabaseUrl}${self:custom.currentDbSearchPathSuffix}
     UC_API_PARAM_NAME: ${self:custom.ucApiParamName}
     UC_SETTINGS_PARAM_NAME: ${self:custom.ucSettingsParamName}
-    FLEX_LWA_PARAM_NAME: ${self:custom.flexLwaParamName}
     UC_ALERT_ADMIN_EMAIL: ${env:UC_ALERT_ADMIN_EMAIL, ''}
     UC_ALERT_FROM_EMAIL: ${env:UC_ALERT_FROM_EMAIL, ''}
     UC_SES_REGION: ${env:UC_SES_REGION, 'ap-south-1'}
@@ -192,30 +182,6 @@ provider:
 custom:
   ucApiParamName: ${env:UC_API_PARAM_NAME, '/unicommerce/api_credentials'}
   ucSettingsParamName: ${env:UC_SETTINGS_PARAM_NAME, '/unicommerce/settings'}
-  flexLwaParamName: ${env:FLEX_LWA_PARAM_NAME, '/amazon-flex/lwa'}
-  # Stage-keyed, deliberately NOT following the same source-wide enabled:
-  # false convention every other function's schedule uses -- prod's
-  # unicommercePostInvoices cron is already ENABLED and channel-agnostic
-  # (post_ready_orders has no default channel filter), so enabling
-  # flexFetch on prod before SAP TEST posting is verified would let real
-  # PRCJ orders get swept into prod's next posting cycle within ~30-60min.
-  # Verified end-to-end against real SAP TEST (CFG bundles, NumAtCard
-  # dedup, tax-slab handling, posting-period/config fixes) and against
-  # real SAP PROD (19 real invoices posted, checked line-by-line, all
-  # correct) 2026-08-20 -- enabled on prod explicitly, by name, per the
-  # user's direct go-ahead, not by flipping a shared flag.
-  #
-  # OFF as of 2026-10-12: Amazon Flex is now integrated into Unicommerce
-  # (channel AMAZON_FLEX_XFZQ, fulfillment centre LB1P), which is the single
-  # source. Amazon's shipments report no longer tags Flex shipments PRCJ, so
-  # this pull returned 0 PRCJ rows from 2026-10-10 on; leaving it scheduled
-  # risks double-posting the same shipments alongside the UC channel. The
-  # code stays as a fallback -- flip back to true only with UC fetch off for
-  # Flex.
-  flexFetchEnabledByStage:
-    dev: false
-    prod: false
-  flexFetchScheduleEnabled: ${self:custom.flexFetchEnabledByStage.${self:provider.stage}, false}
   # Stage-keyed database URL -- only "prod" gets its own dedicated database
   # (UC_PROD_DATABASE_URL); every other stage keeps reading the shared
   # DATABASE_URL secret unchanged, same as every other service in this repo.
@@ -361,58 +327,6 @@ functions:
     # No schedule -- read-only ops tool, invoke manually ({"doc_entries":
     # [int, ...]}) to pull real SAP AR Invoice totals (DocTotal/VatSum)
     # for a channel-level UC-vs-SAP reconciliation report.
-
-  flexFetch:
-    handler: src.handlers.flex_fetch_handler
-    layers: [{ Ref: SharedLambdaLayer }]
-    events:
-      # Once daily, not hourly like the UC fetch crons below -- Flex
-      # volume is ~15-20 PRCJ shipments/day (confirmed live 2026-08-20,
-      # 136 rows / 7 days), a single daily report-mode pull is plenty per
-      # the design doc; no need for amazon-us-b2c's hourly-incremental +
-      # daily-report dual mode, which exists for ~500-1000x higher volume.
-      # Stage-keyed enable (custom.flexFetchScheduleEnabled) -- dev only
-      # until SAP TEST posting has been verified end-to-end (see
-      # docs/superpowers/specs/2026-08-20-amazon-flex-sap-pipeline-design.md's
-      # phased build order and custom.flexFetchEnabledByStage above).
-      - schedule:
-          rate: cron(15 4 * * ? *)
-          enabled: ${self:custom.flexFetchScheduleEnabled}
-
-  flexRefunds:
-    handler: src.handlers.flex_refunds_handler
-    layers: [{ Ref: SharedLambdaLayer }]
-    events:
-      # Verified end-to-end against real SAP PROD 2026-08-21 (2 real
-      # refunds posted, DocEntry 12674/12676, correct BaseEntry/qty) --
-      # enabled on the same phased-rollout basis flexFetch/
-      # unicommercePostInvoices went through. Every 6h with a rolling
-      # 45-day window (handler default) -- Finances PostedDate lags the
-      # actual refund by up to 1-2 weeks, and the duplicate/amendment
-      # guards make re-processing the same window free.
-      #
-      # :12, not :22: every hourly cron in this file shares the same SAP
-      # SL session lock in SSM (amazon-us-b2c hit exactly this collision
-      # with its own 6h refund poster once before -- "exceeded max waits
-      # while is_locked"), and :22 turned out to already be occupied by
-      # unicommercePoGrn's own hourly :22/:52 slot -- a real collision
-      # every 6h, caught only after deploying and inspecting the live
-      # EventBridge rules, not before. Full picture of every existing
-      # hourly cron's minute: fetch :02/:32, postInvoices :07/:37,
-      # postCreditNotes :17/:47, poGrn :22/:52, recon :27/:57 -- leaving
-      # exactly two 5-min-clear gaps, at :12 (between :07 and :17) and
-      # :42 (between :37 and :47). :12 sits in the first.
-      #
-      # OFF as of 2026-10-12 (all stages): Flex is now fed by Unicommerce
-      # (AMAZON_FLEX_XFZQ), whose returns go through the normal UC credit-note
-      # flow. NOTE this also stops refunds against the ~800 legacy FLEX-*
-      # invoices posted via SP-API (08-20 .. 10-05); re-enable if those need
-      # credit notes.
-      - schedule:
-          rate: cron(12 */6 * * ? *)
-          enabled: false
-    # Does not handle CFG bundle or shipping-only refunds in v1 -- see
-    # flex_credit_note_payload.py.
 
   unicommercePostInvoices:
     handler: src.handlers.post_invoices_handler

@@ -9,14 +9,6 @@ SAP Service Layer credentials are NOT handled here -- reused as-is from
 ``khanal_shared.sap_sl`` (SSM-cached B1 session, default ``/sap/*`` profile
 -- see ``unicommerce/__init__.py`` for why that's the correct entity).
 
-Amazon Flex (PRCJ) SP-API credentials live in one SecureString JSON
-parameter (default ``/amazon-flex/lwa``): ``{"host": "...",
-"marketplace_id": "...", "client_id": "...", "client_secret": "...",
-"refresh_token": "..."}`` -- the same working LWA refresh token khanal-oms
-already uses for this seller account, reseeded here rather than
-re-registering a second Amazon app (see docs/superpowers/specs/
-2026-08-20-amazon-flex-sap-pipeline-design.md).
-
 For local runs, copy ``credentials_local.example.py`` to
 ``credentials_local.py`` (gitignored) -- same pattern as amazon-us-b2c.
 """
@@ -34,7 +26,6 @@ def _env(name: str, default: str = "") -> str:
 
 DATABASE_URL = _env("DATABASE_URL")
 UC_API_PARAM_NAME = _env("UC_API_PARAM_NAME", "/unicommerce/api_credentials")
-FLEX_LWA_PARAM_NAME = _env("FLEX_LWA_PARAM_NAME", "/amazon-flex/lwa")
 
 try:
     from unicommerce.credentials_local import (  # type: ignore[import-not-found]
@@ -95,58 +86,4 @@ def _uc_from_local() -> UcCredentials | None:
         username=UC_API["username"],
         password=UC_API["password"],
         facility_code=UC_API.get("facility_code", ""),
-    )
-
-
-@dataclass(frozen=True)
-class FlexLwaCredentials:
-    host: str
-    marketplace_id: str
-    client_id: str
-    client_secret: str
-    refresh_token: str
-
-
-_flex_lwa_cache: FlexLwaCredentials | None = None
-
-
-def get_flex_lwa_credentials() -> FlexLwaCredentials:
-    global _flex_lwa_cache
-    if _flex_lwa_cache is not None:
-        return _flex_lwa_cache
-
-    local = _flex_lwa_from_local()
-    if local is not None:
-        _flex_lwa_cache = local
-        return _flex_lwa_cache
-
-    import boto3
-
-    ssm = boto3.client("ssm")
-    raw = ssm.get_parameter(Name=FLEX_LWA_PARAM_NAME, WithDecryption=True)["Parameter"]["Value"]
-    data = json.loads(raw)
-    creds = FlexLwaCredentials(
-        host=(data.get("host") or "").strip().rstrip("/"),
-        marketplace_id=(data.get("marketplace_id") or "").strip(),
-        client_id=(data.get("client_id") or "").strip(),
-        client_secret=(data.get("client_secret") or "").strip(),
-        refresh_token=(data.get("refresh_token") or "").strip(),
-    )
-    if not (creds.host and creds.marketplace_id and creds.client_id and creds.client_secret and creds.refresh_token):
-        raise RuntimeError(f"SSM {FLEX_LWA_PARAM_NAME} is missing host/marketplace_id/client_id/client_secret/refresh_token")
-    _flex_lwa_cache = creds
-    return _flex_lwa_cache
-
-
-def _flex_lwa_from_local() -> FlexLwaCredentials | None:
-    try:
-        from unicommerce.credentials_local import FLEX_LWA  # type: ignore[import-not-found]
-    except ImportError:
-        return None
-    return FlexLwaCredentials(
-        host=FLEX_LWA["host"].rstrip("/"),
-        marketplace_id=FLEX_LWA["marketplace_id"],
-        client_id=FLEX_LWA["client_id"],
-        client_secret=FLEX_LWA["client_secret"],
-        refresh_token=FLEX_LWA["refresh_token"],
     )
