@@ -446,31 +446,6 @@ def dogsee_bogo_correction_handler(event, context):
     return _run("dogsee_bogo_correction", _go)
 
 
-def tax_code_correction_handler(event, context):
-    """TEMPORARY, one-off. {"corrections": [{"uniware_id": str, "doc_entry":
-    int}, ...], "doc_month": "YYYY-MM", "apply": bool? (default false --
-    dry-run), "limit": int? (default 1 -- pilot), "cancel_series": int?
-    (default 500 = KAB2C26)}. Cancels + reposts October invoices posted with
-    Karnataka tax codes on non-KA-origin channels (see
-    unicommerce.tax_code_correction). Remove once the correction is done."""
-    from unicommerce import tax_code_correction
-
-    ev = event or {}
-    corrections = ev.get("corrections") or []
-    doc_month = str(ev.get("doc_month") or "")
-    if not corrections or len(doc_month) != 7:
-        return {"error": "corrections and doc_month (YYYY-MM) are required"}
-    apply = bool(ev.get("apply") or False)
-    limit = int(ev.get("limit") or 1)
-    cancel_series = int(ev.get("cancel_series") or tax_code_correction.DEFAULT_CANCEL_SERIES)
-
-    def _go():
-        with store.connect() as conn:
-            return tax_code_correction.run(conn, corrections, doc_month, cancel_series, apply, limit)
-
-    return _run("tax_code_correction", _go)
-
-
 def post_credit_notes_handler(event, context):
     """{"limit": 50?, "start_date": "YYYY-MM-DD"?, "end_date": "YYYY-MM-DD"?,
     "channel_name": str?} — bulk posting run, date range keys off the

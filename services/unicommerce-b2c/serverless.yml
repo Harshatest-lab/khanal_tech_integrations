@@ -452,13 +452,6 @@ functions:
     handler: src.handlers.dogsee_bogo_correction_handler
     layers: [{ Ref: SharedLambdaLayer }]
 
-  # TEMPORARY -- invoke-only, one-off (2026-10-13). Cancels + reposts October
-  # invoices that carry KA tax codes on non-KA-origin channels. Real SAP
-  # writes -- dry-run by default, pilot limit 1. Remove after the pass.
-  unicommerceTaxCodeCorrection:
-    handler: src.handlers.tax_code_correction_handler
-    layers: [{ Ref: SharedLambdaLayer }]
-
   unicommercePostCreditNotes:
     handler: src.handlers.post_credit_notes_handler
     layers: [{ Ref: SharedLambdaLayer }]
