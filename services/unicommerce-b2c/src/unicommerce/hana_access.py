@@ -83,6 +83,40 @@ def find_credit_note_by_base_invoice(base_doc_entry: int | str) -> dict | None:
     return {"doc_entry": int(row[0]), "doc_num": int(row[1] or 0), "doc_tax_amount": float(row[2] or 0)}
 
 
+def find_cancellation_document(num_at_card: str, cancelled_doc_entry: int | str) -> dict | None:
+    """The cancelling A/R Invoice SAP creates when an invoice is cancelled
+    (OINV.CANCELED = 'C'), matched to the cancelled original by NumAtCard +
+    CardCode + DocTotal. Returns its series so the caller can verify the
+    cancel landed in the required numbering series. None if not found."""
+    try:
+        entry = int(cancelled_doc_entry)
+    except (TypeError, ValueError):
+        return None
+    with hana_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            '''
+            SELECT c."DocEntry", c."DocNum", c."Series", n."SeriesName", c."DocDate"
+            FROM "OINV" o
+            INNER JOIN "OINV" c
+              ON c."NumAtCard" = o."NumAtCard" AND c."CardCode" = o."CardCode"
+             AND c."DocTotal" = o."DocTotal" AND c."CANCELED" = 'C'
+            LEFT JOIN "NNM1" n ON n."Series" = c."Series"
+            WHERE o."DocEntry" = ? AND o."NumAtCard" = ? AND o."CANCELED" = 'Y'
+            ORDER BY c."DocEntry" DESC
+            ''',
+            [entry, str(num_at_card or "")],
+        )
+        row = cur.fetchone()
+        cur.close()
+    if not row:
+        return None
+    return {
+        "doc_entry": int(row[0]), "doc_num": int(row[1] or 0), "series": int(row[2] or 0),
+        "series_name": str(row[3] or ""), "doc_date": str(row[4])[:10],
+    }
+
+
 def bulk_batch_inventory_by_warehouse(whs_code: str, item_codes: list[str] | set[str]) -> list[dict]:
     """FEFO-ordered batch rows for the given items in one warehouse.
 
