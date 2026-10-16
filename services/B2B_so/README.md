@@ -2,7 +2,8 @@
 
 ```
 src/handlers.py     Lambda entry
-src/blinkit.py      IMAP + parse + RDS/S3
+src/blinkit.py      IMAP + parse + RDS/S3 (Blinkit, Zepto, Instamart, Bigbasket)
+src/flipkart.py     Flipkart: IMAP + Excel parse + checks + RDS/S3 (self-contained)
 src/b2b_sappost.py  SAP Orders (all channels)
 src/store.py        Postgres
 dashboard/          UI
@@ -33,7 +34,7 @@ Create the same emails in Cognito. Role in **RDS** is what the API checks.
 
 ## SSM (only these)
 
-- `/b2b/imap` — one shared mailbox; each channel uses a Gmail **label** under `folders.{channel}` plus optional `card_codes.{channel}` for SAP Business Partner lookup
+- `/b2b/imap` — one shared mailbox; each channel uses a Gmail **label** under `folders.{channel}` plus `card_codes.{channel}` for SAP Business Partner lookup and optional `series.{channel}` (SAP sales-order series; if not set, the hardcoded 514 = SO2026 is used; valid for FY2026-27, change every April)
 - `/sap/sl_config`, `/sap/credentials`, `/sap/b1_session` — **Orders post only** (same test SAP as delivery-api)
 - `/sap/hana_config`, `/sap/hana_credentials` — fetch lookups (OCRD / CRD1 / OITM). Set `HANA_USE_SSM=1`.
 
@@ -49,10 +50,15 @@ Example `/b2b/imap`:
     "blinkit": "Blinkit",
     "zepto": "Zepto",
     "instamart": "Instamart",
-    "bigbasket": "Bigbasket"
+    "bigbasket": "Bigbasket",
+    "flipkart": "Flipkart"
   },
   "card_codes": {
-    "blinkit": "C03570"
+    "blinkit": "C03570",
+    "flipkart": "C00770"
+  },
+  "series": {
+    "flipkart": 514
   }
 }
 ```

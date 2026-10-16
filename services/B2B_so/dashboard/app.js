@@ -30,6 +30,7 @@ const CHANNELS = [
   { id: "zepto", label: "Zepto", live: true },
   { id: "instamart", label: "Instamart", live: true },
   { id: "bigbasket", label: "Bigbasket", live: true },
+  { id: "flipkart", label: "Flipkart", live: true },
   { id: "more", label: "More", live: false },
 ];
 
@@ -673,7 +674,7 @@ function errorBits(text) {
   return String(text || "").split(/(?<=\.)\s+/).map((s) => s.trim()).filter(Boolean);
 }
 function poSourceLabel(ch = currentChannel) {
-  if (ch === "bigbasket") return "the Excel file";
+  if (ch === "bigbasket" || ch === "flipkart") return "the Excel file";
   if (ch === "zepto") return "the CSV file";
   return "the PDF";
 }

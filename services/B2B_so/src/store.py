@@ -13,8 +13,8 @@ import permissions
 
 CHANNEL_BLINKIT = "blinkit"
 CHANNEL_LOGISTICS = "logistics"
-ALL_CHANNELS = ["blinkit", "zepto", "instamart", "bigbasket", "more", CHANNEL_LOGISTICS]
-FETCH_CHANNELS = ["blinkit", "zepto", "instamart", "bigbasket"]
+ALL_CHANNELS = ["blinkit", "zepto", "instamart", "bigbasket", "flipkart", "more", CHANNEL_LOGISTICS]
+FETCH_CHANNELS = ["blinkit", "zepto", "instamart", "bigbasket", "flipkart"]
 STATUS_PARSED = "parsed"
 STATUS_NEEDS_REVIEW = "needs_review"
 STATUS_READY = "ready"

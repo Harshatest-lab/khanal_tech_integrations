@@ -17,6 +17,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 import blinkit
+import flipkart
 import b2b_sappost
 import cognito_admin
 import permissions
@@ -158,6 +159,8 @@ def _clear_stuck_posting(conn, po: str, channel: str, message: str) -> None:
 def fetch_handler(event, context):
     ev = event or {}
     channel = str(ev.get("channel") or store.CHANNEL_BLINKIT).strip().lower()
+    if channel == flipkart.CHANNEL:
+        return _run("flipkart_fetch", lambda: flipkart.run_fetch(max_messages=ev.get("max_messages")))
     return _run(
         f"{channel}_fetch",
         lambda: blinkit.run_fetch(channel=channel, max_messages=ev.get("max_messages")),
@@ -456,7 +459,10 @@ def dashboard_handler(event, context):
                 po = (_body(event).get("po_number") or q.get("po_number") or "").strip()
                 ch = str(_body(event).get("channel") or q.get("channel") or store.CHANNEL_BLINKIT)
                 try:
-                    result = blinkit.rematch_po(conn, po, channel=ch)
+                    if ch == flipkart.CHANNEL:
+                        result = flipkart.rematch_po(conn, po)
+                    else:
+                        result = blinkit.rematch_po(conn, po, channel=ch)
                 except ValueError as exc:
                     return _json(400, {"error": str(exc)})
                 store.add_audit(conn, actor=actor, action="rematch_po", po_number=po, channel=ch, detail=result.get("last_error") or "ok")

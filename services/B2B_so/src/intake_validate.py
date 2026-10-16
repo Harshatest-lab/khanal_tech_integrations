@@ -13,7 +13,7 @@ def _is_missing(value: Any) -> bool:
 
 def _doc_source(channel: str) -> str:
     ch = (channel or "").strip().lower()
-    if ch == "bigbasket":
+    if ch in {"bigbasket", "flipkart"}:
         return "the Excel file"
     if ch == "zepto":
         return "the PDF or CSV"
@@ -67,7 +67,7 @@ def validate_intake_data(
     if not usable:
         if ch == "zepto":
             errors.append("No line items could be read from the CSV attachment.")
-        elif ch == "bigbasket":
+        elif ch in {"bigbasket", "flipkart"}:
             errors.append("No line items could be read from the Excel file.")
         elif ch == "instamart":
             errors.append("No line items could be read from the Excel attachment.")

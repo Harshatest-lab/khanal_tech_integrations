@@ -13,6 +13,7 @@
   --zepto: #582cff;
   --instamart: #f76707;
   --bigbasket: #82d616;
+  --flipkart: #2874f0;
   --more: #2cd9ff;
   --shadow: 0 8px 24px rgba(0, 0, 0, .28);
   --radius: 16px;
@@ -627,6 +628,7 @@ html[data-theme="light"] .confirm-actions .btn.danger {
 .chip.zepto { background: var(--zepto); }
 .chip.instamart { background: var(--instamart); }
 .chip.bigbasket { background: var(--bigbasket); color: #14532d; }
+.chip.flipkart { background: var(--flipkart); }
 .chip.more { background: var(--more); }
 .error { color: var(--red); margin: 0; font-size: 12px; }
 
@@ -734,6 +736,7 @@ html[data-theme="light"] .notice-mini { color: #fecaca; }
 .dot.zepto { background: var(--zepto); }
 .dot.instamart { background: var(--instamart); }
 .dot.bigbasket { background: var(--bigbasket); }
+.dot.flipkart { background: var(--flipkart); }
 .dot.more { background: var(--more); }
 .ch-sub { display: none; padding: 0 4px 6px; }
 .ch-block.open .ch-sub { display: grid; gap: 1px; animation: sub-in .22s ease-out; }

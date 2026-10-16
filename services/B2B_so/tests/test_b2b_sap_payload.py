@@ -1,5 +1,14 @@
+import pytest
+
+import blinkit
 from blinkit import BLINKIT_CARD_CODE
-from b2b_sappost import _sap_post_precheck, build_order_payload, po_link_error
+from b2b_sappost import _sap_post_precheck, build_order_payload, order_series, po_link_error
+
+
+@pytest.fixture(autouse=True)
+def imap_config(monkeypatch):
+    """Never call SSM in these tests; /b2b/imap only sets a series for Flipkart."""
+    monkeypatch.setattr(blinkit, "_imap_config_cache", {"series": {"flipkart": 336}})
 
 
 def test_card_code_is_hardcoded():
@@ -481,3 +490,42 @@ def test_cancel_posted_order_calls_service_layer(monkeypatch):
     assert out["status"] == "success"
     assert cancelled["doc_entry"] == 44753
     assert saved["status"] == "cancelled"
+
+
+
+def test_audit_rows_are_written_under_the_pos_own_channel(monkeypatch):
+    """Regression: sap_create / sap_update / sap_link used to be logged as 'blinkit' for every channel."""
+    import b2b_sappost
+
+    class FakeCursor:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def execute(self, *args): pass
+
+    class FakeConn:
+        def cursor(self): return FakeCursor()
+        def commit(self): pass
+
+    audits = []
+    monkeypatch.setattr(b2b_sappost.store, "set_po_status", lambda *a, **k: None)
+    monkeypatch.setattr(b2b_sappost.store, "mark_notifications_read", lambda *a, **k: None)
+    monkeypatch.setattr(b2b_sappost.store, "add_audit", lambda conn, **k: audits.append(k))
+    b2b_sappost._finish_post(
+        FakeConn(), "PO1", actor="a", action="sap_create", salesperson_code="1", sap_docentry=5, sap_docnum=6,
+        sap_document_status="open", sap_response={}, message="ok", channel="flipkart",
+    )
+    assert audits[0]["channel"] == "flipkart"
+
+
+def test_po_link_falls_back_to_the_excel_when_there_is_no_pdf(monkeypatch):
+    import b2b_sappost
+
+    monkeypatch.setattr(blinkit, "public_url", lambda key: f"https://bucket/{key}")
+    assert b2b_sappost._po_file_url({"pdf_s3_key": "a.pdf", "xlsx_s3_key": "a.xls"}) == "https://bucket/a.pdf"
+    assert b2b_sappost._po_file_url({"pdf_s3_key": "", "xlsx_s3_key": "flipkart/Flipkart_P1.xls"}) == "https://bucket/flipkart/Flipkart_P1.xls"
+
+
+def test_series_comes_from_ssm_per_channel_and_defaults_to_514():
+    assert order_series("flipkart") == 336  # SSM value wins
+    assert order_series("blinkit") == 514  # not in SSM: hardcoded default
+    assert order_series("zepto") == 514

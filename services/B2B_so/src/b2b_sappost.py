@@ -214,7 +214,7 @@ def _finish_post(
         sap_doc_total=sap_doc_total,
         sap_doc_date=sap_doc_date,
     )
-    store.add_audit(conn, actor=actor, action=action, po_number=po_number, detail=str(sap_docentry))
+    store.add_audit(conn, actor=actor, action=action, po_number=po_number, detail=str(sap_docentry), channel=channel)
     store.mark_notifications_read(conn, po_number=po_number, channel=channel)
     with conn.cursor() as cur:
         cur.execute(
@@ -333,6 +333,19 @@ def _sap_post_precheck(header: dict[str, Any], payload: dict[str, Any]) -> str:
     return ""
 
 
+# SAP numbering series for B2B sales orders: 514 = SO2026, valid for FY2026-27.
+# SAP rejects a series from another financial year, so change this every April.
+DEFAULT_ORDER_SERIES = 514
+
+
+def order_series(channel: str) -> int:
+    """Series for this channel: SSM /b2b/imap `series.<channel>` if set, else the hardcoded default."""
+    import blinkit as _blinkit
+
+    configured = (_blinkit._load_imap_config().get("series") or {}).get(channel)
+    return int(configured) if configured else DEFAULT_ORDER_SERIES
+
+
 def build_order_payload(
     header: dict[str, Any],
     lines: list[dict[str, Any]],
@@ -364,7 +377,7 @@ def build_order_payload(
     return {
         "CardCode": _pick(header, "customer_code", "customer_code") or "C03570",
         "CardName": card_name,
-        "Series": 514,
+        "Series": order_series(channel),
         "NumAtCard": _pick(header, "po_number", "po_number"),
         "DocDueDate": str(due or ""),
         "U_BillingFrom": _pick(header, "billing_from", "billing_from") or "KT",
@@ -530,7 +543,7 @@ def update_posted_order(
             sap_doc_total=float(refreshed["DocTotal"]) if refreshed.get("DocTotal") is not None else None,
             sap_doc_date=str(refreshed.get("DocDate") or "")[:10] or None,
         )
-        store.add_audit(conn, actor=actor, action="sap_update", po_number=po_number, detail=str(doc_entry))
+        store.add_audit(conn, actor=actor, action="sap_update", po_number=po_number, detail=str(doc_entry), channel=channel)
         conn.commit()
         return {
             "status": "success",
@@ -542,7 +555,7 @@ def update_posted_order(
     except Exception as exc:
         logger.exception("SAP update failed for PO %s", po_number)
         msg = str(exc)
-        store.add_audit(conn, actor=actor, action="sap_update_failed", po_number=po_number, detail=msg[:500])
+        store.add_audit(conn, actor=actor, action="sap_update_failed", po_number=po_number, detail=msg[:500], channel=channel)
         conn.commit()
         return {"status": "error", "message": msg, "last_error": msg}
 
@@ -588,7 +601,7 @@ def cancel_posted_order(conn, po_number: str, actor: str = "", channel: str = st
             sap_response=slim,
             channel=ch,
         )
-        store.add_audit(conn, actor=actor, action="sap_cancel", po_number=po_number, detail=str(doc_entry))
+        store.add_audit(conn, actor=actor, action="sap_cancel", po_number=po_number, detail=str(doc_entry), channel=ch)
         conn.commit()
         return {
             "status": "success",
@@ -599,7 +612,7 @@ def cancel_posted_order(conn, po_number: str, actor: str = "", channel: str = st
     except Exception as exc:
         logger.exception("SAP cancel failed for PO %s", po_number)
         msg = str(exc)
-        store.add_audit(conn, actor=actor, action="sap_cancel_failed", po_number=po_number, detail=msg[:500])
+        store.add_audit(conn, actor=actor, action="sap_cancel_failed", po_number=po_number, detail=msg[:500], channel=ch)
         conn.commit()
         return {"status": "error", "message": msg, "last_error": msg}
 
