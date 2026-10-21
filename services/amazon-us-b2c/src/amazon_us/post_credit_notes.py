@@ -86,6 +86,18 @@ def _process_event(conn, event: finances_api.RefundEvent, mapping: dict[str, str
     if not dry_run:
         store.save_raw(conn, "refund_event", rid, event.raw)
     local = store.get_cn_log(conn, rid)
+
+    # Posting-period lock: nothing is sent to SAP for a locked month, and that includes an amendment to a refund
+    # already posted. Only rows that are not final are labelled -- a posted or failed_permanent row keeps its status.
+    if store.is_period_locked(conn, event.posted_date):
+        if not dry_run and (local is None or local["status"] in ("skipped", "failed", "period_locked")):
+            store.upsert_cn_log(
+                conn, rid, event.amazon_order_id, event.posted_date, "period_locked",
+                skip_reason=f"posting period {str(event.posted_date)[:7]} is locked",
+            )
+        logger.info("PERIOD-LOCKED %s (%s)", rid, str(event.posted_date)[:7])
+        return "skipped"
+
     if local and local["status"] == "posted":
         return _process_amendment(conn, event, mapping, dry_run)
 
