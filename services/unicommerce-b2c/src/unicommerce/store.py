@@ -7,6 +7,7 @@ docs/migration/03-unicommerce-b2c.md for the full 7-function plan.
 from __future__ import annotations
 
 import json
+import logging
 
 import psycopg
 
@@ -14,6 +15,8 @@ from unicommerce import STATUS_OVERWRITABLE_ON_REFETCH, STATUS_SKIP_ON_REFETCH
 from unicommerce.credentials import DATABASE_URL
 from unicommerce.mappers import build_line_items, extract_channel, extract_order_scalar_fields
 from unicommerce.dates import extract_order_date
+
+logger = logging.getLogger(__name__)
 
 
 def connect() -> psycopg.Connection:
@@ -1037,6 +1040,39 @@ def mark_cn_posted(conn: psycopg.Connection, uc_return_id: str, doc_entry: str, 
                 (doc_entry, uc_order_id),
             )
     conn.commit()
+
+
+def _save_sap_exchange(conn: psycopg.Connection, sql: str, params: tuple, what: str) -> None:
+    """Best-effort: keep SAP's reply for the dashboard. It runs AFTER the document is recorded as posted and
+    swallows every error (the columns come from scripts/add_sap_exchange_columns.sql, which may not have been
+    applied yet) -- losing a debugging copy must never turn a successful SAP posting into a failure."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+        conn.commit()
+    except Exception:  # noqa: BLE001
+        conn.rollback()
+        logger.warning("could not save SAP reply for %s", what, exc_info=True)
+
+
+def save_order_sap_response(conn: psycopg.Connection, uniware_id: str, response: dict | None) -> None:
+    if response:
+        _save_sap_exchange(
+            conn,
+            "UPDATE unicommerce_orders SET sap_response_json = %s WHERE uniware_id = %s",
+            (json.dumps(response, default=str), uniware_id),
+            f"order {uniware_id}",
+        )
+
+
+def save_cn_sap_exchange(conn: psycopg.Connection, uc_return_id: str, payload: dict | None, response: dict | None) -> None:
+    if payload or response:
+        _save_sap_exchange(
+            conn,
+            "UPDATE unicommerce_cn_staging SET payload_json = %s, sap_response_json = %s WHERE uc_return_id = %s",
+            (json.dumps(payload, default=str) if payload else None, json.dumps(response, default=str) if response else None, uc_return_id),
+            f"credit note {uc_return_id}",
+        )
 
 
 # ── Flex refund credit notes ──────────────────────────────────────────────

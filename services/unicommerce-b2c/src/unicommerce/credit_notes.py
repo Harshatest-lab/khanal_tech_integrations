@@ -232,6 +232,7 @@ def _post_credit_note(conn, uc_return_id: str, settings) -> None:
         return
 
     store.mark_cn_posted(conn, uc_return_id, doc_entry, doc_num, cn.get("uc_order_id") if cn else None)
+    store.save_cn_sap_exchange(conn, uc_return_id, payload, response_body)
 
     try:
         # SAP Service Layer POST returns the full document -- reuse it

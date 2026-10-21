@@ -343,6 +343,7 @@ def _post_order(conn, row: dict, settings, batch_managed_cache: dict, fefo_cache
             logger.warning("_post_order(%s): could not fetch invoice detail after posting; recon will lag", uniware_id, exc_info=True)
 
     store.mark_posted(conn, uniware_id, str(doc_entry), str(doc_num), tax_actual, posted_payload)
+    store.save_order_sap_response(conn, uniware_id, response_body)
 
     if invoice_detail:
         payload_lines = posted_payload.get("DocumentLines", [])
