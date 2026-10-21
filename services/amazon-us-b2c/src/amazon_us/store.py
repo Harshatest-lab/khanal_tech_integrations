@@ -590,7 +590,7 @@ def upsert_cn_log(
     conn.commit()
     record_cn_attempt(
         conn, refund_id, amazon_order_id, status,
-        doc_entry=doc_entry, doc_num=doc_num, payload=payload, response=response, error=error,
+        doc_entry=doc_entry, doc_num=doc_num, payload=payload, response=response, error=error or skip_reason,
     )
 
 

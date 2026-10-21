@@ -108,3 +108,10 @@ def test_refund_event_keeps_amazons_raw_json():
     }
     event = finances_api._parse_refund_event(raw)
     assert event.raw is raw
+
+
+def test_skipped_credit_note_attempt_keeps_the_reason():
+    conn = FakeConn()
+    store.upsert_cn_log(conn, "R1", "111-1", "2026-10-01", "skipped", skip_reason="no postable lines: SKU-X")
+    attempt = [p for sql, p in conn.executed if "amazon_us_cn_attempts" in sql][0]
+    assert attempt[2] == "skipped" and attempt[7] == "no postable lines: SKU-X"
