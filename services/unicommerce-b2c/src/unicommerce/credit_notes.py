@@ -175,7 +175,9 @@ def _post_credit_note(conn, uc_return_id: str, settings) -> None:
             # SAP may have processed it -- on the next retry the
             # idempotency guard above will detect the existing doc.
             store.mark_cn_failed(conn, uc_return_id, f"[TIMEOUT - may be posted in SAP] {err}", settings.max_retry_attempts)
+            store.record_attempt(conn, "credit_note", uc_return_id, "deferred", request=payload, error=err)
             return
+        store.record_attempt(conn, "credit_note", uc_return_id, "failed", request=payload, error=err)
         raise
 
     doc_entry = str(result.get("doc_entry") or "")
@@ -224,6 +226,10 @@ def _post_credit_note(conn, uc_return_id: str, settings) -> None:
             f"line U_Order={mismatched_line_order!r} expected {uc_order_id!r}) -- not trusting it",
             settings.max_retry_attempts,
         )
+        store.record_attempt(
+            conn, "credit_note", uc_return_id, "failed", request=payload, response=response_body,
+            error="SAP's reply did not describe this return; not trusted", sap_doc_entry=doc_entry,
+        )
         logger.error(
             "_post_credit_note(%s): POST response mismatch, DocEntry=%s Comments=%r line U_Order=%r -- "
             "treating as failed, not recording",
@@ -233,6 +239,7 @@ def _post_credit_note(conn, uc_return_id: str, settings) -> None:
 
     store.mark_cn_posted(conn, uc_return_id, doc_entry, doc_num, cn.get("uc_order_id") if cn else None)
     store.save_cn_sap_exchange(conn, uc_return_id, payload, response_body)
+    store.record_attempt(conn, "credit_note", uc_return_id, "posted", request=payload, response=response_body, sap_doc_entry=doc_entry)
 
     try:
         # SAP Service Layer POST returns the full document -- reuse it

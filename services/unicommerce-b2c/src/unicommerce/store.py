@@ -1075,6 +1075,22 @@ def save_cn_sap_exchange(conn: psycopg.Connection, uc_return_id: str, payload: d
         )
 
 
+def record_attempt(
+    conn: psycopg.Connection, doc_type: str, doc_id: str, outcome: str, *,
+    request: dict | None = None, response: dict | None = None, error: str | None = None, sap_doc_entry: str | None = None,
+) -> None:
+    """Append one posting attempt to the history (scripts/create_posting_attempts_table.sql). Best-effort for the
+    same reason as _save_sap_exchange: it must never turn a posting outcome into a crash."""
+    _save_sap_exchange(
+        conn,
+        "INSERT INTO unicommerce_posting_attempts (doc_type, doc_id, outcome, sap_doc_entry, request_json, response_json, error) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        (doc_type, doc_id, outcome, sap_doc_entry,
+         json.dumps(request, default=str) if request else None, json.dumps(response, default=str) if response else None, error),
+        f"attempt {doc_type} {doc_id}",
+    )
+
+
 # ── Flex refund credit notes ──────────────────────────────────────────────
 # unicommerce_flex_cn_log must exist before flex_refunds.post_flex_refunds
 # runs -- this app's DB role is deliberately least-privilege (RDS
