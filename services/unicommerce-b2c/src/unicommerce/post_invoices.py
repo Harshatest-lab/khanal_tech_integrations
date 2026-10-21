@@ -288,6 +288,7 @@ def _post_order(conn, row: dict, settings, batch_managed_cache: dict, fefo_cache
         _release_for_order(reservation_ctx, uniware_id)
         logger.error("_post_order(%s): payload build failed: %s", uniware_id, e)
         store.mark_failed(conn, uniware_id, str(e), settings.max_retry_attempts)
+        store.record_attempt(conn, "invoice", uniware_id, "failed", error=f"payload build failed: {e}")
         return "failed", []
 
     try:
@@ -297,10 +298,12 @@ def _post_order(conn, row: dict, settings, batch_managed_cache: dict, fefo_cache
         _release_for_order(reservation_ctx, uniware_id)
         if "timeout" in err.lower() or "connection" in err.lower():
             store.unclaim_order(conn, uniware_id, "verify")
+            store.record_attempt(conn, "invoice", uniware_id, "deferred", request=payload, error=err)
             logger.warning("_post_order(%s): SAP POST timed out/connection error, deferred to verify: %s", uniware_id, err)
             return "verify", []
         logger.error("_post_order(%s): SAP POST failed: %s", uniware_id, err)
         store.mark_failed(conn, uniware_id, err, settings.max_retry_attempts)
+        store.record_attempt(conn, "invoice", uniware_id, "failed", request=payload, error=err)
         return "failed", []
 
     _consume_for_order(reservation_ctx, uniware_id)
@@ -329,6 +332,10 @@ def _post_order(conn, row: dict, settings, batch_managed_cache: dict, fefo_cache
             f"Comments={response_body.get('Comments')!r}) -- not trusting it",
             settings.max_retry_attempts,
         )
+        store.record_attempt(
+            conn, "invoice", uniware_id, "failed", request=posted_payload, response=response_body,
+            error="SAP's reply did not describe this order; not trusted", sap_doc_entry=str(doc_entry or ""),
+        )
         logger.error(
             "_post_order(%s): POST response mismatch, DocEntry=%s Comments=%r -- treating as failed, not recording",
             uniware_id, doc_entry, response_body.get("Comments"),
@@ -344,6 +351,7 @@ def _post_order(conn, row: dict, settings, batch_managed_cache: dict, fefo_cache
 
     store.mark_posted(conn, uniware_id, str(doc_entry), str(doc_num), tax_actual, posted_payload)
     store.save_order_sap_response(conn, uniware_id, response_body)
+    store.record_attempt(conn, "invoice", uniware_id, "posted", request=posted_payload, response=response_body, sap_doc_entry=str(doc_entry))
 
     if invoice_detail:
         payload_lines = posted_payload.get("DocumentLines", [])
