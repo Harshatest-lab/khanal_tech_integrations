@@ -174,7 +174,9 @@ def _post_one_claimed(conn, order: dict, mapping: dict[str, str], counts: dict) 
 
     except Exception as e:
         store.mark_failed(conn, oid, str(e))
-        store.log_invoice_attempt(conn, oid, "failed", error=str(e))
+        store.log_invoice_attempt(
+            conn, oid, "failed", error=str(e), payload=getattr(e, "payload", None), response=sap_client.error_response(e)
+        )
         counts["failed"] += 1
         logger.error("FAIL %s: %s", oid, e)
         return True

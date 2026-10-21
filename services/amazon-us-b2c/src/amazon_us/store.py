@@ -16,13 +16,17 @@ Rules enforced at the SQL level:
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
 import psycopg
 
 from amazon_us.credentials import DATABASE_URL
+
+logger = logging.getLogger(__name__)
 
 
 def connect() -> psycopg.Connection:
@@ -584,6 +588,62 @@ def upsert_cn_log(
             ),
         )
     conn.commit()
+    record_cn_attempt(
+        conn, refund_id, amazon_order_id, status,
+        doc_entry=doc_entry, doc_num=doc_num, payload=payload, response=response, error=error,
+    )
+
+
+def save_raw(conn: psycopg.Connection, source: str, ref: str, payload: Any) -> None:
+    """Keep what Amazon sent, exactly as received, in amazon_us_raw_events.
+
+    Append-only and de-duplicated by content: the same record fetched again adds nothing, but a changed one
+    (status moved, items added) is kept as a new version, so history is never overwritten the way
+    amazon_us_orders.raw_payload is. Best effort: a failure here must never stop the sync that called it."""
+    if not payload:
+        return
+    body = json.dumps(payload, default=str, sort_keys=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO amazon_us_raw_events (source, ref, payload_hash, payload)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (source, ref, payload_hash) DO NOTHING
+                """,
+                (source, ref, hashlib.sha256(body.encode()).hexdigest(), body),
+            )
+        conn.commit()
+    except Exception:  # noqa: BLE001 -- see docstring
+        conn.rollback()
+        logger.exception("could not save raw %s record for %s", source, ref)
+
+
+def record_cn_attempt(
+    conn: psycopg.Connection, refund_id: str, amazon_order_id: str, status: str, *,
+    doc_entry: int | None, doc_num: int | None, payload: dict | None, response: dict | None, error: str | None,
+) -> None:
+    """One row per credit-note attempt in amazon_us_cn_attempts. amazon_us_cn_log keeps only the latest state of
+    a refund; this keeps every try with what was sent and SAP's answer. Best effort, like save_raw."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO amazon_us_cn_attempts
+                  (refund_id, amazon_order_id, status, sap_doc_entry, sap_doc_num, sap_payload, sap_response, error_message)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    refund_id, amazon_order_id, status, doc_entry, doc_num,
+                    json.dumps(payload, default=str) if payload else None,
+                    json.dumps(response, default=str) if response else None,
+                    error[:2000] if error else None,
+                ),
+            )
+        conn.commit()
+    except Exception:  # noqa: BLE001
+        conn.rollback()
+        logger.exception("could not record credit note attempt for %s", refund_id)
 
 
 # ── SKU map ──────────────────────────────────────────────────────────────
