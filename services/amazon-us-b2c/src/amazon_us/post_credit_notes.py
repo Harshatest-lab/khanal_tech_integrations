@@ -63,7 +63,7 @@ def post_refunds(
                     status = "failed_permanent" if sap_client.is_base_document_closed(e) else "failed"
                     store.upsert_cn_log(
                         conn, event.refund_id, event.amazon_order_id, event.posted_date,
-                        status, error=str(e),
+                        status, error=str(e), payload=getattr(e, "payload", None), response=sap_client.error_response(e),
                     )
                 logger.error("FAIL %s: %s", event.refund_id, e)
 
@@ -83,6 +83,8 @@ def _process_event(conn, event: finances_api.RefundEvent, mapping: dict[str, str
     # reclaim a 'posted' row, so without this check an Amazon-side
     # amendment (event grows after we posted its base CN, same refund_id)
     # would silently never be looked at again.
+    if not dry_run:
+        store.save_raw(conn, "refund_event", rid, event.raw)
     local = store.get_cn_log(conn, rid)
     if local and local["status"] == "posted":
         return _process_amendment(conn, event, mapping, dry_run)
@@ -297,6 +299,7 @@ def _process_amendment(conn, event: finances_api.RefundEvent, mapping: dict[str,
         status = "failed_permanent" if sap_client.is_base_document_closed(e) else "failed"
         store.upsert_cn_log(
             conn, amend_rid, event.amazon_order_id, event.posted_date, status, error=str(e),
+            payload=getattr(e, "payload", None), response=sap_client.error_response(e),
         )
         logger.error("FAIL top-up %s -> %s: %s", rid, amend_rid, e)
         return "failed"

@@ -14,6 +14,17 @@ from typing import Any
 from amazon_us.dates import parse_utc, utc_to_pacific
 
 
+def rows_by_order(content: str) -> dict[str, list[dict[str, str]]]:
+    """Every raw row of a tab-separated Amazon report, grouped by amazon-order-id, with all its columns.
+    The parsers above keep only the fields the pipeline uses; this is what gets stored as the raw record."""
+    grouped: dict[str, list[dict[str, str]]] = {}
+    for row in csv.DictReader(io.StringIO(content), delimiter="\t"):
+        order_id = (row.get("amazon-order-id") or "").strip()
+        if order_id:
+            grouped.setdefault(order_id, []).append(dict(row))
+    return grouped
+
+
 def parse_orders_report(content: str) -> dict[str, dict[str, Any]]:
     """{amazon_order_id: {header fields..., 'lines': [line dicts]}}."""
     orders: dict[str, dict[str, Any]] = {}

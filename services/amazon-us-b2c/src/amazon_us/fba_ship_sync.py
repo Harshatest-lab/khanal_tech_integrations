@@ -11,7 +11,7 @@ import csv
 import io
 import logging
 
-from amazon_us import constants, reports_api, store
+from amazon_us import constants, report_parser, reports_api, store
 from amazon_us.dates import date_chunks, pacific_day_to_utc, utc_to_pacific_date
 from amazon_us.sp_api import SpApiThrottledError
 
@@ -44,6 +44,8 @@ _RESUME_POLL_BUDGET_SEC = 60
 
 
 def _process_fba_report(conn, content: str) -> dict:
+    for oid, rows in report_parser.rows_by_order(content).items():
+        store.save_raw(conn, "fba_shipment_rows", oid, rows)
     ship_dates = parse_earliest_ship_dates(content)
     updated = store.set_actual_ship_dates(conn, ship_dates)
     return {"parsed": len(ship_dates), "updated": updated}

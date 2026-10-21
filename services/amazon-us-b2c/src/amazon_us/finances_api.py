@@ -50,6 +50,7 @@ class RefundEvent:
     amazon_order_id: str
     posted_date: str  # 'YYYY-MM-DD'
     item_adjustments: list[RefundItemAdjustment] = field(default_factory=list)
+    raw: dict = field(default_factory=dict, repr=False)  # the event exactly as the Finances API returned it
 
 
 def clamp_posted_before(posted_before: str) -> str:
@@ -179,4 +180,5 @@ def _parse_refund_event(raw: dict) -> RefundEvent | None:
         amazon_order_id=order_id,
         posted_date=posted_date_raw[:10],
         item_adjustments=adjustments,
+        raw=raw,
     )
