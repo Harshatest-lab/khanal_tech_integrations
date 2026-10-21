@@ -24,7 +24,7 @@ from typing import Any, Callable
 
 from amazon_us import constants
 from amazon_us.finances_api import RefundEvent
-from amazon_us.invoice_payload import BomLookup, build_line_udfs
+from amazon_us.invoice_payload import BomLookup, build_address_extension, build_line_udfs
 from amazon_us.state_codes import US_TERRITORY_COUNTRY_CODES, normalize_us_state_code
 
 AcctResolver = Callable[[str], str]
@@ -338,8 +338,9 @@ def build_credit_note_payload(
         "U_CreatedBy": constants.SAP_CREATED_BY,
         "DocumentLines": doc_lines,
     }
-    if not is_domestic:
-        payload["AddressExtension"] = {"ShipToCountry": country, "BillToCountry": country}
+    address_extension = build_address_extension(order, country, is_domestic)
+    if address_extension:
+        payload["AddressExtension"] = address_extension
     return payload, skipped
 
 

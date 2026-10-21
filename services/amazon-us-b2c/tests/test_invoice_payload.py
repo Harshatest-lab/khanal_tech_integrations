@@ -124,7 +124,8 @@ def test_ship_to_code_falls_back_without_state():
     payload, _ = build_invoice_payload(_order(ship_state=""), MAPPING, _allocate, _resolve, _no_bom)
     assert payload["PayToCode"] == "Amazon USA-B2C"  # constants.SAP_PAY_TO_CODE default
     assert payload["ShipToCode"] == "Amazon USA-B2C"
-    assert "AddressExtension" not in payload
+    # Domestic: no country override, but the city still rides in the address override.
+    assert payload["AddressExtension"] == {"ShipToCity": "Sacramento", "BillToCity": "Sacramento"}
 
 
 def test_non_us_order_uses_address_extension_not_state_prefix():
@@ -135,7 +136,9 @@ def test_non_us_order_uses_address_extension_not_state_prefix():
     payload, _ = build_invoice_payload(order, MAPPING, _allocate, _resolve, _no_bom)
     assert payload["PayToCode"] == "Amazon USA-B2C"
     assert payload["ShipToCode"] == "Amazon USA-B2C"
-    assert payload["AddressExtension"] == {"ShipToCountry": "CA", "BillToCountry": "CA"}
+    assert payload["AddressExtension"] == {
+        "ShipToCity": "Sacramento", "BillToCity": "Sacramento", "ShipToCountry": "CA", "BillToCountry": "CA",
+    }
 
 
 # ── Sales BOM (bundle/combo) items ─────────────────────────────────────

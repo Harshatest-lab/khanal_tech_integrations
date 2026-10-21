@@ -51,6 +51,21 @@ def build_line_udfs(order: dict[str, Any]) -> dict[str, str]:
     return udfs
 
 
+def build_address_extension(order: dict[str, Any], country: str, is_domestic: bool) -> dict[str, str]:
+    """Per-document address override. The destination city goes here for every order, so the document's
+    ship-to and bill-to address carry it and not only the line UDFs (U_City). The country is added only for
+    foreign orders (see the comment where this is called). SAP's ShipToCity holds 100 characters."""
+    extension: dict[str, str] = {}
+    city = str(order.get("ship_city") or "").strip()[:100]
+    if city:
+        extension["ShipToCity"] = city
+        extension["BillToCity"] = city
+    if not is_domestic:
+        extension["ShipToCountry"] = country
+        extension["BillToCountry"] = country
+    return extension
+
+
 def build_invoice_payload(
     order: dict[str, Any],
     item_mapping: dict[str, str],
@@ -216,8 +231,9 @@ def build_invoice_payload(
         "U_CreatedBy": constants.SAP_CREATED_BY,
         "DocumentLines": doc_lines,
     }
-    if not is_domestic:
-        payload["AddressExtension"] = {"ShipToCountry": country, "BillToCountry": country}
+    address_extension = build_address_extension(order, country, is_domestic)
+    if address_extension:
+        payload["AddressExtension"] = address_extension
     return payload, []
 
 
