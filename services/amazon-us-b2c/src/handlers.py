@@ -275,6 +275,21 @@ def post_invoices_handler(event, context):
                 if dry_run:
                     return {"dry_run": True, "cutoff_date": cutoff, **store.count_precutoff_unposted(conn, cutoff)}
                 return {"dry_run": False, "cutoff_date": cutoff, **store.delete_precutoff_unposted(conn, cutoff)}
+        if ev.get("mode") in ("list_period_locks", "lock_period", "unlock_period"):
+            # Posting-period lock admin, invoked by the dashboards backend (which has no write access to this DB).
+            # {"mode": "lock_period"|"unlock_period", "period": "YYYY-MM", "actor": email, "note": str?}
+            import re
+
+            with store.connect() as conn:
+                if ev["mode"] == "list_period_locks":
+                    return {"items": store.list_period_locks(conn)}
+                period = str(ev.get("period") or "").strip()
+                if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", period):
+                    raise ValueError("period must be 'YYYY-MM'")
+                actor = str(ev.get("actor") or "unknown")
+                if ev["mode"] == "lock_period":
+                    return store.lock_period(conn, period, actor, str(ev.get("note") or "").strip())
+                return store.unlock_period(conn, period, actor)
         if ev.get("mode") == "list_ship_to_codes":
             from amazon_us import sap_client
             return {"card_code": constants.SAP_CARD_CODE, "ship_to_codes": sap_client.list_ship_to_addresses(constants.SAP_CARD_CODE)}
