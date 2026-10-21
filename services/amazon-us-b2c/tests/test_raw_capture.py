@@ -72,8 +72,9 @@ def test_credit_note_log_writes_an_attempt_row_each_time():
     store.upsert_cn_log(conn, "R1", "111-1", "2026-10-01", "failed", error="boom", payload={"p": 1}, response={"error": "x"})
     inserts = [sql for sql, _ in conn.executed if "INSERT INTO amazon_us_cn_attempts" in sql]
     assert len(inserts) == 1
-    attempt = [p for sql, p in conn.executed if "amazon_us_cn_attempts" in sql][0]
-    assert attempt[:3] == ("R1", "111-1", "failed") and json.loads(attempt[5]) == {"p": 1} and attempt[7] == "boom"
+    attempt = [p for sql, p in conn.executed if "INSERT INTO amazon_us_cn_attempts" in sql][0]
+    assert (attempt["refund"], attempt["order"], attempt["status"]) == ("R1", "111-1", "failed")
+    assert json.loads(attempt["payload"]) == {"p": 1} and attempt["message"] == "boom"
 
 
 def test_sap_rejection_carries_what_was_sent_and_the_answer(monkeypatch):
@@ -113,5 +114,16 @@ def test_refund_event_keeps_amazons_raw_json():
 def test_skipped_credit_note_attempt_keeps_the_reason():
     conn = FakeConn()
     store.upsert_cn_log(conn, "R1", "111-1", "2026-10-01", "skipped", skip_reason="no postable lines: SKU-X")
-    attempt = [p for sql, p in conn.executed if "amazon_us_cn_attempts" in sql][0]
-    assert attempt[2] == "skipped" and attempt[7] == "no postable lines: SKU-X"
+    attempt = [p for sql, p in conn.executed if "INSERT INTO amazon_us_cn_attempts" in sql][0]
+    assert attempt["status"] == "skipped" and attempt["message"] == "no postable lines: SKU-X"
+
+
+def test_credit_note_attempt_is_skipped_when_it_repeats_the_previous_one():
+    conn = FakeConn()
+    store.upsert_cn_log(conn, "R1", "111-1", "2026-10-01", "skipped", skip_reason="no postable lines")
+    sql, params = [(s, p) for s, p in conn.executed if "INSERT INTO amazon_us_cn_attempts" in s][0]
+    # Recorded only if the refund's latest attempt differs in status, SAP document or message.
+    assert "WHERE NOT EXISTS" in sql and "ORDER BY id DESC LIMIT 1" in sql
+    for column in ("status", "sap_doc_entry", "error_message"):
+        assert f"last.{column}" in sql
+    assert params["status"] == "skipped" and params["message"] == "no postable lines"

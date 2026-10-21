@@ -624,21 +624,35 @@ def record_cn_attempt(
     doc_entry: int | None, doc_num: int | None, payload: dict | None, response: dict | None, error: str | None,
 ) -> None:
     """One row per credit-note attempt in amazon_us_cn_attempts. amazon_us_cn_log keeps only the latest state of
-    a refund; this keeps every try with what was sent and SAP's answer. Best effort, like save_raw."""
+    a refund; this keeps every try with what was sent and SAP's answer. Best effort, like save_raw.
+
+    The credit-note run re-reads a 45-day window every few hours, so a refund that stays skipped (or keeps
+    failing the same way) would add an identical row each time. A try is recorded only when it differs from the
+    refund's previous one in status, error or SAP document, so the table holds changes, not repeats."""
+    message = error[:2000] if error else None
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO amazon_us_cn_attempts
                   (refund_id, amazon_order_id, status, sap_doc_entry, sap_doc_num, sap_payload, sap_response, error_message)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                SELECT %(refund)s, %(order)s, %(status)s, %(entry)s, %(num)s, %(payload)s, %(response)s, %(message)s
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM (
+                    SELECT status, sap_doc_entry, error_message FROM amazon_us_cn_attempts
+                    WHERE refund_id = %(refund)s ORDER BY id DESC LIMIT 1
+                  ) last
+                  WHERE last.status = %(status)s
+                    AND last.sap_doc_entry IS NOT DISTINCT FROM %(entry)s
+                    AND last.error_message IS NOT DISTINCT FROM %(message)s
+                )
                 """,
-                (
-                    refund_id, amazon_order_id, status, doc_entry, doc_num,
-                    json.dumps(payload, default=str) if payload else None,
-                    json.dumps(response, default=str) if response else None,
-                    error[:2000] if error else None,
-                ),
+                {
+                    "refund": refund_id, "order": amazon_order_id, "status": status, "entry": doc_entry, "num": doc_num,
+                    "payload": json.dumps(payload, default=str) if payload else None,
+                    "response": json.dumps(response, default=str) if response else None,
+                    "message": message,
+                },
             )
         conn.commit()
     except Exception:  # noqa: BLE001
