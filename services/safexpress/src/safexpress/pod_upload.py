@@ -25,7 +25,7 @@ def upload_pod(pod_data: bytes, series_name: str, doc_number: int, waybill_numbe
     try:
         resp = requests.put(
             upload_url, headers={"Content-Type": "image/tiff"}, data=pod_data,
-            timeout=DEFAULT_UPLOAD_TIMEOUT_SECONDS, verify=False,
+            timeout=DEFAULT_UPLOAD_TIMEOUT_SECONDS,
         )
     except requests.exceptions.RequestException as e:
         raise SafexpressFileUploadError(f"S3 upload failed for waybill {waybill_number}: {e}") from e

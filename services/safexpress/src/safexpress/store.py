@@ -15,10 +15,14 @@ import math
 
 import psycopg
 
-from .config import OLDEST_FAIRNESS_FRACTION, POD_STATUS_PENDING, POD_STATUS_STALE, STALE_AFTER_DAYS
+from .config import MAX_FAILED_ATTEMPTS, OLDEST_FAIRNESS_FRACTION, POD_STATUS_PENDING, POD_STATUS_STALE, STALE_AFTER_DAYS
 from .credentials import DATABASE_URL
 
-OPEN_STATUSES = ("pending", "waybill_found", "no_waybill")
+# `failed` is open on purpose: it used to be terminal, so a single POD timeout
+# stopped an invoice being tried ever again. list_open_candidates caps how many
+# times a failed row is retried (MAX_FAILED_ATTEMPTS); mark_stale_if_expired
+# still retires anything open for too long.
+OPEN_STATUSES = ("pending", "waybill_found", "no_waybill", "failed")
 
 
 def connect() -> psycopg.Connection:
@@ -165,6 +169,15 @@ def mark_stale_if_expired(conn: psycopg.Connection, stale_after_days: int = STAL
     return count
 
 
+def last_activity(conn: psycopg.Connection) -> Any:
+    """When any row was last touched, or None for an empty table. A poll uses it to
+    tell how long the pipeline has been silent (see pod_service.lookback_days)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT MAX(updated_at) FROM safexpress_pod_tracking")
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
 def _split_fairness_limit(limit: int, oldest_fraction: float) -> tuple[int, int]:
     """Pure helper: how many of `limit` backlog slots go to the oldest-first
     reserve vs. the newest-first majority. Always reserves at least 1 slot
@@ -191,17 +204,20 @@ def list_open_candidates(
         return []
 
     placeholders = ", ".join(["%s"] * len(OPEN_STATUSES))
+    # Open rows, except a failed one that has used up its retries.
+    work = f"pod_status IN ({placeholders}) AND NOT (pod_status = 'failed' AND attempt_count >= %s)"
+    work_params = (*OPEN_STATUSES, MAX_FAILED_ATTEMPTS)
     cols = "doc_entry, doc_num, series_name, waybill_number, pod_url, pod_date, pod_status"
 
     with conn.cursor() as cur:
         cur.execute(
             f"""
             SELECT {cols} FROM safexpress_pod_tracking
-            WHERE pod_status IN ({placeholders})
+            WHERE {work}
             ORDER BY doc_entry DESC
             LIMIT %s
             """,
-            (*OPEN_STATUSES, newest_n),
+            (*work_params, newest_n),
         )
         newest_rows = cur.fetchall()
         seen_doc_entries = {r[0] for r in newest_rows}
@@ -213,12 +229,12 @@ def list_open_candidates(
             cur.execute(
                 f"""
                 SELECT {cols} FROM safexpress_pod_tracking
-                WHERE pod_status IN ({placeholders})
+                WHERE {work}
                 {exclude_clause}
                 ORDER BY doc_entry ASC
                 LIMIT %s
                 """,
-                (*OPEN_STATUSES, *seen_doc_entries, oldest_n),
+                (*work_params, *seen_doc_entries, oldest_n),
             )
             oldest_rows = cur.fetchall()
 

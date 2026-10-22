@@ -56,6 +56,8 @@ def track_handler(event, context):
             return pod_service.poll_and_process(
                 days=int(ev.get("days") or DEFAULT_LOOKBACK_DAYS),
                 batch_size=int(ev.get("batch_size") or DEFAULT_BATCH_SIZE),
+                # Lets the run stop cleanly before the Lambda timeout instead of being killed mid-invoice.
+                time_left=(lambda: context.get_remaining_time_in_millis() / 1000) if hasattr(context, "get_remaining_time_in_millis") else None,
             )
         if mode == "backfill":
             return pod_service.seed_backfill()

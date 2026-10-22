@@ -127,6 +127,9 @@ jobs:
           # database (safexpress_prod), not the shared DATABASE_URL every
           # other service/stage still reads. Only used when stage=prod.
           SAFEXPRESS_PROD_DATABASE_URL: ${{ secrets.SAFEXPRESS_PROD_DATABASE_URL }}
+          # Optional: who gets emailed when a safexpress run crashes (SNS email
+          # subscription, must be confirmed from the inbox once).
+          SAFEXPRESS_ALERT_EMAIL: ${{ secrets.SAFEXPRESS_ALERT_EMAIL }}
           # B2B_so only — falls back to serverless.yml defaults if unset.
           # Docs bucket name comes from CloudFormation (Ref B2BDocsBucket); do not set
           # B2B_DOCS_BUCKET here — a pre-existing global name causes ResourceExistenceCheck.

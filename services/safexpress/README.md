@@ -110,6 +110,27 @@ safety net for future series years, not the common path.
 - `backfill` (manual, one-time at cutover) — unbounded HANA scan seeding
   every currently-untracked SafeExpress invoice into the backlog.
 
+## Failure handling
+
+- **`failed` rows are retried.** An unexpected error (a POD fetch timing out, an
+  outage) marks the row `failed`, but it stays in the work queue until it has
+  failed `MAX_FAILED_ATTEMPTS` times (config.py). Before, `failed` was terminal.
+- **An outage is not "no waybill".** `no_waybill` is only recorded when
+  SafeExpress answered HTTP 200 without a waybill. A failed request, a non-200
+  reply or an unreadable body raises a retryable error instead.
+- **Discovery catches up after downtime.** The HANA window is normally
+  `DEFAULT_LOOKBACK_DAYS`, but widens to cover the time since any row was last
+  touched (`pod_service.lookback_days`), so a long outage does not leave the
+  invoices created during it undiscovered.
+- **A run ends cleanly.** It stops starting new invoices when under
+  `MIN_RUN_BUDGET_SECONDS` of Lambda time is left, and stops early after
+  `MAX_CONSECUTIVE_FAILURES` failures in a row (an outage, not bad invoices).
+  The run summary reports `out_of_time` and `stopped_on_errors`.
+- **TLS is verified** on every SafeExpress and upload call.
+- **Alarm.** A CloudWatch alarm raises on any crashed run and notifies an SNS
+  topic. Set the `SAFEXPRESS_ALERT_EMAIL` secret to be emailed (confirm the
+  subscription once from the inbox).
+
 ## POD storage
 
 Kept on the existing `us-west-1` API Gateway + S3 bucket
