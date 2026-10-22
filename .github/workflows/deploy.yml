@@ -109,6 +109,8 @@ jobs:
           AMZ_ALERT_ADMIN_EMAIL: ${{ secrets.AMZ_ALERT_ADMIN_EMAIL }}
           AMZ_ALERT_FROM_EMAIL: ${{ secrets.AMZ_ALERT_FROM_EMAIL }}
           AMZ_SES_REGION: ${{ secrets.AMZ_SES_REGION }}
+          # SHA-256 fingerprint(s) of the Service Layer certificate this service talks to. Unset = not pinned.
+          AMZ_SAP_SL_PINNED_SHA256: ${{ secrets.AMZ_SAP_SL_PINNED_SHA256 }}
           # unicommerce-b2c only — falls back to serverless.yml defaults if unset.
           # UC_PROD_DATABASE_URL: unicommerce-b2c prod's own dedicated database
           # (unicommerce_b2c_prod), separate from the shared DATABASE_URL every
@@ -122,6 +124,8 @@ jobs:
           UC_ALERT_FROM_EMAIL: ${{ secrets.UC_ALERT_FROM_EMAIL }}
           UC_SES_REGION: ${{ secrets.UC_SES_REGION }}
           UC_POSTING_CUTOFF_DATE: ${{ secrets.UC_POSTING_CUTOFF_DATE }}
+          # SHA-256 fingerprint(s) of the on-prem Service Layer's self-signed certificate. Unset = not pinned.
+          UC_SAP_SL_PINNED_SHA256: ${{ secrets.UC_SAP_SL_PINNED_SHA256 }}
           # safexpress only — falls back to serverless.yml defaults if unset.
           # SAFEXPRESS_PROD_DATABASE_URL: safexpress prod's own dedicated
           # database (safexpress_prod), not the shared DATABASE_URL every

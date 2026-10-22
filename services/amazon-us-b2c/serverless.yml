@@ -138,6 +138,9 @@ provider:
     # company.
     SAP_SL_USE_SSM: ${env:SAP_SL_USE_SSM, 'true'}
     SAP_SL_VERIFY_SSL: ${env:SAP_SL_VERIFY_SSL, 'true'}
+    # Pins the Service Layer certificate (khanal_shared.sap_sl.http): when set, only a server presenting exactly
+    # this certificate is trusted, even with verification off. Empty = not pinned. Comma-separate two to overlap a renewal.
+    SAP_SL_PINNED_SHA256: ${env:AMZ_SAP_SL_PINNED_SHA256, ''}
     SAP_SL_PROFILE: ${self:custom.currentSlProfile}
     # Fixed, not ${env:HANA_USE_SSM, '1'}: deploy.yml passes
     # ${{ secrets.HANA_USE_SSM }}, which has no repo secret, so CI sets it to

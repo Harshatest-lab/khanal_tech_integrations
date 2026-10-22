@@ -168,6 +168,10 @@ provider:
     # with no CloudWatch error because the handler swallows the exception
     # before it reaches the Lambda runtime). See custom.sapVerifySslByStage.
     SAP_SL_VERIFY_SSL: ${self:custom.currentSapVerifySsl}
+    # Pins the self-signed Service Layer certificate above (khanal_shared.sap_sl.http): when set, only a server
+    # presenting exactly this certificate is trusted, so verification being off no longer means "trust anyone".
+    # Empty = not pinned (the previous behaviour). Comma-separate two fingerprints to overlap a renewal.
+    SAP_SL_PINNED_SHA256: ${env:UC_SAP_SL_PINNED_SHA256, ''}
     # Hardcoded, not ${env:HANA_USE_SSM, '1'} -- confirmed live 2026-08-31
     # that indirection was silently resolving to an empty string on every
     # deploy (deploy.yml never sets HANA_USE_SSM, unlike SAP_SL_USE_SSM
