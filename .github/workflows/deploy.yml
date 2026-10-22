@@ -141,7 +141,12 @@ jobs:
           AMZ_UK_ALERT_FROM_EMAIL: ${{ secrets.AMZ_UK_ALERT_FROM_EMAIL }}
           AMZ_UK_SES_REGION: ${{ secrets.AMZ_UK_SES_REGION }}
           HANA_SCHEMA: ${{ secrets.HANA_SCHEMA }}
-          HANA_USE_SSM: ${{ secrets.HANA_USE_SSM }}
+          # HANA_USE_SSM is deliberately NOT passed from a secret. No such secret
+          # exists, and an unset secret becomes an EMPTY string here, which beats
+          # serverless.yml's `${env:HANA_USE_SSM, '1'}` default and deploys the
+          # Lambdas with SSM lookup off ("HANA not configured"). That is what
+          # stopped safexpress (2026-09-30) and amazon-uk-b2c. Leave it unset so
+          # each service's own default applies.
         run: |
           npm install
           npx serverless deploy --stage ${{ inputs.stage }} --region ${{ secrets.AWS_REGION }}
