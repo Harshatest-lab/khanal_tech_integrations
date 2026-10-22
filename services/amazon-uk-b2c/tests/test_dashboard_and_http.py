@@ -14,6 +14,7 @@ def test_unknown_route_404():
 @pytest.mark.parametrize("method", ["POST", "PUT", "DELETE", "PATCH"])
 @pytest.mark.parametrize("path", [
     "/api/fetch", "/api/post-to-sap", "/api/retry-sap-failures", "/api/orders/402-1/post-to-sap", "/api/stats",
+    "/api/orders/402-1234567-1234567/raw", "/api/orders",
     "/api/fetch-refunds", "/api/refunds/txn-1/post-to-sap", "/api/refunds",
 ])
 def test_dashboard_is_read_only(method, path):
@@ -23,10 +24,68 @@ def test_dashboard_is_read_only(method, path):
 
 def test_no_trigger_code_left_in_dashboard():
     # Regression guard: the dashboard must not be able to start jobs.
+    # The ONLY allowed action is queueing one order (handle_post_order).
     for name in ("handle_fetch", "handle_post_to_sap", "handle_retry_sap_failures",
                  "handle_post_one_to_sap", "handle_fetch_refunds", "handle_post_one_refund_to_sap",
-                 "_invoke_async", "_lambda_client"):
+                 "_invoke_async"):
         assert not hasattr(dashboard, name), name
+
+
+ORDER = "402-1234567-1234567"
+
+
+def _patch_eligibility(monkeypatch, rows):
+    monkeypatch.setattr(dashboard, "query", lambda sql, params=None: rows)
+
+
+class _FakeLambda:
+    def __init__(self):
+        self.calls = []
+
+    def invoke(self, **kw):
+        self.calls.append(kw)
+
+
+def test_post_order_queues_async_invoke(monkeypatch):
+    fake = _FakeLambda()
+    monkeypatch.setattr(dashboard, "_lambda_client", lambda: fake)
+    monkeypatch.setenv("POST_INVOICES_FUNCTION", "amazon-uk-b2c-prod-amazonUkPostInvoices")
+    _patch_eligibility(monkeypatch, [{"shipped": True, "posted": None}])
+    status, body = dashboard.dispatch("POST", f"/api/orders/{ORDER}/post")
+    assert status == 202 and json.loads(body)["queued"] is True
+    (call,) = fake.calls
+    assert call["FunctionName"] == "amazon-uk-b2c-prod-amazonUkPostInvoices"
+    assert call["InvocationType"] == "Event"
+    assert json.loads(call["Payload"]) == {"amazon_order_id": ORDER}
+
+
+@pytest.mark.parametrize("rows,expected", [
+    ([], 404),
+    ([{"shipped": True, "posted": True}], 409),
+    ([{"shipped": False, "posted": None}], 409),
+])
+def test_post_order_rejects_ineligible(monkeypatch, rows, expected):
+    fake = _FakeLambda()
+    monkeypatch.setattr(dashboard, "_lambda_client", lambda: fake)
+    monkeypatch.setenv("POST_INVOICES_FUNCTION", "fn")
+    _patch_eligibility(monkeypatch, rows)
+    status, _ = dashboard.dispatch("POST", f"/api/orders/{ORDER}/post")
+    assert status == expected and not fake.calls
+
+
+def test_post_order_rejects_bad_id_without_query(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("must not query")
+
+    monkeypatch.setattr(dashboard, "query", boom)
+    status, _ = dashboard.dispatch("POST", "/api/orders/1' OR 1=1--/post")
+    assert status == 400
+
+
+def test_post_order_get_not_routed():
+    # GET on the post path must not fall through to anything that posts.
+    status, _ = dashboard.dispatch("GET", f"/api/orders/{ORDER}/post")
+    assert status == 404
 
 
 def test_refunds_route_queries(monkeypatch):

@@ -1,4 +1,5 @@
-"""Dashboard API for the Amazon UK orders pipeline — READ-ONLY.
+"""Dashboard API for the Amazon UK orders pipeline — read-only, plus ONE action:
+the per-order "Post to SAP" button (POST /api/orders/{id}/post).
 
 Lambda port of the standalone dashboard_server.py's GET endpoints, exposed as
 ``dispatch(method, path, query_string) -> (status, body_str)`` which
@@ -8,17 +9,21 @@ cross-origin — CORS is handled by API Gateway's native httpApi.cors config
 (serverless.yml), scoped to that bucket's origin, not by this module. Auth
 is the Cognito JWT authorizer on /api.
 
-Nothing here starts a job: fetching and SAP posting run only from their
-EventBridge schedules (amazonUkFetch / amazonUkPostInvoices /
-amazonUkFetchRefunds / amazonUkPostCreditNotes). The routes that touch
-SAP-side systems — /orders/{id}/sap-preview and /refunds/{id}/sap-trace
-(and their trace panels) — only READ HANA/SAP-response history to show the
-payload that would be/was posted; nothing here ever POSTs to SAP.
+Fetching and bulk posting run only from their EventBridge schedules
+(amazonUkFetch / amazonUkPostInvoices / amazonUkFetchRefunds /
+amazonUkPostCreditNotes). The only thing this API can start is posting ONE
+specific, eligible (Shipped, not-yet-posted) order: handle_post_order
+validates it and async-invokes amazonUkPostInvoices with
+{"amazon_order_id": ...} — this Lambda never talks to SAP itself and returns
+202 at once (a post can outlast this Lambda's 30 s budget). Every other
+route — /orders/{id}/sap-preview, /refunds/{id}/sap-trace, ... — only READS
+HANA/SAP-response history.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 from urllib.parse import parse_qs
 
@@ -243,6 +248,10 @@ RAW_ORDER_PATH_RE = re.compile(r"^/api/orders/([^/]+)/raw$")
 SAP_PREVIEW_PATH_RE = re.compile(r"^/api/orders/([^/]+)/sap-preview$")
 SAP_RESPONSE_PATH_RE = re.compile(r"^/api/orders/([^/]+)/sap-response$")
 ORDER_TRACE_PATH_RE = re.compile(r"^/api/orders/([^/]+)/trace$")
+POST_ORDER_PATH_RE = re.compile(r"^/api/orders/([^/]+)/post$")
+# Amazon order ids look like 402-1234567-1234567 — reject anything else before
+# it reaches a query or a Lambda payload.
+AMAZON_ORDER_ID_RE = re.compile(r"^\d{3}-\d{7}-\d{7}$")
 REFUND_SAP_TRACE_PATH_RE = re.compile(r"^/api/refunds/([^/]+)/sap-trace$")
 
 # Refunds (Finances API 2024-06-19 /transactions): one row per transaction
@@ -370,6 +379,47 @@ def _orders_filter_params(qs: dict) -> dict:
         "tax_method": g("tax_method"),
         "has_refund": g("has_refund"),
     }
+
+
+POST_ELIGIBILITY_SQL = """
+SELECT
+    bool_or(oi.order_status = 'Shipped') AS shipped,
+    bool_or(sp.status = 'posted') AS posted
+FROM amazonuk.order_items oi
+LEFT JOIN amazonuk.sap_postings sp ON sp.amazon_order_id = oi.amazon_order_id
+WHERE oi.amazon_order_id = %(order_id)s
+GROUP BY oi.amazon_order_id
+"""
+
+
+def _lambda_client():
+    import boto3
+
+    return boto3.client("lambda")
+
+
+def handle_post_order(order_id: str) -> tuple[int, str]:
+    """Queue SAP posting of exactly one order. Returns 202 once the post
+    Lambda has been invoked asynchronously; the caller polls the order trace
+    for the outcome (posted / failed)."""
+    if not AMAZON_ORDER_ID_RE.match(order_id):
+        return 400, json.dumps({"error": f"invalid order id: {order_id}"})
+    rows = query(POST_ELIGIBILITY_SQL, {"order_id": order_id})
+    if not rows:
+        return 404, json.dumps({"error": f"no such order: {order_id}"})
+    if rows[0]["posted"]:
+        return 409, json.dumps({"error": "order is already posted to SAP"})
+    if not rows[0]["shipped"]:
+        return 409, json.dumps({"error": "only Shipped orders can be posted to SAP"})
+    fn = (os.environ.get("POST_INVOICES_FUNCTION") or "").strip()
+    if not fn:
+        return 500, json.dumps({"error": "POST_INVOICES_FUNCTION is not configured"})
+    _lambda_client().invoke(
+        FunctionName=fn,
+        InvocationType="Event",
+        Payload=json.dumps({"amazon_order_id": order_id}).encode(),
+    )
+    return 202, json.dumps({"queued": True, "amazon_order_id": order_id})
 
 
 def handle_order_trace(order_id: str) -> tuple[int, str]:
@@ -565,7 +615,12 @@ def handle_api(path: str, qs: dict) -> tuple[int, str]:
 
 def dispatch(method: str, path: str, query_string: str = "") -> tuple[int, str]:
     """Lambda-facing entrypoint: one HTTP request -> (status, body_str).
-    GET only — the dashboard cannot trigger fetches or SAP postings."""
+    GET only, except POST /api/orders/{id}/post (queue one order to SAP) —
+    the dashboard cannot trigger fetches or bulk postings."""
+    if method == "POST":
+        m = POST_ORDER_PATH_RE.match(path)
+        if m:
+            return handle_post_order(m.group(1))
     if method != "GET":
         return 405, json.dumps({"error": "method not allowed (dashboard is read-only)"})
     return handle_api(path, parse_qs(query_string))

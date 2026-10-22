@@ -32,6 +32,7 @@ provider:
         - Authorization
       allowedMethods:
         - GET
+        - POST
         - OPTIONS
   iam:
     role:
@@ -50,6 +51,13 @@ provider:
           Resource:
             - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/amazon-uk/*"
             - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/sap/uk/*"
+        # Dashboard "Post to SAP" button: amazonUkDashboardApi async-invokes
+        # the post Lambda for one order (dashboard.handle_post_order).
+        - Effect: Allow
+          Action:
+            - lambda:InvokeFunction
+          Resource:
+            - Fn::Sub: "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${self:service}-${self:provider.stage}-amazonUkPostInvoices"
   environment:
     STAGE: ${self:provider.stage}
     LOG_LEVEL: ${env:LOG_LEVEL, 'INFO'}
@@ -178,8 +186,9 @@ functions:
           enabled: true
           input: { mode: post }
 
-  # Cognito-protected READ-ONLY JSON API (GET only) — it triggers nothing;
-  # fetch and post run only from their schedules above. The static frontend
+  # Cognito-protected JSON API — read-only GETs, plus POST /api/orders/{id}/post
+  # which queues ONE order to amazonUkPostInvoices (async invoke). Fetch and
+  # bulk post run only from their schedules above. The static frontend
   # is no longer served here: it's hosted on its own S3 website bucket
   # (AmazonUkDashboardSiteBucket, below) and calls this API cross-origin.
   amazonUkDashboardApi:
@@ -187,10 +196,17 @@ functions:
     memorySize: 512
     timeout: 30
     layers: [{ Ref: SharedLambdaLayer }]
+    environment:
+      POST_INVOICES_FUNCTION: ${self:service}-${self:provider.stage}-amazonUkPostInvoices
     events:
       - httpApi:
           path: /api/{proxy+}
           method: get
+          authorizer:
+            name: dashboardCognitoJwt
+      - httpApi:
+          path: /api/orders/{order_id}/post
+          method: post
           authorizer:
             name: dashboardCognitoJwt
 
