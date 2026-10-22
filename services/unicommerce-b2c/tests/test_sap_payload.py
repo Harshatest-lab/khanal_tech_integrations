@@ -24,6 +24,18 @@ from unicommerce.sap_payload import (  # noqa: E402
 )
 from unicommerce.settings import UnicommerceSettings  # noqa: E402
 
+_raw_ar_invoice_payload = ar_invoice_payload
+
+
+def ar_invoice_payload(**kwargs):  # noqa: F811
+    """ar_invoice_payload now refuses an order with no shipping state (it used
+    to default to the origin state, KA). Most tests here are about batches,
+    dates or discounts, not tax bucket, so they get KA explicitly -- the same
+    value the old default supplied. The state-refusal tests call the raw
+    function instead."""
+    kwargs["uc_data"] = {"shippingAddress": {"state": "KA"}, **kwargs["uc_data"]}
+    return _raw_ar_invoice_payload(**kwargs)
+
 
 def test_fefo_allocate_single_batch_covers_need():
     rows = [{"batch_number": "B1", "quantity": 10}]
@@ -517,6 +529,41 @@ def test_ar_invoice_payload_docdate_is_ship_date_and_taxdate_is_order_date():
     assert payload["DocDate"] == "2026-09-12"
     assert payload["DocDueDate"] == "2026-09-12"
     assert payload["TaxDate"] == "2026-08-30"
+
+
+def _uc_with_address(**address):
+    return {**_DATE_UC, **address}
+
+
+def test_ar_invoice_payload_refuses_when_no_ship_state_is_found():
+    """A missing state used to default to KA (the origin state), booking an
+    out-of-state sale as intra-state CGST/SGST instead of IGST."""
+    with pytest.raises(ValueError, match="No shipping state"):
+        _raw_ar_invoice_payload(
+            uniware_id="SO-DATES", channel="FLIPKART", order_json="{}", uc_data=_DATE_UC,
+            order_date="2026-08-30", doc_date="2026-09-12", settings=_DATE_SETTINGS,
+            batch_managed_cache={"SKU-A": False},
+        )
+
+
+def test_ar_invoice_payload_refuses_when_the_state_is_blank():
+    uc = _uc_with_address(shippingAddress={"state": "  "}, billingAddress={"state": ""})
+    with pytest.raises(ValueError, match="No shipping state"):
+        _raw_ar_invoice_payload(
+            uniware_id="SO-DATES", channel="FLIPKART", order_json="{}", uc_data=uc,
+            order_date="2026-08-30", doc_date="2026-09-12", settings=_DATE_SETTINGS,
+            batch_managed_cache={"SKU-A": False},
+        )
+
+
+def test_ar_invoice_payload_uses_the_billing_state_when_shipping_has_none():
+    uc = _uc_with_address(shippingAddress={}, billingAddress={"state": "KA"})
+    payload, _tax = _raw_ar_invoice_payload(
+        uniware_id="SO-DATES", channel="FLIPKART", order_json="{}", uc_data=uc,
+        order_date="2026-08-30", doc_date="2026-09-12", settings=_DATE_SETTINGS,
+        batch_managed_cache={"SKU-A": False},
+    )
+    assert payload["DocumentLines"]
 
 
 def test_ar_invoice_payload_refuses_without_ship_date_no_order_date_fallback():

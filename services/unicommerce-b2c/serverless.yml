@@ -272,6 +272,9 @@ functions:
   unicommerceFetch:
     handler: src.handlers.fetch_handler
     layers: [{ Ref: SharedLambdaLayer }]
+    # Scheduled runs fire every 30 min and are idempotent on their own; the
+    # default 2 async retries just stack duplicate runs on top of a failure.
+    maximumRetryAttempts: 0
     events:
       # 30-min offset so future posting/credit-note/PO/inventory functions
       # (same cadence as the Frappe cron) don't collide — see
@@ -331,6 +334,7 @@ functions:
   unicommercePostInvoices:
     handler: src.handlers.post_invoices_handler
     layers: [{ Ref: SharedLambdaLayer }]
+    maximumRetryAttempts: 0  # see unicommerceFetch above
     events:
       # Same 30-min offset pattern as the Frappe cron (7,37 * * * *).
       # Enabled 2026-08-12: Frappe's own post_invoices cron confirmed
@@ -369,6 +373,7 @@ functions:
   unicommercePostCreditNotes:
     handler: src.handlers.post_credit_notes_handler
     layers: [{ Ref: SharedLambdaLayer }]
+    maximumRetryAttempts: 0  # see unicommerceFetch above
     events:
       # Same 30-min offset pattern as the Frappe cron (17,47 * * * *).
       # Enabled 2026-08-12: Frappe's own post_credit_notes cron was
@@ -382,6 +387,7 @@ functions:
   unicommercePoGrn:
     handler: src.handlers.pogrn_handler
     layers: [{ Ref: SharedLambdaLayer }]
+    maximumRetryAttempts: 0  # see unicommerceFetch above
     events:
       # Same 30-min offset pattern as the other flows. Enabled 2026-08-20,
       # EC-FG only (see pogrn.ENABLED_TO_WAREHOUSES) -- Phase A dry-run and
@@ -403,6 +409,7 @@ functions:
   unicommerceRecon:
     handler: src.handlers.recon_handler
     layers: [{ Ref: SharedLambdaLayer }]
+    maximumRetryAttempts: 0  # see unicommerceFetch above
     events:
       # Same 30-min offset pattern as the other flows. Read-only against
       # SAP (only writes to our own Postgres), so unlike pogrn there's
@@ -477,6 +484,8 @@ resources:
           - email
         AutoVerifiedAttributes:
           - email
+        AdminCreateUserConfig:
+          AllowAdminCreateUserOnly: true
         Policies:
           PasswordPolicy:
             MinimumLength: 10

@@ -15,6 +15,7 @@ carried over unfixed since this store layer is being written fresh.
 
 from __future__ import annotations
 
+import json
 import logging
 
 from unicommerce import constants, returns, sap_client, sap_payload, store
@@ -140,6 +141,28 @@ def _prepare_credit_note(conn, cn: dict, settings) -> bool | str:
     return True
 
 
+def _cn_base_lines(cn: dict | None) -> list[int] | None:
+    """Sorted, distinct invoice lines (SAP BaseLine) this return reverses, from
+    its resolved items; None when none are resolved so the duplicate guard
+    falls back to matching on the invoice alone."""
+    raw = (cn or {}).get("items_json")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = None
+    lines: set[int] = set()
+    for item in raw if isinstance(raw, list) else []:
+        base_line = (item or {}).get("sapBaseLine")
+        if base_line in (None, ""):
+            continue
+        try:
+            lines.add(int(base_line))
+        except (TypeError, ValueError):
+            continue
+    return sorted(lines) or None
+
+
 def _post_credit_note(conn, uc_return_id: str, settings) -> None:
     cn = store.get_cn(conn, uc_return_id)
     parent = store.get_order(conn, cn["uc_order_id"]) if cn and cn.get("uc_order_id") else None
@@ -149,7 +172,9 @@ def _post_credit_note(conn, uc_return_id: str, settings) -> None:
     # could record the DocEntry.
     try:
         existing = sap_client.find_credit_note_by_return_id(
-            uc_return_id, base_doc_entry=parent.get("sap_ar_invoice_docentry") if parent else None
+            uc_return_id,
+            base_doc_entry=parent.get("sap_ar_invoice_docentry") if parent else None,
+            base_lines=_cn_base_lines(cn),
         )
         if existing:
             store.mark_cn_posted(

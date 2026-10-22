@@ -63,6 +63,7 @@ def test_post_order_links_existing_sap_invoice_and_never_posts_again(monkeypatch
     already invoiced them in SAP, link the existing DocEntry -- do not post."""
     marked = {}
     _no_post_no_build(monkeypatch)
+    monkeypatch.setattr(post_invoices, "_sap_invoice_snapshot", lambda de: None)
     monkeypatch.setattr(
         post_invoices.sap_client, "find_invoice_by_uc_order_id",
         lambda uid: {"doc_entry": 71887, "doc_num": 68832, "doc_tax_amount": 35.85},
@@ -82,9 +83,149 @@ def test_post_order_links_existing_sap_invoice_and_never_posts_again(monkeypatch
     assert marked == {"uid": "UC-JULY", "de": "71887", "dn": "68832"}
 
 
+_SAP_INVOICE = {
+    "DocEntry": 71887,
+    "CardCode": "C-UC",
+    "Comments": "internal",
+    "DocumentLines": [
+        {
+            "LineNum": 0, "ItemCode": "FG1", "WarehouseCode": "EC-FG", "AccountCode": "4000",
+            "Quantity": 2, "UnitPrice": 100.0, "U_UCOrderItemID": "ITEM-1",
+            "BatchNumbers": [{"BatchNumber": "B1", "Quantity": 2, "ExpiryDate": "x"}],
+        },
+        {"LineNum": 1, "ItemCode": "FG2", "WarehouseCode": "EC-FG", "Quantity": 1},
+    ],
+}
+
+
+def test_sap_invoice_snapshot_keeps_the_fields_credit_notes_resolve_against(monkeypatch):
+    monkeypatch.setattr(post_invoices.sap_client, "get_invoice_by_doc_entry", lambda de: _SAP_INVOICE)
+
+    snap = post_invoices._sap_invoice_snapshot(71887)
+
+    assert snap["CardCode"] == "C-UC"
+    assert [ln["LineNum"] for ln in snap["DocumentLines"]] == [0, 1]
+    assert snap["DocumentLines"][0]["ItemCode"] == "FG1"
+    assert snap["DocumentLines"][0]["BatchNumbers"][0]["BatchNumber"] == "B1"
+    assert "Comments" not in snap
+    # And it must be usable by the credit-note line resolver as-is.
+    from unicommerce import returns
+
+    prepared = returns.prepare_credit_note_items(
+        {"payload_json": snap}, [{"skuCode": "FG1", "saleOrderItemCode": "ITEM-1", "quantity": 1}]
+    )
+    assert prepared["unresolved_count"] == 0
+    assert prepared["items"][0]["sapBaseLine"] == 0
+
+
+def test_sap_invoice_snapshot_is_none_when_sap_lookup_fails(monkeypatch):
+    def boom(de):
+        raise sap_client.SapLookupError("SAP unreachable")
+
+    monkeypatch.setattr(post_invoices.sap_client, "get_invoice_by_doc_entry", boom)
+    assert post_invoices._sap_invoice_snapshot(71887) is None
+
+
+def test_sap_invoice_snapshot_is_none_for_a_document_without_lines(monkeypatch):
+    monkeypatch.setattr(post_invoices.sap_client, "get_invoice_by_doc_entry", lambda de: {"DocumentLines": []})
+    assert post_invoices._sap_invoice_snapshot(71887) is None
+
+
+def test_post_order_guard_recovery_saves_the_sap_snapshot_as_payload_json(monkeypatch):
+    """Without it the parent has payload_json NULL and every credit note on
+    the order stays 'awaiting SAP base-line mapping' forever."""
+    saved = {}
+    _no_post_no_build(monkeypatch)
+    monkeypatch.setattr(
+        post_invoices.sap_client, "find_invoice_by_uc_order_id",
+        lambda uid: {"doc_entry": 71887, "doc_num": 68832, "doc_tax_amount": 1},
+    )
+    monkeypatch.setattr(post_invoices.sap_client, "get_invoice_by_doc_entry", lambda de: _SAP_INVOICE)
+    monkeypatch.setattr(
+        post_invoices.store, "mark_posted", lambda conn, uid, de, dn, tax, payload: saved.update(payload=payload)
+    )
+
+    outcome, _ = post_invoices._post_order(
+        conn=None, row={"uniware_id": "UC-1", "channel_name": "FLIPKART"}, settings=object(),
+        batch_managed_cache={}, fefo_cache={}, series_cache={}, reservation_ctx={},
+    )
+
+    assert outcome == "posted"
+    assert saved["payload"]["DocumentLines"][0]["ItemCode"] == "FG1"
+
+
+def test_verify_recovery_saves_the_sap_snapshot_as_payload_json(monkeypatch):
+    saved = {}
+    monkeypatch.setattr(post_invoices.store, "get_verify_orders", lambda conn, limit: [{"uniware_id": "UC-2"}])
+    monkeypatch.setattr(
+        post_invoices.sap_client, "find_invoice_by_uc_order_id",
+        lambda uid: {"doc_entry": 5, "doc_num": 6, "doc_tax_amount": 0},
+    )
+    monkeypatch.setattr(post_invoices.sap_client, "get_invoice_by_doc_entry", lambda de: _SAP_INVOICE)
+    monkeypatch.setattr(
+        post_invoices.store, "mark_posted", lambda conn, uid, de, dn, tax, payload: saved.update(payload=payload)
+    )
+
+    stats = post_invoices._verify_posted_orders(None, 10, object())
+
+    assert stats["posted"] == 1
+    assert saved["payload"]["CardCode"] == "C-UC"
+
+
+def test_post_order_guard_recovery_still_marks_posted_when_snapshot_unavailable(monkeypatch):
+    marked = {}
+    _no_post_no_build(monkeypatch)
+    monkeypatch.setattr(
+        post_invoices.sap_client, "find_invoice_by_uc_order_id",
+        lambda uid: {"doc_entry": 71887, "doc_num": 68832, "doc_tax_amount": 1},
+    )
+    monkeypatch.setattr(post_invoices, "_sap_invoice_snapshot", lambda de: None)
+    monkeypatch.setattr(
+        post_invoices.store, "mark_posted", lambda conn, uid, de, dn, tax, payload: marked.update(de=de, payload=payload)
+    )
+
+    outcome, _ = post_invoices._post_order(
+        conn=None, row={"uniware_id": "UC-3", "channel_name": "FLIPKART"}, settings=object(),
+        batch_managed_cache={}, fefo_cache={}, series_cache={}, reservation_ctx={},
+    )
+
+    assert outcome == "posted"
+    assert marked == {"de": "71887", "payload": None}
+
+
+def test_mark_posted_never_overwrites_an_existing_payload_with_null():
+    from unicommerce import store
+
+    executed = []
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params):
+            executed.append((sql, params))
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+        def commit(self):
+            pass
+
+    store.mark_posted(_Conn(), "UC-4", "1", "2", 0, None)
+
+    sql, params = executed[0]
+    assert "COALESCE(%s, payload_json)" in sql
+    assert params[3] is None
+
+
 def test_post_order_flex_uses_numatcard_guard_and_never_posts_again(monkeypatch):
     marked = {}
     _no_post_no_build(monkeypatch)
+    monkeypatch.setattr(post_invoices, "_sap_invoice_snapshot", lambda de: None)
     monkeypatch.setattr(
         post_invoices.sap_client, "find_invoice_by_uc_order_id",
         lambda uid: (_ for _ in ()).throw(AssertionError("Flex must not use the U_Order lookup")),

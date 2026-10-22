@@ -532,7 +532,7 @@ def mark_posted(conn: psycopg.Connection, uniware_id: str, doc_entry: str, doc_n
             UPDATE unicommerce_orders SET
               pipeline_status = 'posted', sap_ar_invoice_docentry = %s, sap_ar_invoice_docnum = %s,
               ar_invoice_tax_actual = %s, batch_hold_since = NULL, last_error = '',
-              payload_json = %s, updated_at = now()
+              payload_json = COALESCE(%s, payload_json), updated_at = now()
             WHERE uniware_id = %s
             """,
             (doc_entry, doc_num, tax_actual, json.dumps(payload_json, default=str) if payload_json else None, uniware_id),

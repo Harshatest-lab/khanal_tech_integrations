@@ -112,6 +112,98 @@ def test_post_with_reauth_passes_through_successful_true(monkeypatch):
     assert result == body
 
 
+# ── Returns search must fail loudly ─────────────────────────────────────
+# A swallowed search failure returned [] and fetch_returns then advanced its
+# cursor past the window, so those returns were never fetched again.
+
+class _SearchResponse:
+    def __init__(self, json_body=None, status_code=200, json_error=False):
+        self._json = json_body
+        self.status_code = status_code
+        self.ok = status_code < 400
+        self._json_error = json_error
+
+    def json(self):
+        if self._json_error:
+            raise ValueError("not json")
+        return self._json
+
+
+def _search_returns(client, monkeypatch, response):
+    monkeypatch.setattr("unicommerce.uc_client.requests.post", lambda *a, **k: response)
+    return client._search_returns_single("CIR", "2026-10-01", "2026-10-02", True, "FAC-1")
+
+
+def test_search_returns_single_raises_on_http_error(monkeypatch):
+    try:
+        _search_returns(_client(), monkeypatch, _SearchResponse(status_code=503))
+        assert False, "expected UcApiError"
+    except UcApiError as e:
+        assert "503" in str(e)
+
+
+def test_search_returns_single_raises_on_unparseable_body(monkeypatch):
+    try:
+        _search_returns(_client(), monkeypatch, _SearchResponse(json_error=True))
+        assert False, "expected UcApiError"
+    except UcApiError:
+        pass
+
+
+def test_search_returns_single_raises_on_successful_false(monkeypatch):
+    body = {"successful": False, "errors": [{"message": "RETURN_SEARCH_FAILED"}]}
+    try:
+        _search_returns(_client(), monkeypatch, _SearchResponse(body))
+        assert False, "expected UcApiError"
+    except UcApiError as e:
+        assert "RETURN_SEARCH_FAILED" in str(e)
+
+
+def test_search_returns_single_tags_rows_with_facility(monkeypatch):
+    rows = _search_returns(_client(), monkeypatch, _SearchResponse({"returnOrders": [{"code": "R1"}]}))
+    assert rows == [{"code": "R1", "_facility": "FAC-1"}]
+
+
+def test_search_returns_single_empty_window_is_not_an_error(monkeypatch):
+    assert _search_returns(_client(), monkeypatch, _SearchResponse({"returnOrders": []})) == []
+
+
+def test_get_returns_between_propagates_search_failure():
+    client = _client()
+
+    def boom(*a, **k):
+        raise UcApiError("return/search status=503")
+
+    client._search_returns_by_type = boom
+    try:
+        client.get_returns_between("2026-10-01 00:00:00", "2026-10-02 00:00:00")
+        assert False, "expected UcApiError"
+    except UcApiError:
+        pass
+
+
+def test_get_returns_between_raises_when_a_detail_fetch_fails_after_trying_all():
+    client = _client()
+    client._search_returns_by_type = lambda rtype, *a, **k: (
+        [{"code": "R1", "_facility": "F"}, {"code": "R2", "_facility": "F"}] if rtype == "CIR" else []
+    )
+    fetched = []
+
+    def detail(code, facility=None):
+        fetched.append(code)
+        if code == "R1":
+            raise RuntimeError("UC 500")
+        return {"code": code}
+
+    client.get_return_detail = detail
+    try:
+        client.get_returns_between("2026-10-01 00:00:00", "2026-10-02 00:00:00")
+        assert False, "expected UcApiError"
+    except UcApiError as e:
+        assert "R1" in str(e)
+    assert fetched == ["R1", "R2"]  # one bad code does not stop the rest being tried
+
+
 # ── PoGrn / InventorySync write methods ─────────────────────────────────
 
 def _capture_post(monkeypatch, response_body):

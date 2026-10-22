@@ -712,7 +712,12 @@ def ar_invoice_payload(
     order_has_paid_line = any(_net_line_price(item) > 0 for item in items)
 
     tax_inclusive = bool(resolve_mapped_value(tax_inclusive_map, channel, False))
-    ship_state = extract_shipping_state(uc_data) or ORIGIN_STATE
+    # No fallback to the origin state: a missing state used to book an
+    # out-of-state sale as intra-state CGST/SGST instead of IGST. Refuse and
+    # let the order fail visibly, like a missing ship date.
+    ship_state = extract_shipping_state(uc_data)
+    if not ship_state:
+        raise ValueError(f"No shipping state for order {uniware_id}; refusing to guess the tax bucket")
     origin_state_code = resolve_origin_state_code(channel, settings)
     tax_bucket = classify_tax_bucket(ship_state, None, origin_state_code)
     bill_to_code, ship_to_code = _resolve_bill_ship_codes(settings, channel, tax_bucket)

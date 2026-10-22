@@ -21,6 +21,11 @@ logger = logging.getLogger(__name__)
 _CHUNK_SIZE = 500
 
 
+class HanaUnavailableError(Exception):
+    """HANA could not be queried (an outage), as opposed to answering that
+    there is no data. Callers must not treat it as "no stock"."""
+
+
 def find_invoice_by_order_id(uc_order_id: str) -> dict | None:
     """Exact-match AR Invoice dedup lookup via INV1.U_Order -- the
     line-level UDF ar_invoice_payload always sets, and a real HANA column
@@ -52,29 +57,45 @@ def find_invoice_by_order_id(uc_order_id: str) -> dict | None:
     return {"doc_entry": int(row[0]), "doc_num": int(row[1] or 0), "doc_tax_amount": float(row[2] or 0)}
 
 
-def find_credit_note_by_base_invoice(base_doc_entry: int | str) -> dict | None:
+def find_credit_note_by_base_invoice(base_doc_entry: int | str, base_lines: list | None = None) -> dict | None:
     """Exact-match Credit Note dedup lookup via RIN1.BaseEntry/BaseType --
     the standard "Copy From" link every CN we post carries back to its
     parent AR Invoice (BaseType 13), not a custom field. Same rationale as
     find_invoice_by_order_id: SAP SL's U_UCReturnID header-UDF filter
     doesn't work on this install (ORIN has no such column at all), and
     since our posting flow is strictly one CN per invoice, BaseEntry alone
-    is an exact, reliable key -- no custom field needed for this one."""
+    is an exact, reliable key -- no custom field needed for this one.
+
+    "One CN per invoice" does not hold for multi-line orders: separate
+    returns of different lines both link to the same invoice, so matching on
+    BaseEntry alone made the second return look already posted. base_lines
+    (the invoice lines this return reverses, RIN1.BaseLine) narrows the match
+    to credit notes that touch those lines. SAP itself allows one reversal
+    per invoice line (-5002), so line + invoice is the real duplicate key."""
     try:
         entry = int(base_doc_entry)
     except (TypeError, ValueError):
         return None
+    lines: list[int] = []
+    for value in base_lines or []:
+        try:
+            lines.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    line_filter = ""
+    if lines:
+        line_filter = ' AND l."BaseLine" IN (' + ", ".join("?" for _ in lines) + ")"
     with hana_connection() as conn:
         cur = conn.cursor()
         cur.execute(
-            '''
+            f'''
             SELECT h."DocEntry", h."DocNum", h."VatSum"
             FROM "ORIN" h
             INNER JOIN "RIN1" l ON l."DocEntry" = h."DocEntry"
-            WHERE l."BaseEntry" = ? AND l."BaseType" = 13 AND h."CANCELED" = 'N'
+            WHERE l."BaseEntry" = ? AND l."BaseType" = 13 AND h."CANCELED" = 'N'{line_filter}
             ORDER BY h."DocEntry" DESC
             ''',
-            [entry],
+            [entry, *lines],
         )
         row = cur.fetchone()
         cur.close()
@@ -87,9 +108,10 @@ def bulk_batch_inventory_by_warehouse(whs_code: str, item_codes: list[str] | set
     """FEFO-ordered batch rows for the given items in one warehouse.
 
     Row shape: {"item_code", "batch_number", "warehouse_code", "quantity", "expiry"}.
-    Returns [] if HANA is unreachable -- caller falls back to per-line
-    checks or treats it as a shortage, same fail-safe policy as the
-    Frappe source.
+    Raises HanaUnavailableError if HANA can't be queried. It used to return
+    [], which callers read as "no batches" -> a stock shortage -> batch_hold
+    -> 'dead' after 48h, for what was only an outage. An empty list now
+    always means HANA answered and there is genuinely no stock.
     """
     safe_whs = str(whs_code or "").strip()
     cleaned = sorted({str(c or "").strip() for c in (item_codes or []) if str(c or "").strip()})
@@ -138,7 +160,7 @@ def bulk_batch_inventory_by_warehouse(whs_code: str, item_codes: list[str] | set
             cur.close()
     except Exception as exc:
         logger.warning("bulk_batch_inventory_by_warehouse HANA query failed wh=%s: %s", safe_whs, exc)
-        return []
+        raise HanaUnavailableError(f"batch inventory query failed for {safe_whs}: {exc}") from exc
     return rows_out
 
 

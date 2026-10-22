@@ -408,7 +408,9 @@ def find_credit_notes_by_num_at_card_prefix(prefix: str) -> list[dict]:
     return body.get("value", []) or []
 
 
-def find_credit_note_by_return_id(uc_return_id: str, base_doc_entry: int | str | None = None) -> dict | None:
+def find_credit_note_by_return_id(
+    uc_return_id: str, base_doc_entry: int | str | None = None, base_lines: list | None = None
+) -> dict | None:
     """Duplicate guard: SAP Credit Note already posted for this return.
     Primary check is hana_access.find_credit_note_by_base_invoice, keyed
     on base_doc_entry (the parent AR Invoice's DocEntry) via RIN1's
@@ -426,7 +428,7 @@ def find_credit_note_by_return_id(uc_return_id: str, base_doc_entry: int | str |
 
     if base_doc_entry:
         try:
-            return hana_access.find_credit_note_by_base_invoice(base_doc_entry)
+            return hana_access.find_credit_note_by_base_invoice(base_doc_entry, base_lines=base_lines)
         except Exception as exc:
             logger.warning("find_credit_note_by_return_id: HANA lookup failed for %s (%s) -- falling back to SL", key, exc)
 
