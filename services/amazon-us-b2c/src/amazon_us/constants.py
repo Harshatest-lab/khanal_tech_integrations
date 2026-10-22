@@ -36,7 +36,11 @@ SAP_SHIPPING_GL_FORMAT = "41400000-01-001-01"      # Sales Revenues - Freight (_
 
 # Orders shipped before this date were manually booked by Finance from the
 # MTR (pre-pipeline). Posting them again would double-count revenue.
-POSTING_CUTOFF_DATE = _env("AMZ_POSTING_CUTOFF_DATE", "2026-06-01")
+#
+# The default is the live value, not an older floor: if the env var is ever
+# missing, falling back to an earlier date would re-post months Finance
+# already booked. Keep this, serverless.yml and the repo secret in step.
+POSTING_CUTOFF_DATE = _env("AMZ_POSTING_CUTOFF_DATE", "2026-08-01")
 
 MARKETPLACE_ID = _env("AMZ_MARKETPLACE_ID", "ATVPDKIKX0DER")   # amazon.com
 SP_API_BASE = _env("AMZ_SP_API_BASE", "https://sellingpartnerapi-na.amazon.com")
