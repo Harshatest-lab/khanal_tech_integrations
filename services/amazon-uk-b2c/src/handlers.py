@@ -5,6 +5,7 @@
   post_invoices_handler      Shipped, not-yet-posted orders -> SAP B1 AR Invoices
   fetch_refunds_handler      Finances API RELEASED refunds -> amazonuk.* (RDS)
   post_credit_notes_handler  Not-yet-posted refunds -> SAP B1 AR Credit Memos
+  daily_report_handler       ONE daily counts email (fetched / posted / failed)
   dashboard_handler          Cognito-protected /api/* — read-only except POST /api/orders/{id}/post (static frontend lives on S3, calls this cross-origin)
 
 Fetch and post run from their EventBridge schedules (serverless.yml); the
@@ -36,8 +37,8 @@ _SRC = Path(__file__).resolve().parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from amazon_uk import dashboard, post_credit_notes_to_sap, post_to_sap, sync_amazonuk, sync_refunds  # noqa: E402
-from amazon_uk.alerts import scrub, send_alert, send_report  # noqa: E402
+from amazon_uk import daily_report, dashboard, post_credit_notes_to_sap, post_to_sap, sync_amazonuk, sync_refunds  # noqa: E402
+from amazon_uk.alerts import scrub, send_alert, send_failure_alert  # noqa: E402
 
 configure_logging()  # LOG_LEVEL-aware; handles the Lambda root-logger pitfall
 logger = logging.getLogger("amz_sync")
@@ -50,7 +51,7 @@ def _run(label: str, fn):
     except Exception as e:
         send_alert(f"{label} crashed", scrub(f"{e}\n\n{traceback.format_exc()[-3000:]}"))
         raise
-    send_report(label, result)  # best-effort; never raises
+    send_failure_alert(label, result)  # posting runs only; best-effort, never raises
     return result
 
 
@@ -150,6 +151,11 @@ def post_credit_notes_handler(event, context):
         raise ValueError(f"Unknown post mode: {mode}")
 
     return _run(f"post_credit_notes[{mode}]", _go)
+
+
+def daily_report_handler(event, context):
+    """One summary email (fetched / posted / failed, last 24 h) to varshap@."""
+    return _run("daily_report", daily_report.run)
 
 
 # ── Dashboard HTTP API ─────────────────────────────────────────────────────

@@ -248,9 +248,14 @@ def test_post_via_http_is_rejected_by_handler():
 
 # ── alerts ─────────────────────────────────────────────────────────────────
 
-def test_alert_skipped_when_unconfigured(monkeypatch):
-    monkeypatch.delenv("AMZ_UK_ALERT_ADMIN_EMAIL", raising=False)
-    monkeypatch.delenv("AMZ_UK_ALERT_FROM_EMAIL", raising=False)
+def test_alert_never_raises_when_ses_fails(monkeypatch):
+    import sys, types
+
+    class _SES:
+        def send_email(self, **kw):
+            raise RuntimeError("ses down")
+
+    monkeypatch.setitem(sys.modules, "boto3", types.SimpleNamespace(client=lambda *a, **k: _SES()))
     assert alerts.send_alert("x", "y") is False
 
 
@@ -278,3 +283,59 @@ def test_build_report_fetch_result():
     subject, body = alerts.build_report("fetch[incremental]", {"orders": 12, "items_stored": 20})
     assert subject == "fetch[incremental] completed"
     assert "orders: 12" in body
+
+
+def test_categorize_failure():
+    assert alerts.categorize_failure("Posting period is locked") == "SAP posting period locked"
+    assert alerts.categorize_failure("The period is locked for this date") == "SAP posting period locked"
+    assert alerts.categorize_failure("No SAP mapping for SKU(s): X") == "SAP item mapping"
+    assert alerts.categorize_failure("Insufficient stock for A in W") is None
+    assert alerts.categorize_failure("Order not found") is None
+
+
+def test_failure_alert_only_mapping_and_period_lock(monkeypatch):
+    sent = []
+    monkeypatch.delenv("AMZ_UK_FAILURE_ALERT_EMAILS", raising=False)
+    monkeypatch.setattr(alerts, "send_alert", lambda s, b, to="": sent.append((s, b, to)) or True)
+    monkeypatch.setattr(alerts, "scrub", lambda t: t)
+    result = {"results": [
+        {"order": "1", "status": "failed", "error": "No SAP mapping for SKU(s): X"},
+        {"order": "2", "status": "failed", "error": "Insufficient stock for A"},
+        {"order": "3", "status": "posted"},
+    ]}
+    assert alerts.send_failure_alert("post_invoices[post]", result) is True
+    assert sent[0][2] == "yaknaprabha@khanalfoods.com,finance@khanalfoods.com"
+    assert "1:" in sent[0][1] and "2:" not in sent[0][1]
+    sent.clear()
+    assert alerts.send_failure_alert("post_invoices[post]", {"results": [{"order": "2", "status": "failed", "error": "x"}]}) is False
+    assert alerts.send_failure_alert("fetch[incremental]", {"orders": 1}) is False
+    assert not sent
+
+
+def test_daily_report_one_mail_to_varshap(monkeypatch):
+    from amazon_uk import daily_report
+    sent = []
+    monkeypatch.delenv("AMZ_UK_REPORT_EMAILS", raising=False)
+    monkeypatch.setattr(daily_report, "collect_counts", lambda hours=24: {
+        "orders_fetched": 12, "refunds_fetched": 2, "invoices_posted": 9, "invoices_failed": 1,
+        "credit_notes_posted": 1, "credit_notes_failed": 0,
+        "invoices_failed_total": 3, "credit_notes_failed_total": 0})
+    monkeypatch.setattr(alerts, "send_alert", lambda s, b, to="": sent.append((s, b, to)) or True)
+    monkeypatch.setattr(alerts, "scrub", lambda t: t)
+    out = daily_report.run()
+    assert out["emailed"] is True and len(sent) == 1
+    assert sent[0][2] == "varshap@khanalfoods.com"
+    assert "12 fetched, 10 posted, 1 failed" in sent[0][0]
+
+
+def test_default_sender(monkeypatch):
+    monkeypatch.delenv("AMZ_UK_ALERT_FROM_EMAIL", raising=False)
+    monkeypatch.setenv("AMZ_UK_ALERT_ADMIN_EMAIL", "a@x.com")
+    import sys, types
+    calls = {}
+    class _SES:
+        def send_email(self, **kw): calls.update(kw)
+    fake = types.SimpleNamespace(client=lambda *a, **k: _SES())
+    monkeypatch.setitem(sys.modules, "boto3", fake)
+    assert alerts.send_alert("s", "b") is True
+    assert calls["Source"] == "varshap@khanalfoods.com"

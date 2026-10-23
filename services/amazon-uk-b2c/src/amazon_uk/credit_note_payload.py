@@ -42,7 +42,7 @@ breakdownType name to key off — would be guessing a key that might not
 match anything.
 """
 
-from amazon_uk.invoice_payload import ITEM_CODE_GIFT_WRAP, ITEM_CODE_PROMO_DISCOUNT, ITEM_CODE_SHIPPING
+from amazon_uk.invoice_payload import ACCOUNTED_BY, ITEM_CODE_GIFT_WRAP, ITEM_CODE_PROMO_DISCOUNT, ITEM_CODE_SHIPPING
 
 CREDIT_MEMO_BASE_TYPE_INVOICES = 13  # standard SAP B1 oInvoices constant 
 
@@ -256,6 +256,7 @@ def build_credit_note_payload(invoice: dict, refund_line_rows: list[dict], amazo
         "Address": invoice.get("Address"),
         "Series": series,
         "Comments": f"{amazon_order_id} - Amazon API",
+        "U_AccountedBy": ACCOUNTED_BY,
         "DocumentLines": doc_lines,
     }
     return payload, skipped
