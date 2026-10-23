@@ -996,6 +996,11 @@ def credit_note_payload(cn: dict, parent_order: dict, settings: UnicommerceSetti
             return_wh = CHANNEL_WAREHOUSE_MAP[channel_upper]
         else:
             return_wh = _resolve_sap_warehouse(settings, parent_channel, item_uc_wh, default=RETURN_WAREHOUSE_CODE)
+            # warehouse_map sends the e-commerce shipping warehouse to EC-FG (right for invoices), so a return
+            # resolved there would go straight back into sellable stock. Returns arrive via the in-transit
+            # warehouse; fulfilment-centre warehouses (FKRT-*, AMZ-*) are left as mapped.
+            if return_wh == DEFAULT_WAREHOUSE:
+                return_wh = RETURN_WAREHOUSE_CODE
 
         line = {
             "ItemCode": item_code,

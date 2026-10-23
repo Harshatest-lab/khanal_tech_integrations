@@ -425,6 +425,39 @@ def test_credit_note_payload_non_fba_channel_falls_back_to_return_warehouse_code
     assert RETURN_WAREHOUSE_CODE != DEFAULT_WAREHOUSE
 
 
+# Production's warehouse_map sends the e-commerce shipping warehouse to EC-FG, so the "unmapped" test above never
+# reached the real case: every e-commerce return was booked straight back into sellable stock.
+_PROD_LIKE_WAREHOUSES = UnicommerceSettings(
+    channel_customer_map={"FLIPKART": "C-FLIPKART", "default": "C-DEFAULT"},
+    credit_note_series=42,
+    warehouse_map={
+        "kfl_ecom_warehouse": "EC-FG",
+        "FLIPKART_FA_MH_BHIWANDI": "FKRT-BHI",
+        "AMAZON_FBA_IN_BOM5": "AMZ-BOM5",
+    },
+)
+
+
+def _cn_from_warehouse(uc_warehouse: str):
+    cn = _cn()
+    cn["items"][0]["warehouseCode"] = uc_warehouse
+    return cn
+
+
+def test_credit_note_payload_ecommerce_return_goes_to_the_returns_in_transit_warehouse():
+    payload = credit_note_payload(
+        _cn_from_warehouse("kfl_ecom_warehouse"), {"channel_name": "FLIPKART", "state": "KA"}, _PROD_LIKE_WAREHOUSES
+    )
+    assert payload["DocumentLines"][0]["WarehouseCode"] == RETURN_WAREHOUSE_CODE
+
+
+def test_credit_note_payload_fulfilment_centre_returns_keep_their_own_warehouse():
+    payload = credit_note_payload(
+        _cn_from_warehouse("FLIPKART_FA_MH_BHIWANDI"), {"channel_name": "FLIPKART_FA_MH_BHIWANDI", "state": "KA"}, _PROD_LIKE_WAREHOUSES
+    )
+    assert payload["DocumentLines"][0]["WarehouseCode"] == "FKRT-BHI"
+
+
 def test_credit_note_payload_missing_parent_doc_entry_raises():
     with pytest.raises(ValueError, match="parent_sap_doc_entry"):
         credit_note_payload(_cn(parent_sap_doc_entry=""), {"channel_name": "FLIPKART"}, _SETTINGS_WITH_CN)
