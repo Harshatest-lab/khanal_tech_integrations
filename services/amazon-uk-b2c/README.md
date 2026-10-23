@@ -11,10 +11,11 @@ entrypoint/credential layer adapted for Lambda. Structured like
 
 | Function | Handler | Trigger | Role |
 |----------|---------|---------|------|
-| `amazonUkFetch` | `fetch_handler` | EventBridge cron `22:00 UTC` (03:30 IST), **enabled** | Incremental order fetch by `lastUpdatedAfter` watermark (window capped at 48 h) + trailing shipment report → `amazonuk.order_items` |
-| `amazonUkPostInvoices` | `post_invoices_handler` | EventBridge cron `23:00 UTC` (04:30 IST), **enabled** | Post every Shipped, not-yet-posted order shipped on/after `AMZ_UK_POSTING_CUTOFF_DATE` to SAP B1 as an AR Invoice (failed orders are re-attempted every run) |
-| `amazonUkFetchRefunds` | `fetch_refunds_handler` | EventBridge cron `23:30 UTC` (05:00 IST), **enabled** | Incremental RELEASED-refund fetch by `postedAfter` watermark (Finances API) → `amazonuk.refund_events` / `refund_items` |
-| `amazonUkPostCreditNotes` | `post_credit_notes_handler` | EventBridge cron `00:00 UTC` (05:30 IST), **enabled** | Post every not-yet-posted RELEASED refund posted on/after `AMZ_UK_POSTING_CUTOFF_DATE` (same cutoff invoices use) to SAP B1 as an AR Credit Memo, one per refund transaction (failed refunds are re-attempted every run) |
+| `amazonUkFetch` | `fetch_handler` | EventBridge cron `22:00 UTC` (03:30 IST), **disabled** (enable in AWS) | Incremental order fetch by `lastUpdatedAfter` watermark (window capped at 48 h) + trailing shipment report → `amazonuk.order_items` |
+| `amazonUkPostInvoices` | `post_invoices_handler` | EventBridge cron `23:00 UTC` (04:30 IST), **disabled** (enable in AWS) | Post every Shipped, not-yet-posted order shipped on/after `AMZ_UK_POSTING_CUTOFF_DATE` to SAP B1 as an AR Invoice (failed orders are re-attempted every run) |
+| `amazonUkFetchRefunds` | `fetch_refunds_handler` | EventBridge cron `23:30 UTC` (05:00 IST), **disabled** (enable in AWS) | Incremental RELEASED-refund fetch by `postedAfter` watermark (Finances API) → `amazonuk.refund_events` / `refund_items` |
+| `amazonUkDailyReport` | `daily_report_handler` | EventBridge cron `00:30 UTC` (06:00 IST), **disabled** (enable in AWS) | ONE daily email to `AMZ_UK_REPORT_EMAILS` (default varshap@khanalfoods.com): fetched / posted / failed counts for the last 24 h, read from the log tables |
+| `amazonUkPostCreditNotes` | `post_credit_notes_handler` | EventBridge cron `00:00 UTC` (05:30 IST), **disabled** (enable in AWS) | Post every not-yet-posted RELEASED refund posted on/after `AMZ_UK_POSTING_CUTOFF_DATE` (same cutoff invoices use) to SAP B1 as an AR Credit Memo, one per refund transaction (failed refunds are re-attempted every run) |
 | `amazonUkDashboardApi` | `dashboard_handler` | API Gateway HTTP API (512 MB / 30 s) | Cognito-protected **read-only** (GET) JSON API at `/api/*`. Static frontend is hosted separately on S3 (see Dashboard section) |
 
 > **Was one function** (`amazonUkB2cDaily`, fetch + post in one 900 s budget).
@@ -173,10 +174,11 @@ aws s3 sync dashboard/ s3://amazon-uk-b2c-dev-dashboard-site/ \
   --region ap-south-1 --exclude "serve.sh"
 ```
 
-All four cron rules are **enabled** in `serverless.yml`, so they start firing
-right after the deploy (order fetch 22:00 UTC, invoice post 23:00 UTC,
-refund fetch 23:30 UTC, credit-note post 00:00 UTC). To pause one, set
-`enabled: false` and redeploy.
+All four cron rules are **disabled** in `serverless.yml` (`enabled: false`), so
+nothing fires after a deploy. Turn each rule on manually in AWS (EventBridge
+rule -> Enable) when wanted: order fetch 22:00 UTC, invoice post 23:00 UTC,
+refund fetch 23:30 UTC, credit-note post 00:00 UTC. A redeploy resets every
+rule back to disabled, so re-enable them after each deploy.
 
 To fall back to plaintext env vars instead of SSM for any one credential
 (e.g. local override, a stage without SSM set up), set its `*_USE_SSM` flag
@@ -211,3 +213,17 @@ also a module name in `B2B_so/src`.
 - `AMZ_UK_POSTING_CUTOFF_DATE` gates both invoice posting (by ship date)
   and credit-note posting (by refund posted_date) — one operational knob,
   not two.
+
+
+## Emails
+
+All sent via SES from `AMZ_UK_ALERT_FROM_EMAIL` (default varshap@khanalfoods.com
+— must be a verified SES identity).
+
+| Email | To | When |
+|---|---|---|
+| Crash alert | `AMZ_UK_ALERT_ADMIN_EMAIL` (varshap@) | a job raises |
+| Posting failure | `AMZ_UK_FAILURE_ALERT_EMAILS` (yaknaprabha@, finance@) | after an invoice / credit-note run, only for failures of **SAP item mapping** ("No SAP mapping") or **posting period locked**; one email per run |
+| Daily counts | `AMZ_UK_REPORT_EMAILS` (varshap@) | `amazonUkDailyReport`, once a day |
+
+Failed orders are retried every run, so unresolved failures re-alert daily.

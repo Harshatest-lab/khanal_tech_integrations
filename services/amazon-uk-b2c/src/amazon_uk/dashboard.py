@@ -42,7 +42,8 @@ WITH orders AS (
         amazon_order_id, purchase_date, last_update_date, order_status,
         fulfillment_channel, sales_channel, ship_service_level, order_total_amount,
         order_total_currency, number_of_items_shipped, number_of_items_unshipped,
-        is_prime, fetched_at
+        is_prime, fetched_at,
+        MIN(shipment_date) OVER (PARTITION BY amazon_order_id) AS shipment_date
     FROM amazonuk.order_items
     ORDER BY amazon_order_id, purchase_date
 )
@@ -84,6 +85,8 @@ WHERE (%(status)s IS NULL OR o.order_status = %(status)s)
       )
   AND (%(order_from)s IS NULL OR o.purchase_date::date >= %(order_from)s)
   AND (%(order_to)s IS NULL OR o.purchase_date::date <= %(order_to)s)
+  AND (%(ship_from)s IS NULL OR o.shipment_date::date >= %(ship_from)s)
+  AND (%(ship_to)s IS NULL OR o.shipment_date::date <= %(ship_to)s)
   AND (%(updated_from)s IS NULL OR o.last_update_date::date >= %(updated_from)s)
   AND (%(updated_to)s IS NULL OR o.last_update_date::date <= %(updated_to)s)
   AND (%(sku)s IS NULL OR EXISTS (
@@ -148,7 +151,7 @@ WHERE (%(status)s IS NULL OR o.order_status = %(status)s)
 """
 
 ORDERS_SQL = ORDERS_CTE + """
-SELECT o.amazon_order_id, o.purchase_date, o.last_update_date, o.order_status,
+SELECT o.amazon_order_id, o.purchase_date, o.shipment_date, o.last_update_date, o.order_status,
        o.fulfillment_channel, o.sales_channel, o.ship_service_level, o.order_total_amount,
        o.order_total_currency, o.number_of_items_shipped, o.number_of_items_unshipped,
        o.is_prime,
@@ -359,6 +362,8 @@ def _orders_filter_params(qs: dict) -> dict:
         "sap_status": g("sap_status"),
         "order_from": g("order_from"),
         "order_to": g("order_to"),
+        "ship_from": g("ship_from"),
+        "ship_to": g("ship_to"),
         "updated_from": g("updated_from"),
         "updated_to": g("updated_to"),
         "sku": g("sku"),

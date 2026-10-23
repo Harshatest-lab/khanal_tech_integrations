@@ -105,21 +105,74 @@ def build_report(label: str, result) -> tuple[str, str]:
     return f"{label} {status}" + (f" ({failed_n} failed)" if failed_n else ""), "\n".join(lines)
 
 
-def send_report(label: str, result) -> bool:
-    """Best-effort "job finished" summary email; same recipients/SES as alerts."""
+DEFAULT_SENDER = "varshap@khanalfoods.com"
+DEFAULT_REPORT_EMAILS = "varshap@khanalfoods.com"
+DEFAULT_FAILURE_EMAILS = "yaknaprabha@khanalfoods.com,finance@khanalfoods.com"
+
+# The only posting failures that email the SAP/finance team: SKU not mapped to
+# an SAP item, and SAP posting period locked. Matched against the error text
+# recorded for the order/refund. First match wins.
+_FAILURE_CATEGORIES = (
+    ("SAP item mapping", re.compile(r"no sap mapping", re.I)),
+    ("SAP posting period locked", re.compile(r"posting period|period.{0,20}lock|lock.{0,20}period", re.I)),
+)
+
+
+def categorize_failure(error) -> str | None:
+    text = str(error or "")
+    for name, pattern in _FAILURE_CATEGORIES:
+        if pattern.search(text):
+            return name
+    return None
+
+
+def send_failure_alert(label: str, result) -> bool:
+    """Email AMZ_UK_FAILURE_ALERT_EMAILS when a posting run has failures of
+    the two kinds above (one email per run, grouped by category).
+    No-op for fetch jobs and runs with nothing to report."""
     try:
-        subject, body = build_report(label, result)
-        return send_alert(subject, scrub(body))
+        rows = result.get("results") if isinstance(result, dict) else None
+        if not isinstance(rows, list):
+            return False
+        grouped: dict[str, list[str]] = {}
+        for row in rows:
+            if row.get("status") != "failed":
+                continue
+            category = categorize_failure(row.get("error"))
+            if category:
+                grouped.setdefault(category, []).append(
+                    f"  {row.get('order') or row.get('transaction_id')}: {row.get('error')}"
+                )
+        if not grouped:
+            return False
+        total = sum(len(v) for v in grouped.values())
+        lines = [f"Amazon UK {label}: {total} posting failure(s) need attention", ""]
+        for category, items in grouped.items():
+            lines += [f"{category} ({len(items)}):", *items[:100]]
+            if len(items) > 100:
+                lines.append(f"  ... and {len(items) - 100} more (see dashboard)")
+            lines.append("")
+        return send_alert(
+            f"{label}: {total} posting failure(s) ({', '.join(grouped)})",
+            scrub("\n".join(lines)),
+            to=_env("AMZ_UK_FAILURE_ALERT_EMAILS", DEFAULT_FAILURE_EMAILS),
+        )
     except Exception:
-        logger.error("report email failed for %r", label, exc_info=True)
+        logger.error("failure alert email failed for %r", label, exc_info=True)
         return False
 
 
-def send_alert(subject: str, body: str) -> bool:
-    """Best-effort admin email. Never raises — an alert failure must not
-    fail the pipeline run it is reporting on."""
-    admin = _env("AMZ_UK_ALERT_ADMIN_EMAIL")
-    sender = _env("AMZ_UK_ALERT_FROM_EMAIL")
+def send_daily_report(text: str, subject: str) -> bool:
+    """Best-effort daily counts email to AMZ_UK_REPORT_EMAILS."""
+    return send_alert(subject, scrub(text), to=_env("AMZ_UK_REPORT_EMAILS", DEFAULT_REPORT_EMAILS))
+
+
+def send_alert(subject: str, body: str, to: str = "") -> bool:
+    """Best-effort email (``to`` = comma-separated; default the admin
+    address). Never raises — an alert failure must not fail the pipeline
+    run it is reporting on."""
+    admin = to or _env("AMZ_UK_ALERT_ADMIN_EMAIL", DEFAULT_REPORT_EMAILS)
+    sender = _env("AMZ_UK_ALERT_FROM_EMAIL", DEFAULT_SENDER)
     if not (admin and sender):
         logger.info("Alert email not configured; skipping: %s", subject)
         return False

@@ -279,6 +279,8 @@ function currentFilters() {
     qty: $("f-qty").value.trim(),
     order_from: $("f-order-from").value,
     order_to: $("f-order-to").value,
+    ship_from: $("f-ship-from").value,
+    ship_to: $("f-ship-to").value,
     updated_from: $("f-updated-from").value,
     updated_to: $("f-updated-to").value,
     line_count: $("f-line-count").value,
@@ -402,6 +404,7 @@ function orderRowHtml(o) {
       <td><button class="trace-toggle ${isOpen ? "open" : ""}" data-order-id="${o.amazon_order_id}" title="View order trace">${isOpen ? "▾" : "▸"}</button></td>
       <td class="order-id">${escapeHtml(o.amazon_order_id)}${o.is_prime ? ' <span class="prime" title="Prime">✓</span>' : ""}${o.refund_count > 0 ? ` <span class="pill other" title="${o.refund_count} refund(s) on this order">↩ Refunded</span>` : ""}</td>
       <td>${fmtDate(o.purchase_date)}</td>
+      <td>${o.shipment_date ? fmtDate(o.shipment_date) : "–"}</td>
       <td>${pill(o.order_status)}</td>
       <td class="num" title="${escapeHtml(o.titles)}">${o.line_count ?? "–"}</td>
       <td class="order-id">${escapeHtml(skuSummary(o))}</td>
@@ -410,7 +413,7 @@ function orderRowHtml(o) {
       <td>${sapCell(o)}</td>
     </tr>
     <tr class="trace-row ${isOpen ? "" : "hidden"}" data-trace-for="${o.amazon_order_id}">
-      <td colspan="9"></td>
+      <td colspan="10"></td>
     </tr>`;
 }
 
@@ -428,7 +431,7 @@ async function loadOrders() {
   const { orders } = data;
   $("orders-body").innerHTML = orders.length
     ? orders.map(orderRowHtml).join("")
-    : '<tr><td colspan="9" class="muted center">no orders match</td></tr>';
+    : '<tr><td colspan="10" class="muted center">no orders match</td></tr>';
 
   $("orders-body").querySelectorAll(".trace-toggle").forEach(btn =>
     btn.addEventListener("click", () => toggleTrace(btn.dataset.orderId)));
@@ -630,6 +633,7 @@ function downloadCsv(csv, filename) {
 const EXPORT_COLUMNS = [
   { label: "Order #", get: r => r.amazon_order_id },
   { label: "Order Date (UTC)", get: r => r.purchase_date },
+  { label: "Ship Date (UTC)", get: r => r.shipment_date },
   { label: "Status", get: r => r.order_status },
   { label: "SKU(s)", get: r => r.skus },
   { label: "Item(s)", get: r => r.titles },
@@ -668,7 +672,7 @@ function applyFilters() {
 $("apply-filters-btn").addEventListener("click", applyFilters);
 
 function clearFilters() {
-  ["f-q", "f-sku", "f-item", "f-qty", "f-order-from", "f-order-to", "f-updated-from", "f-updated-to"]
+  ["f-q", "f-sku", "f-item", "f-qty", "f-order-from", "f-order-to", "f-ship-from", "f-ship-to", "f-updated-from", "f-updated-to"]
     .forEach(id => { $(id).value = ""; });
   ["f-status", "f-line-count", "f-shipping", "f-discount", "f-tax-method", "f-sap-status", "f-has-refund"]
     .forEach(id => { $(id).value = ""; });

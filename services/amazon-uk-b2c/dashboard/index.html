@@ -100,6 +100,8 @@
           <label>Qty<input id="f-qty" type="number" min="1" placeholder="Exact qty…"></label>
           <label>Order from (UTC)<input id="f-order-from" type="date"></label>
           <label>Order to (UTC)<input id="f-order-to" type="date"></label>
+          <label>Ship from (UTC)<input id="f-ship-from" type="date"></label>
+          <label>Ship to (UTC)<input id="f-ship-to" type="date"></label>
           <label>Updated from (UTC)<input id="f-updated-from" type="date"></label>
           <label>Updated to (UTC)<input id="f-updated-to" type="date"></label>
           <label>Line count
@@ -158,12 +160,12 @@
             <thead>
               <tr>
                 <th class="trace-col"></th>
-                <th>Order #</th><th>Order date (UTC)</th><th>Status</th>
+                <th>Order #</th><th>Order date (UTC)</th><th>Ship date (UTC)</th><th>Status</th>
                 <th class="num">Items</th><th>SKU</th><th class="num">Qty</th>
                 <th>Updated (UTC)</th><th>SAP sync</th>
               </tr>
             </thead>
-            <tbody id="orders-body"><tr><td colspan="9" class="muted center">loading…</td></tr></tbody>
+            <tbody id="orders-body"><tr><td colspan="10" class="muted center">loading…</td></tr></tbody>
           </table>
         </div>
         <div class="pagination">

@@ -135,6 +135,11 @@ def _extract_breakdowns(raw_order_item: dict) -> dict:
     return result
 
 
+# U_AccountedBy on every invoice / credit memo (sap_client PATCHes U_* UDFs
+# after the create, so it lands on both document types).
+ACCOUNTED_BY = "Amazon UK API"
+
+
 def _rate(tax_amount: float, base_amount: float) -> int:
     """base_amount must be the taxable base Amazon actually applied tax to
     (post-discount), not the pre-discount price — confirmed live: dividing
@@ -362,6 +367,7 @@ def build_invoice_payload(order_rows: list[dict], hana_cursor, warehouse: str, c
         "NumAtCard": first["amazon_order_id"],
         "PayToCode": first.get("ship_country") or "",
         "U_TaxClctnMthd": _tax_collection_method(order_rows),
+        "U_AccountedBy": ACCOUNTED_BY,
         "Address": _full_ship_address(order_rows),
         "Comments": f'{first["amazon_order_id"]} - Amazon API',
         "DocumentLines": doc_lines,

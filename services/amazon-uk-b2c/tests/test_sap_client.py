@@ -149,3 +149,11 @@ def test_post_credit_note_error_carries_response_body(monkeypatch):
         assert e.response_body == {"error": {"message": {"value": "bad"}}}
     else:
         raise AssertionError("expected SapPostError")
+
+
+def test_accounted_by_is_amazon_uk_api_and_patched_as_udf():
+    from amazon_uk import credit_note_payload, invoice_payload
+    assert invoice_payload.ACCOUNTED_BY == "Amazon UK API"
+    assert credit_note_payload.ACCOUNTED_BY is invoice_payload.ACCOUNTED_BY
+    # U_* keys are the ones sap_client strips from the create and PATCHes
+    assert "U_AccountedBy".startswith("U_")

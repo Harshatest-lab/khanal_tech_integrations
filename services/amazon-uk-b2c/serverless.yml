@@ -53,10 +53,14 @@ provider:
   environment:
     STAGE: ${self:provider.stage}
     LOG_LEVEL: ${env:LOG_LEVEL, 'INFO'}
-    # SES crash alerts + per-job completion reports (fetched / posted / failed)
-    # — comma-separated recipients; unset FROM = emails skipped (logged only).
+    # SES crash alerts, posting-failure alerts and the daily counts report —
+    # comma-separated recipients.
     AMZ_UK_ALERT_ADMIN_EMAIL: ${env:AMZ_UK_ALERT_ADMIN_EMAIL, 'varshap@khanalfoods.com'}
-    AMZ_UK_ALERT_FROM_EMAIL: ${env:AMZ_UK_ALERT_FROM_EMAIL, ''}
+    # Daily counts (fetched / posted / failed) go here.
+    AMZ_UK_REPORT_EMAILS: ${env:AMZ_UK_REPORT_EMAILS, 'varshap@khanalfoods.com'}
+    # Posting failures: SAP item mapping + posting period locked only.
+    AMZ_UK_FAILURE_ALERT_EMAILS: ${env:AMZ_UK_FAILURE_ALERT_EMAILS, 'yaknaprabha@khanalfoods.com,finance@khanalfoods.com'}
+    AMZ_UK_ALERT_FROM_EMAIL: ${env:AMZ_UK_ALERT_FROM_EMAIL, 'varshap@khanalfoods.com'}
     AMZ_UK_SES_REGION: ${env:AMZ_UK_SES_REGION, 'ap-south-1'}
     # REQUIRED, no default (deploy fails if not exported): the scheduled post
     # run only invoices orders shipped on/after this date (YYYY-MM-DD). With
@@ -129,12 +133,12 @@ functions:
     handler: src.handlers.fetch_handler
     layers: [{ Ref: SharedLambdaLayer }]
     events:
-      # Daily. 22:00 UTC = 03:30 IST. Runs unattended — no manual seeding:
+      # Daily (when enabled in AWS). 22:00 UTC = 03:30 IST. Runs unattended — no manual seeding:
       # each run's window is capped (sync_amazonuk.MAX_WINDOW_HOURS), so a
       # first run or a gap after downtime drains over consecutive runs.
       - schedule:
           rate: cron(0 22 * * ? *)
-          enabled: true
+          enabled: false
           input: { mode: incremental }
 
   # Post every Shipped, not-yet-posted order to SAP B1 as an AR Invoice.
@@ -147,7 +151,7 @@ functions:
       # orders shipped on/after AMZ_UK_POSTING_CUTOFF_DATE.
       - schedule:
           rate: cron(0 23 * * ? *)
-          enabled: true
+          enabled: false
           input: { mode: post }
 
   # RELEASED refund transactions (Finances API) -> amazonuk.refund_events/
@@ -161,7 +165,7 @@ functions:
       # Daily, after invoice posting. 23:30 UTC = 05:00 IST.
       - schedule:
           rate: cron(30 23 * * ? *)
-          enabled: true
+          enabled: false
           input: { mode: incremental }
 
   # Post every not-yet-posted RELEASED refund to SAP B1 as an AR Credit
@@ -175,8 +179,21 @@ functions:
       # invoices use).
       - schedule:
           rate: cron(0 0 * * ? *)
-          enabled: true
+          enabled: false
           input: { mode: post }
+
+  # ONE daily email: fetched / posted / failed counts for the last 24 h, to
+  # AMZ_UK_REPORT_EMAILS. Read-only over the log tables, so it also reports
+  # when a job didn't run.
+  amazonUkDailyReport:
+    handler: src.handlers.daily_report_handler
+    timeout: 60
+    layers: [{ Ref: SharedLambdaLayer }]
+    events:
+      # Daily, after the credit-note post. 00:30 UTC = 06:00 IST.
+      - schedule:
+          rate: cron(30 0 * * ? *)
+          enabled: false
 
   # Cognito-protected READ-ONLY JSON API (GET only) — it triggers nothing;
   # fetch and post run only from their schedules above. The static frontend
