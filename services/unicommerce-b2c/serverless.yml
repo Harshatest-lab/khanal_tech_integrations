@@ -300,27 +300,6 @@ functions:
     # "dead" orders after HANA connectivity was found broken (2026-08-31).
     # Delete once the dead-order backlog is fully reconciled.
 
-  numatcardBackfill:
-    handler: src.handlers.numatcard_backfill_handler
-    layers: [{ Ref: SharedLambdaLayer }]
-    # No schedule -- invoked manually (aws lambda invoke) in batches via
-    # {"limit", "offset", "apply"}. Exists only to run this SAP call from
-    # AWS's network path, which is proven to work today (2026-08-20) while
-    # the same call from outside AWS consistently fails -- see
-    # numatcard_backfill.py's module docstring. Delete once the ~1243
-    # historical invoices are fully backfilled; not a recurring job.
-
-  ucFinancialsBackfill:
-    handler: src.handlers.uc_financials_backfill_handler
-    layers: [{ Ref: SharedLambdaLayer }]
-    # No schedule -- one-off ops tool, invoke manually
-    # ({"limit","offset","apply","channel_name"}) to recompute
-    # uc_total/uc_igst/etc on already-staged orders from their own stored
-    # order_json after a mappers.compute_uc_financials fix -- see
-    # uc_financials_backfill.py's module docstring. Delete once the
-    # AMAZON_FLEX historical backfill (2026-09-01 taxPercentage-fallback
-    # fix) is done; not a recurring job.
-
   debugBatchInventory:
     handler: src.handlers.debug_batch_inventory_handler
     layers: [{ Ref: SharedLambdaLayer }]
@@ -362,16 +341,6 @@ functions:
   # payload_json snapshot. Remove once fully verified.
   unicommerceAdminDebugGetInvoice:
     handler: src.handlers.admin_debug_get_invoice_handler
-    layers: [{ Ref: SharedLambdaLayer }]
-
-  # TEMPORARY -- invoke-only, one-off. Built 2026-09-01 to cancel + reset
-  # the historical Dogsee BOGO invoices that posted under the pre-fix
-  # zero_discount_floor_channels behavior (gross UnitPrice, no discount
-  # applied), so they repost fresh through the current pipeline. Real SAP
-  # writes (Invoices/Cancel) -- dry-run by default. Remove once the
-  # historical correction pass is done.
-  unicommerceDogseeBogoCorrection:
-    handler: src.handlers.dogsee_bogo_correction_handler
     layers: [{ Ref: SharedLambdaLayer }]
 
   unicommercePostCreditNotes:
