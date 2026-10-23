@@ -10,7 +10,8 @@ driven by a live HANA query instead of a local MariaDB replica.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Callable
 
 import psycopg
 
@@ -18,7 +19,9 @@ from . import client, hana_candidates, pod_upload, sap_client, store
 from .config import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_LOOKBACK_DAYS,
+    MAX_CONSECUTIVE_FAILURES,
     MAX_LOOKBACK_DAYS,
+    MIN_RUN_BUDGET_SECONDS,
     POD_STATUS_COMPLETED,
     POD_STATUS_FAILED,
     POD_STATUS_NO_WAYBILL,
@@ -32,7 +35,21 @@ from .utils import parse_delivery_date
 logger = logging.getLogger(__name__)
 
 
-def poll_and_process(days: int = DEFAULT_LOOKBACK_DAYS, batch_size: int = DEFAULT_BATCH_SIZE) -> dict[str, Any]:
+def lookback_days(configured: int, last_activity: datetime | None, now: datetime | None = None) -> int:
+    """How far back discovery must look. Normally the small configured window; but
+    if the pipeline has been silent longer than that (an outage, a broken deploy),
+    invoices created while it was down fall outside the window and would never be
+    found, so widen it to cover the whole silence. Capped at MAX_LOOKBACK_DAYS."""
+    if last_activity is None:
+        return min(configured, MAX_LOOKBACK_DAYS)
+    now = now or datetime.now(timezone.utc)
+    silent_days = (now - last_activity).days + 1
+    return min(max(configured, silent_days), MAX_LOOKBACK_DAYS)
+
+
+def poll_and_process(
+    days: int = DEFAULT_LOOKBACK_DAYS, batch_size: int = DEFAULT_BATCH_SIZE, time_left: Callable[[], float] | None = None
+) -> dict[str, Any]:
     """`days` only controls *discovery* of invoices new since the last run
     (a small rolling HANA window) — it no longer bounds what gets retried.
     What actually gets worked each run is the Postgres backlog (every open
@@ -43,17 +60,21 @@ def poll_and_process(days: int = DEFAULT_LOOKBACK_DAYS, batch_size: int = DEFAUL
     docs/architecture/PLATFORM_ARCHITECTURE.md §5 for why: a rolling
     discovery-only window used to also gate retries, so an invoice whose
     waybill/POD showed up after the window closed was silently dropped
-    forever."""
-    days = min(int(days), MAX_LOOKBACK_DAYS)
+    forever.
 
-    stats = {"days": days, "discovered": 0, "backlog": 0, "stale": 0, "completed": 0,
-              "pending_sap": 0, "no_waybill": 0, "failed": 0, "errors": []}
+    `time_left` returns the seconds the Lambda has left; when it runs low the
+    loop stops starting new invoices (see MIN_RUN_BUDGET_SECONDS) and the next
+    run carries on."""
+    stats = {"days": 0, "discovered": 0, "backlog": 0, "processed": 0, "stale": 0, "completed": 0,
+              "pending_sap": 0, "waybill_found": 0, "no_waybill": 0, "failed": 0, "out_of_time": False, "stopped_on_errors": False, "errors": []}
 
     with store.connect() as conn:
         stats["stale"] = store.mark_stale_if_expired(conn, STALE_AFTER_DAYS)
         if stats["stale"]:
             logger.info("Marked %d row(s) stale (open past the %d-day cutoff)", stats["stale"], STALE_AFTER_DAYS)
 
+        days = lookback_days(min(int(days), MAX_LOOKBACK_DAYS), store.last_activity(conn))
+        stats["days"] = days
         discovered = hana_candidates.find_candidates(days)
         stats["discovered"] = len(discovered)
         for c in discovered:
@@ -62,18 +83,32 @@ def poll_and_process(days: int = DEFAULT_LOOKBACK_DAYS, batch_size: int = DEFAUL
         backlog = store.list_open_candidates(conn, limit=batch_size)
         stats["backlog"] = len(backlog)
 
+        consecutive_failures = 0
         for row in backlog:
+            if time_left is not None and time_left() < MIN_RUN_BUDGET_SECONDS:
+                stats["out_of_time"] = True
+                logger.warning("Stopping with %d of %d backlog row(s) untouched: Lambda time is nearly up", len(backlog) - stats["processed"], len(backlog))
+                break
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                # Several unrelated invoices failing in a row means Safexpress or SAP is down, not that these
+                # invoices are bad. Stop, so the outage doesn't use up every row's retries; the next run tries again.
+                stats["stopped_on_errors"] = True
+                logger.error("Stopping after %d failures in a row; looks like an outage", consecutive_failures)
+                break
             doc_entry = row["doc_entry"]
+            stats["processed"] += 1
             try:
                 result = process_one_invoice(conn, doc_entry, row["doc_num"], row["series_name"])
                 stats[result] = stats.get(result, 0) + 1
+                consecutive_failures = 0
             except Exception as e:
+                consecutive_failures += 1
                 logger.error("Unhandled error processing DocEntry %s: %s", doc_entry, e, exc_info=True)
                 store.mark_failed(conn, doc_entry, str(e), POD_STATUS_FAILED)
                 stats["failed"] += 1
                 stats["errors"].append({"doc_entry": doc_entry, "error": str(e)[:300]})
 
-        logger.info("Processed %d/%d backlog row(s)", len(backlog), stats["backlog"])
+        logger.info("Processed %d/%d backlog row(s)", stats["processed"], stats["backlog"])
 
     return stats
 
@@ -143,7 +178,7 @@ def process_one_invoice(conn: psycopg.Connection, doc_entry: int, doc_num: int, 
 
         pod_data = client.get_pod_document(waybill_number, get_pod_base_url(), get_pod_auth_headers())
     except SafexpressPODNotFoundError:
-        return "no_waybill"  # waybill exists but no POD yet — stays in the backlog, retried next run
+        return "waybill_found"  # waybill exists but no POD yet — stays in the backlog, retried next run
 
     pod_url = pod_upload.upload_pod(pod_data, series_for_filename, doc_num, waybill_number)
 

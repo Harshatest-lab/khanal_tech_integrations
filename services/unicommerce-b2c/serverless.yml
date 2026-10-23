@@ -82,15 +82,6 @@ provider:
             - ssm:GetParameter
           Resource:
             - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.ucSettingsParamName}
-        # Amazon Flex (PRCJ) SP-API LWA credentials — one new param, reuses
-        # khanal-oms's already-working refresh token value rather than a
-        # second Amazon app registration. See
-        # docs/superpowers/specs/2026-08-20-amazon-flex-sap-pipeline-design.md.
-        - Effect: Allow
-          Action:
-            - ssm:GetParameter
-          Resource:
-            - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.flexLwaParamName}
         # Infra dashboard page: read-only introspection of this service's
         # own Lambdas/schedules/metrics -- no write actions, no other
         # service's resources. CloudWatch actions don't support
@@ -151,7 +142,6 @@ provider:
     DATABASE_URL: ${self:custom.currentDatabaseUrl}${self:custom.currentDbSearchPathSuffix}
     UC_API_PARAM_NAME: ${self:custom.ucApiParamName}
     UC_SETTINGS_PARAM_NAME: ${self:custom.ucSettingsParamName}
-    FLEX_LWA_PARAM_NAME: ${self:custom.flexLwaParamName}
     UC_ALERT_ADMIN_EMAIL: ${env:UC_ALERT_ADMIN_EMAIL, ''}
     UC_ALERT_FROM_EMAIL: ${env:UC_ALERT_FROM_EMAIL, ''}
     UC_SES_REGION: ${env:UC_SES_REGION, 'ap-south-1'}
@@ -178,6 +168,10 @@ provider:
     # with no CloudWatch error because the handler swallows the exception
     # before it reaches the Lambda runtime). See custom.sapVerifySslByStage.
     SAP_SL_VERIFY_SSL: ${self:custom.currentSapVerifySsl}
+    # Pins the self-signed Service Layer certificate above (khanal_shared.sap_sl.http): when set, only a server
+    # presenting exactly this certificate is trusted, so verification being off no longer means "trust anyone".
+    # Empty = not pinned (the previous behaviour). Comma-separate two fingerprints to overlap a renewal.
+    SAP_SL_PINNED_SHA256: ${env:UC_SAP_SL_PINNED_SHA256, ''}
     # Hardcoded, not ${env:HANA_USE_SSM, '1'} -- confirmed live 2026-08-31
     # that indirection was silently resolving to an empty string on every
     # deploy (deploy.yml never sets HANA_USE_SSM, unlike SAP_SL_USE_SSM
@@ -192,22 +186,6 @@ provider:
 custom:
   ucApiParamName: ${env:UC_API_PARAM_NAME, '/unicommerce/api_credentials'}
   ucSettingsParamName: ${env:UC_SETTINGS_PARAM_NAME, '/unicommerce/settings'}
-  flexLwaParamName: ${env:FLEX_LWA_PARAM_NAME, '/amazon-flex/lwa'}
-  # Stage-keyed, deliberately NOT following the same source-wide enabled:
-  # false convention every other function's schedule uses -- prod's
-  # unicommercePostInvoices cron is already ENABLED and channel-agnostic
-  # (post_ready_orders has no default channel filter), so enabling
-  # flexFetch on prod before SAP TEST posting is verified would let real
-  # PRCJ orders get swept into prod's next posting cycle within ~30-60min.
-  # Verified end-to-end against real SAP TEST (CFG bundles, NumAtCard
-  # dedup, tax-slab handling, posting-period/config fixes) and against
-  # real SAP PROD (19 real invoices posted, checked line-by-line, all
-  # correct) 2026-08-20 -- enabled on prod explicitly, by name, per the
-  # user's direct go-ahead, not by flipping a shared flag.
-  flexFetchEnabledByStage:
-    dev: true
-    prod: true
-  flexFetchScheduleEnabled: ${self:custom.flexFetchEnabledByStage.${self:provider.stage}, false}
   # Stage-keyed database URL -- only "prod" gets its own dedicated database
   # (UC_PROD_DATABASE_URL); every other stage keeps reading the shared
   # DATABASE_URL secret unchanged, same as every other service in this repo.
@@ -298,6 +276,9 @@ functions:
   unicommerceFetch:
     handler: src.handlers.fetch_handler
     layers: [{ Ref: SharedLambdaLayer }]
+    # Scheduled runs fire every 30 min and are idempotent on their own; the
+    # default 2 async retries just stack duplicate runs on top of a failure.
+    maximumRetryAttempts: 0
     events:
       # 30-min offset so future posting/credit-note/PO/inventory functions
       # (same cadence as the Frappe cron) don't collide — see
@@ -319,27 +300,6 @@ functions:
     # "dead" orders after HANA connectivity was found broken (2026-08-31).
     # Delete once the dead-order backlog is fully reconciled.
 
-  numatcardBackfill:
-    handler: src.handlers.numatcard_backfill_handler
-    layers: [{ Ref: SharedLambdaLayer }]
-    # No schedule -- invoked manually (aws lambda invoke) in batches via
-    # {"limit", "offset", "apply"}. Exists only to run this SAP call from
-    # AWS's network path, which is proven to work today (2026-08-20) while
-    # the same call from outside AWS consistently fails -- see
-    # numatcard_backfill.py's module docstring. Delete once the ~1243
-    # historical invoices are fully backfilled; not a recurring job.
-
-  ucFinancialsBackfill:
-    handler: src.handlers.uc_financials_backfill_handler
-    layers: [{ Ref: SharedLambdaLayer }]
-    # No schedule -- one-off ops tool, invoke manually
-    # ({"limit","offset","apply","channel_name"}) to recompute
-    # uc_total/uc_igst/etc on already-staged orders from their own stored
-    # order_json after a mappers.compute_uc_financials fix -- see
-    # uc_financials_backfill.py's module docstring. Delete once the
-    # AMAZON_FLEX historical backfill (2026-09-01 taxPercentage-fallback
-    # fix) is done; not a recurring job.
-
   debugBatchInventory:
     handler: src.handlers.debug_batch_inventory_handler
     layers: [{ Ref: SharedLambdaLayer }]
@@ -354,55 +314,10 @@ functions:
     # [int, ...]}) to pull real SAP AR Invoice totals (DocTotal/VatSum)
     # for a channel-level UC-vs-SAP reconciliation report.
 
-  flexFetch:
-    handler: src.handlers.flex_fetch_handler
-    layers: [{ Ref: SharedLambdaLayer }]
-    events:
-      # Once daily, not hourly like the UC fetch crons below -- Flex
-      # volume is ~15-20 PRCJ shipments/day (confirmed live 2026-08-20,
-      # 136 rows / 7 days), a single daily report-mode pull is plenty per
-      # the design doc; no need for amazon-us-b2c's hourly-incremental +
-      # daily-report dual mode, which exists for ~500-1000x higher volume.
-      # Stage-keyed enable (custom.flexFetchScheduleEnabled) -- dev only
-      # until SAP TEST posting has been verified end-to-end (see
-      # docs/superpowers/specs/2026-08-20-amazon-flex-sap-pipeline-design.md's
-      # phased build order and custom.flexFetchEnabledByStage above).
-      - schedule:
-          rate: cron(15 4 * * ? *)
-          enabled: ${self:custom.flexFetchScheduleEnabled}
-
-  flexRefunds:
-    handler: src.handlers.flex_refunds_handler
-    layers: [{ Ref: SharedLambdaLayer }]
-    events:
-      # Verified end-to-end against real SAP PROD 2026-08-21 (2 real
-      # refunds posted, DocEntry 12674/12676, correct BaseEntry/qty) --
-      # enabled on the same phased-rollout basis flexFetch/
-      # unicommercePostInvoices went through. Every 6h with a rolling
-      # 45-day window (handler default) -- Finances PostedDate lags the
-      # actual refund by up to 1-2 weeks, and the duplicate/amendment
-      # guards make re-processing the same window free.
-      #
-      # :12, not :22: every hourly cron in this file shares the same SAP
-      # SL session lock in SSM (amazon-us-b2c hit exactly this collision
-      # with its own 6h refund poster once before -- "exceeded max waits
-      # while is_locked"), and :22 turned out to already be occupied by
-      # unicommercePoGrn's own hourly :22/:52 slot -- a real collision
-      # every 6h, caught only after deploying and inspecting the live
-      # EventBridge rules, not before. Full picture of every existing
-      # hourly cron's minute: fetch :02/:32, postInvoices :07/:37,
-      # postCreditNotes :17/:47, poGrn :22/:52, recon :27/:57 -- leaving
-      # exactly two 5-min-clear gaps, at :12 (between :07 and :17) and
-      # :42 (between :37 and :47). :12 sits in the first.
-      - schedule:
-          rate: cron(12 */6 * * ? *)
-          enabled: ${self:custom.currentSchedulesEnabled}
-    # Does not handle CFG bundle or shipping-only refunds in v1 -- see
-    # flex_credit_note_payload.py.
-
   unicommercePostInvoices:
     handler: src.handlers.post_invoices_handler
     layers: [{ Ref: SharedLambdaLayer }]
+    maximumRetryAttempts: 0  # see unicommerceFetch above
     events:
       # Same 30-min offset pattern as the Frappe cron (7,37 * * * *).
       # Enabled 2026-08-12: Frappe's own post_invoices cron confirmed
@@ -428,19 +343,10 @@ functions:
     handler: src.handlers.admin_debug_get_invoice_handler
     layers: [{ Ref: SharedLambdaLayer }]
 
-  # TEMPORARY -- invoke-only, one-off. Built 2026-09-01 to cancel + reset
-  # the historical Dogsee BOGO invoices that posted under the pre-fix
-  # zero_discount_floor_channels behavior (gross UnitPrice, no discount
-  # applied), so they repost fresh through the current pipeline. Real SAP
-  # writes (Invoices/Cancel) -- dry-run by default. Remove once the
-  # historical correction pass is done.
-  unicommerceDogseeBogoCorrection:
-    handler: src.handlers.dogsee_bogo_correction_handler
-    layers: [{ Ref: SharedLambdaLayer }]
-
   unicommercePostCreditNotes:
     handler: src.handlers.post_credit_notes_handler
     layers: [{ Ref: SharedLambdaLayer }]
+    maximumRetryAttempts: 0  # see unicommerceFetch above
     events:
       # Same 30-min offset pattern as the Frappe cron (17,47 * * * *).
       # Enabled 2026-08-12: Frappe's own post_credit_notes cron was
@@ -454,6 +360,7 @@ functions:
   unicommercePoGrn:
     handler: src.handlers.pogrn_handler
     layers: [{ Ref: SharedLambdaLayer }]
+    maximumRetryAttempts: 0  # see unicommerceFetch above
     events:
       # Same 30-min offset pattern as the other flows. Enabled 2026-08-20,
       # EC-FG only (see pogrn.ENABLED_TO_WAREHOUSES) -- Phase A dry-run and
@@ -475,6 +382,7 @@ functions:
   unicommerceRecon:
     handler: src.handlers.recon_handler
     layers: [{ Ref: SharedLambdaLayer }]
+    maximumRetryAttempts: 0  # see unicommerceFetch above
     events:
       # Same 30-min offset pattern as the other flows. Read-only against
       # SAP (only writes to our own Postgres), so unlike pogrn there's
@@ -549,6 +457,8 @@ resources:
           - email
         AutoVerifiedAttributes:
           - email
+        AdminCreateUserConfig:
+          AllowAdminCreateUserOnly: true
         Policies:
           PasswordPolicy:
             MinimumLength: 10

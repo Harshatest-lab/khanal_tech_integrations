@@ -101,6 +101,22 @@ POD_STATUS_FAILED = "failed"
 # growing forever; a fresh HANA sighting (find_candidates) revives it.
 POD_STATUS_STALE = "stale"
 
+# A `failed` row (an unexpected error: a POD fetch that timed out, a Safexpress
+# outage) is retried like any open row until it has failed this many times, so
+# one bad moment no longer parks an invoice for good. ~20 tries at the 3-hourly
+# schedule is about 2.5 days, enough to outlast an outage but not to hammer a
+# row that is genuinely broken; those stay `failed` and show on the dashboard.
+MAX_FAILED_ATTEMPTS = 20
+
+# Stop starting new invoices when this little Lambda time is left, so a slow
+# batch ends cleanly instead of being killed mid-invoice (an upload done but
+# not yet recorded). The rest of the batch is picked up by the next run.
+MIN_RUN_BUDGET_SECONDS = 120
+
+# This many invoices failing back to back is treated as an outage (see
+# pod_service.poll_and_process) and ends the run early.
+MAX_CONSECUTIVE_FAILURES = 5
+
 # Rows still open (pending/waybill_found/no_waybill) past this age stop
 # being auto-retried every run — see store.mark_stale_if_expired.
 STALE_AFTER_DAYS = 120

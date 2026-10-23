@@ -24,7 +24,6 @@ import os
 import re
 import sys
 import traceback
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +32,7 @@ _SRC = Path(__file__).resolve().parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unicommerce import constants, credit_notes, dashboard_queries, fetch_sync, flex_fetch, flex_refunds, infra_status, numatcard_backfill, pogrn, post_invoices, recon, store
+from unicommerce import constants, credit_notes, dashboard_queries, fetch_sync, infra_status, pogrn, post_invoices, recon, store
 from unicommerce.alerts import send_alert
 
 # boto3 isn't a declared dev/CI dependency (only present in the real Lambda
@@ -152,47 +151,6 @@ def debug_find_invoice_by_order_handler(event, context):
     return _run("debug_find_invoice_by_order", _go)
 
 
-def numatcard_backfill_handler(event, context):
-    """{"limit": int? (default 10), "offset": int? (default 0), "apply": bool?
-    (default false -- dry-run only)}. One-off: backfill NumAtCard onto
-    already-posted historical invoices, batched. Not scheduled -- invoke
-    manually (aws lambda invoke), same network path the real posting
-    Lambda uses (confirmed live 2026-08-20 this SAP call fails from outside
-    AWS but succeeds from here)."""
-    ev = event or {}
-    limit = int(ev.get("limit") or 10)
-    offset = int(ev.get("offset") or 0)
-    apply = bool(ev.get("apply") or False)
-
-    def _go():
-        return numatcard_backfill.run_backfill(limit=limit, offset=offset, apply=apply)
-
-    return _run("numatcard_backfill", _go)
-
-
-def uc_financials_backfill_handler(event, context):
-    """{"limit": int? (default 200), "offset": int? (default 0), "apply":
-    bool? (default false -- dry-run only), "channel_name": str?}. One-off:
-    recompute uc_taxable_value/uc_cgst/uc_sgst/uc_igst/uc_total on
-    already-staged orders using the current mappers.compute_uc_financials
-    (see uc_financials_backfill.py's module docstring -- corrects historical
-    rows a fix to that function can't reach on its own, since posted orders
-    are never re-touched by the normal fetch flow). Batched, same
-    dry-run-by-default pattern as numatcard_backfill_handler."""
-    from unicommerce import uc_financials_backfill
-
-    ev = event or {}
-    limit = int(ev.get("limit") or 200)
-    offset = int(ev.get("offset") or 0)
-    apply = bool(ev.get("apply") or False)
-    channel_name = ev.get("channel_name")
-
-    def _go():
-        return uc_financials_backfill.run_backfill(limit=limit, offset=offset, apply=apply, channel_name=channel_name)
-
-    return _run("uc_financials_backfill", _go)
-
-
 def debug_batch_inventory_handler(event, context):
     """{"warehouse_code": str, "item_codes": [str, ...]} -- read-only HANA
     batch-inventory lookup (unicommerce.hana_access.
@@ -240,48 +198,6 @@ def debug_invoice_totals_handler(event, context):
         return {"rows": hana_access.bulk_invoice_totals_by_doc_entries(doc_entries)}
 
     return _run("debug_invoice_totals", _go)
-
-
-def flex_fetch_handler(event, context):
-    """{"lookback_days": int? (default 2)} -- pulls the Amazon SP-API
-    fulfilled-shipments report, filters to PRCJ, stages synthetic orders
-    into unicommerce_orders/order_lines (channel_name='AMAZON_FLEX',
-    pipeline_status='fetched'). Posting itself happens on the next
-    post_invoices_handler cycle, same as every other channel -- this
-    handler only fetches/stages."""
-    ev = event or {}
-    lookback_days = int(ev.get("lookback_days") or 2)
-
-    def _go():
-        return flex_fetch.fetch_flex_shipments(lookback_days=lookback_days)
-
-    return _run("flex_fetch", _go)
-
-
-def flex_refunds_handler(event, context):
-    """{"posted_after": "YYYY-MM-DDTHH:MM:SSZ"?, "posted_before": str?,
-    "dry_run": bool? (default false)} -- pulls Amazon Finances API refund
-    events, matches each to its already-posted AMAZON_FLEX invoice, and
-    posts a SAP AR Credit Note (WithoutInventoryMovement, same pattern as
-    amazon-us-b2c). posted_after defaults to a rolling last-45-days window
-    when omitted -- same default amazon-us-b2c's own scheduled refund
-    poster uses, since Finances PostedDate lags the actual refund by up
-    to 1-2 weeks and the duplicate/amendment guards make re-processing
-    the same window free. dry_run logs what would post without writing
-    to SAP or the local log table. v1 does not handle CFG bundle refunds
-    or shipping-only refunds -- see flex_credit_note_payload.py."""
-    ev = event or {}
-    posted_after = ev.get("posted_after") or (
-        datetime.now(timezone.utc) - timedelta(days=45)
-    ).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    def _go():
-        with store.connect() as conn:
-            return flex_refunds.post_flex_refunds(
-                conn, posted_after=posted_after, posted_before=ev.get("posted_before"), dry_run=bool(ev.get("dry_run") or False),
-            )
-
-    return _run("flex_refunds", _go)
 
 
 def post_invoices_handler(event, context):
@@ -416,34 +332,6 @@ def admin_debug_get_invoice_handler(event, context):
         return sap_client.get_invoice_by_doc_entry(int(doc_entry))
 
     return _run("admin_debug_get_invoice", _go)
-
-
-def dogsee_bogo_correction_handler(event, context):
-    """TEMPORARY, one-off. {"corrections": [{"uniware_id": str, "doc_entry":
-    int}, ...], "apply": bool? (default false -- dry-run only)}. Cancels
-    and resets each already-posted invoice that still shows the
-    pre-2026-09-01 zero_discount_floor_channels bug (a BOGO free line
-    posted at gross with no discount, see
-    unicommerce.dogsee_bogo_correction's module docstring), so it reposts
-    fresh through the current (fixed) pipeline on the next scheduled
-    post_invoices run. Re-verifies each invoice's live SAP state
-    immediately before touching anything -- an already-corrected or
-    never-broken row is skipped, not re-cancelled. Dry-run by default,
-    same pattern as numatcard_backfill_handler. Remove once the historical
-    Dogsee correction pass is done."""
-    from unicommerce import dogsee_bogo_correction
-
-    ev = event or {}
-    corrections = ev.get("corrections") or []
-    apply = bool(ev.get("apply") or False)
-    if not corrections:
-        return {"error": "corrections is required"}
-
-    def _go():
-        with store.connect() as conn:
-            return dogsee_bogo_correction.run(conn, corrections, apply=apply)
-
-    return _run("dogsee_bogo_correction", _go)
 
 
 def post_credit_notes_handler(event, context):

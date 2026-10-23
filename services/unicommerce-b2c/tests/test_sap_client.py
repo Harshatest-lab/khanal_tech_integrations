@@ -138,7 +138,7 @@ def test_find_invoice_raises_when_every_path_fails(monkeypatch):
 def test_find_credit_note_uses_hana_via_base_doc_entry(monkeypatch):
     seen = {}
 
-    def fake_hana(base_doc_entry):
+    def fake_hana(base_doc_entry, base_lines=None):
         seen["base_doc_entry"] = base_doc_entry
         return {"doc_entry": 5, "doc_num": 6, "doc_tax_amount": 0.5}
 
@@ -147,6 +147,21 @@ def test_find_credit_note_uses_hana_via_base_doc_entry(monkeypatch):
     result = sap_client.find_credit_note_by_return_id("RET1", base_doc_entry=59967)
     assert result == {"doc_entry": 5, "doc_num": 6, "doc_tax_amount": 0.5}
     assert seen["base_doc_entry"] == 59967
+
+
+def test_find_credit_note_passes_base_lines_so_a_sibling_return_is_not_mistaken_for_a_duplicate(monkeypatch):
+    seen = {}
+
+    def fake_hana(base_doc_entry, base_lines=None):
+        seen.update(base_doc_entry=base_doc_entry, base_lines=base_lines)
+        return None
+
+    monkeypatch.setattr(hana_access, "find_credit_note_by_base_invoice", fake_hana)
+    monkeypatch.setattr(sap_client, "_request", lambda *a, **k: (200, {"value": []}))
+
+    sap_client.find_credit_note_by_return_id("RET2", base_doc_entry=59967, base_lines=[2, 3])
+
+    assert seen == {"base_doc_entry": 59967, "base_lines": [2, 3]}
 
 
 def test_find_credit_note_skips_hana_without_base_doc_entry(monkeypatch):

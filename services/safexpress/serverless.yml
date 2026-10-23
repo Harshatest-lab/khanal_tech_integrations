@@ -124,3 +124,38 @@ functions:
           rate: cron(50 5 * * ? *)     # daily retry sweep for pending_sap rows
           enabled: ${self:custom.currentScheduleEnabled}
           input: { mode: retry_pending_sap }
+
+resources:
+  Conditions:
+    # The email is optional: with no SAFEXPRESS_ALERT_EMAIL the alarm still
+    # shows in CloudWatch, it just has nobody to tell.
+    HasAlertEmail: { "Fn::Not": [{ "Fn::Equals": ["${env:SAFEXPRESS_ALERT_EMAIL, ''}", ""] }] }
+  Resources:
+    # A crashing run used to go unnoticed for three weeks (every poll died on a
+    # missing HANA setting). Any failed invocation now raises this alarm. The
+    # handler re-raises on a crash, so Lambda counts it as an Error.
+    SafexpressAlertsTopic:
+      Type: AWS::SNS::Topic
+    SafexpressAlertsSubscription:
+      Type: AWS::SNS::Subscription
+      Condition: HasAlertEmail
+      Properties:
+        TopicArn: { Ref: SafexpressAlertsTopic }
+        Protocol: email
+        Endpoint: ${env:SAFEXPRESS_ALERT_EMAIL, ''}
+    SafexpressTrackErrorsAlarm:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmDescription: The safexpress poll or retry run crashed. Check the function's CloudWatch logs.
+        Namespace: AWS/Lambda
+        MetricName: Errors
+        Dimensions:
+          - Name: FunctionName
+            Value: { Ref: SafexpressTrackLambdaFunction }
+        Statistic: Sum
+        Period: 10800 # one poll interval (3h)
+        EvaluationPeriods: 1
+        Threshold: 1
+        ComparisonOperator: GreaterThanOrEqualToThreshold
+        TreatMissingData: notBreaching
+        AlarmActions: [{ Ref: SafexpressAlertsTopic }]

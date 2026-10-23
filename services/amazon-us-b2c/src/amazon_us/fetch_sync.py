@@ -186,6 +186,8 @@ def _process_orders_report(conn, content: str, mapping: dict[str, str]) -> dict:
     cleanly with whatever chunks a prior run already completed."""
     totals = {"orders": 0, "created": 0, "updated": 0, "refreshed": 0, "ready": 0}
     mfn_ship_dates: dict[str, str] = {}
+    for oid, rows in report_parser.rows_by_order(content).items():
+        store.save_raw(conn, "orders_report_rows", oid, rows)
     orders = report_parser.parse_orders_report(content)
     totals["orders"] += len(orders)
     for header in orders.values():
@@ -376,6 +378,7 @@ def _stage_from_orders_api(
         existing = store.get_order_stage_and_status(conn, oid)
         existing_stage, existing_status = existing if existing else (None, None)
 
+        store.save_raw(conn, "order", oid, raw)
         if existing_stage in ("posting", "posted"):
             store.upsert_order(
                 conn,
@@ -411,6 +414,7 @@ def _stage_from_orders_api(
             logger.warning("Skipping order %s (getOrderItems still throttled): %s", oid, e)
             counts["throttled_skip"] = counts.get("throttled_skip", 0) + 1
             continue
+        store.save_raw(conn, "order_items", oid, items_raw)
         lines = _lines_from_items(items_raw)
         skus = [line["seller_sku"] for line in lines]
         unmapped = sorted({s for s in skus if s not in mapping})

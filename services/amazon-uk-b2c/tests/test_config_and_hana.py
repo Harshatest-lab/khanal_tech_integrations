@@ -65,3 +65,23 @@ def test_allocate_batches_fefo_not_batch_tracked():
             return []
 
     assert hana_client.allocate_batches_fefo(FakeCursor(), "ITEM1", 5, "AMZ-FBA") == []
+
+
+def test_schema_prefers_ssm_over_env(monkeypatch):
+    from types import SimpleNamespace
+
+    from amazon_uk import hana_client
+
+    monkeypatch.setenv("HANA_SCHEMA", "KFL_UK")
+    monkeypatch.setattr(
+        hana_client, "get_hana_params", lambda: SimpleNamespace(schema="UK_TEST_16092026")
+    )
+    assert hana_client._schema() == "UK_TEST_16092026"
+
+
+def test_schema_falls_back_to_env(monkeypatch):
+    from amazon_uk import hana_client
+
+    monkeypatch.setenv("HANA_SCHEMA", "FROM_ENV")
+    monkeypatch.setattr(hana_client, "get_hana_params", lambda: None)
+    assert hana_client._schema() == "FROM_ENV"

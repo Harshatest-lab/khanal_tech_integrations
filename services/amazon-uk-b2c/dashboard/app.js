@@ -492,7 +492,43 @@ async function toggleTrace(orderId) {
 
 function renderTraceInto(orderId, data) {
   const row = document.querySelector(`tr.trace-row[data-trace-for="${CSS.escape(orderId)}"]`);
-  if (row) row.querySelector("td").innerHTML = renderTrace(data);
+  if (!row) return;
+  row.querySelector("td").innerHTML = renderTrace(data);
+  const postBtn = row.querySelector(".post-sap-btn");
+  if (postBtn) postBtn.addEventListener("click", () => postOrderToSap(orderId, postBtn));
+}
+
+// Queue ONE order to SAP (POST /api/orders/{id}/post -> 202), then poll the
+// trace until the posting row flips to posted/failed (or ~3 min pass).
+async function postOrderToSap(orderId, btn) {
+  if (!confirm(`Post order ${orderId} to SAP as an AR Invoice?`)) return;
+  const status = btn.parentElement.querySelector(".post-sap-status");
+  btn.disabled = true;
+  status.textContent = "Queuing…";
+  try {
+    const res = await apiFetch(`/api/orders/${encodeURIComponent(orderId)}/post`, { method: "POST" });
+    const body = await res.json().catch(() => ({}));
+    if (res.status !== 202) throw new Error(body.error || `failed (${res.status})`);
+    status.textContent = "Posting to SAP…";
+    const before = traceCache[orderId]?.sap?.posted_at || null;
+    for (let i = 0; i < 45; i++) {
+      await new Promise(r => setTimeout(r, 4000));
+      const tr = await apiFetch(`/api/orders/${encodeURIComponent(orderId)}/trace`);
+      const data = await tr.json();
+      if (!tr.ok) continue;
+      traceCache[orderId] = data;
+      const sap = data.sap;
+      if (sap && (sap.status === "posted" || sap.posted_at !== before)) {
+        renderTraceInto(orderId, data);
+        loadOrders();
+        return;
+      }
+    }
+    status.textContent = "Still processing — refresh the trace in a minute.";
+  } catch (e) {
+    status.textContent = `Error: ${e.message}`;
+    btn.disabled = false;
+  }
 }
 
 function kv(k, v) {
@@ -552,6 +588,9 @@ function renderTrace(d) {
       : `<span class="pill Canceled">Failed</span> <span class="small">${escapeHtml(sap.error)}</span>`;
 
   const reqPayload = d.sap_request && d.sap_request.payload;
+  // Same eligibility the server enforces: Shipped, not yet posted, and a
+  // buildable payload (otherwise the post would just record a failure).
+  const canPostToSap = d.order_status === "Shipped" && !(sap && sap.status === "posted") && !!reqPayload;
 
   return `
     <div class="trace-panel">
@@ -574,6 +613,11 @@ function renderTrace(d) {
 
       <h3>SAP sync</h3>
       <div class="trace-card" style="max-width:420px">${sapStatusHtml}</div>
+      ${canPostToSap ? `
+      <div style="margin-top:8px">
+        <button class="btn primary small post-sap-btn">Post to SAP</button>
+        <span class="small muted post-sap-status"></span>
+      </div>` : ""}
 
       <h3>Refunds</h3>
       ${d.refunds && d.refunds.length ? `

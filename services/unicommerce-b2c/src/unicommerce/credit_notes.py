@@ -15,6 +15,7 @@ carried over unfixed since this store layer is being written fresh.
 
 from __future__ import annotations
 
+import json
 import logging
 
 from unicommerce import constants, returns, sap_client, sap_payload, store
@@ -140,6 +141,28 @@ def _prepare_credit_note(conn, cn: dict, settings) -> bool | str:
     return True
 
 
+def _cn_base_lines(cn: dict | None) -> list[int] | None:
+    """Sorted, distinct invoice lines (SAP BaseLine) this return reverses, from
+    its resolved items; None when none are resolved so the duplicate guard
+    falls back to matching on the invoice alone."""
+    raw = (cn or {}).get("items_json")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = None
+    lines: set[int] = set()
+    for item in raw if isinstance(raw, list) else []:
+        base_line = (item or {}).get("sapBaseLine")
+        if base_line in (None, ""):
+            continue
+        try:
+            lines.add(int(base_line))
+        except (TypeError, ValueError):
+            continue
+    return sorted(lines) or None
+
+
 def _post_credit_note(conn, uc_return_id: str, settings) -> None:
     cn = store.get_cn(conn, uc_return_id)
     parent = store.get_order(conn, cn["uc_order_id"]) if cn and cn.get("uc_order_id") else None
@@ -149,7 +172,9 @@ def _post_credit_note(conn, uc_return_id: str, settings) -> None:
     # could record the DocEntry.
     try:
         existing = sap_client.find_credit_note_by_return_id(
-            uc_return_id, base_doc_entry=parent.get("sap_ar_invoice_docentry") if parent else None
+            uc_return_id,
+            base_doc_entry=parent.get("sap_ar_invoice_docentry") if parent else None,
+            base_lines=_cn_base_lines(cn),
         )
         if existing:
             store.mark_cn_posted(
@@ -175,7 +200,9 @@ def _post_credit_note(conn, uc_return_id: str, settings) -> None:
             # SAP may have processed it -- on the next retry the
             # idempotency guard above will detect the existing doc.
             store.mark_cn_failed(conn, uc_return_id, f"[TIMEOUT - may be posted in SAP] {err}", settings.max_retry_attempts)
+            store.record_attempt(conn, "credit_note", uc_return_id, "deferred", request=payload, error=err)
             return
+        store.record_attempt(conn, "credit_note", uc_return_id, "failed", request=payload, error=err)
         raise
 
     doc_entry = str(result.get("doc_entry") or "")
@@ -224,6 +251,10 @@ def _post_credit_note(conn, uc_return_id: str, settings) -> None:
             f"line U_Order={mismatched_line_order!r} expected {uc_order_id!r}) -- not trusting it",
             settings.max_retry_attempts,
         )
+        store.record_attempt(
+            conn, "credit_note", uc_return_id, "failed", request=payload, response=response_body,
+            error="SAP's reply did not describe this return; not trusted", sap_doc_entry=doc_entry,
+        )
         logger.error(
             "_post_credit_note(%s): POST response mismatch, DocEntry=%s Comments=%r line U_Order=%r -- "
             "treating as failed, not recording",
@@ -232,6 +263,8 @@ def _post_credit_note(conn, uc_return_id: str, settings) -> None:
         return
 
     store.mark_cn_posted(conn, uc_return_id, doc_entry, doc_num, cn.get("uc_order_id") if cn else None)
+    store.save_cn_sap_exchange(conn, uc_return_id, payload, response_body)
+    store.record_attempt(conn, "credit_note", uc_return_id, "posted", request=payload, response=response_body, sap_doc_entry=doc_entry)
 
     try:
         # SAP Service Layer POST returns the full document -- reuse it

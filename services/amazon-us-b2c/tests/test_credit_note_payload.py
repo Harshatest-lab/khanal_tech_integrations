@@ -121,7 +121,7 @@ def test_zero_qty_refund_is_skipped_with_a_reason_not_silently_dropped():
     # quantity at the order's unit price — nothing to reverse on the item
     # line, but this must show up in `skipped`, not vanish silently (that
     # looked like an unexplained "no postable lines: []" to Finance).
-    event = _event(principal_amount=0.0)
+    event = _event(principal_amount=0.0, tax_amount=0.0, shipping_amount=0.0, shipping_tax_amount=0.0)
     payload, skipped = build_credit_note_payload(
         _order(), event, MAPPING, 4242, INVOICE_LINES, _resolve, _no_bom
     )
@@ -129,6 +129,28 @@ def test_zero_qty_refund_is_skipped_with_a_reason_not_silently_dropped():
     assert len(skipped) == 1
     assert skipped[0]["seller_sku"] == "SKU-A"
     assert "rounds to <" in skipped[0]["reason"]
+
+
+def test_shipping_only_refund_posts_shipping_and_tax_service_lines():
+    # Real case (FBA_DC_M_1P, Oct 2026): Amazon refunded only shipping + its tax, $0 on the item. Dropping the
+    # whole CN left that money unreversed in SAP.
+    event = _event(principal_amount=0.0, tax_amount=0.0, shipping_amount=-2.49, shipping_tax_amount=-0.10)
+    payload, skipped = build_credit_note_payload(
+        _order(), event, MAPPING, 4242, INVOICE_LINES, _resolve, _no_bom
+    )
+    assert payload is not None
+    lines = payload["DocumentLines"]
+    assert [round(l["UnitPrice"], 2) for l in lines] == [0.10, 2.49]  # tax, shipping
+    assert all("BaseEntry" not in l for l in lines)  # service lines, not linked to an item row
+    assert skipped[0]["kind"] == "zero_qty"  # the zero item refund is still reported
+
+
+def test_shipping_is_not_posted_alone_when_an_item_failed_for_another_reason():
+    event = _event(seller_sku="UNMAPPED", shipping_amount=-2.49)
+    payload, skipped = build_credit_note_payload(
+        _order(), event, MAPPING, 4242, INVOICE_LINES, _resolve, _no_bom
+    )
+    assert payload is None  # an unmapped SKU needs attention, not a CN that hides it
 
 
 def test_ship_to_code_matches_order_state():

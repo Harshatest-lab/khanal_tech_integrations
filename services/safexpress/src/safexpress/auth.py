@@ -85,7 +85,7 @@ def _renew_token(creds: dict[str, str]) -> dict[str, Any]:
     try:
         resp = requests.post(
             creds["login_url"], headers=headers, data=payload,
-            timeout=DEFAULT_TIMEOUT_SECONDS, verify=False,
+            timeout=DEFAULT_TIMEOUT_SECONDS,
         )
         resp.raise_for_status()
         body = resp.json()

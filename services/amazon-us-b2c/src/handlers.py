@@ -275,6 +275,21 @@ def post_invoices_handler(event, context):
                 if dry_run:
                     return {"dry_run": True, "cutoff_date": cutoff, **store.count_precutoff_unposted(conn, cutoff)}
                 return {"dry_run": False, "cutoff_date": cutoff, **store.delete_precutoff_unposted(conn, cutoff)}
+        if ev.get("mode") in ("list_period_locks", "lock_period", "unlock_period"):
+            # Posting-period lock admin, invoked by the dashboards backend (which has no write access to this DB).
+            # {"mode": "lock_period"|"unlock_period", "period": "YYYY-MM", "actor": email, "note": str?}
+            import re
+
+            with store.connect() as conn:
+                if ev["mode"] == "list_period_locks":
+                    return {"items": store.list_period_locks(conn)}
+                period = str(ev.get("period") or "").strip()
+                if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", period):
+                    raise ValueError("period must be 'YYYY-MM'")
+                actor = str(ev.get("actor") or "unknown")
+                if ev["mode"] == "lock_period":
+                    return store.lock_period(conn, period, actor, str(ev.get("note") or "").strip())
+                return store.unlock_period(conn, period, actor)
         if ev.get("mode") == "list_ship_to_codes":
             from amazon_us import sap_client
             return {"card_code": constants.SAP_CARD_CODE, "ship_to_codes": sap_client.list_ship_to_addresses(constants.SAP_CARD_CODE)}
@@ -865,6 +880,30 @@ def _invoke_async(function_name_suffix: str, payload: dict) -> None:
     )
 
 
+# What the dashboard may ask the fetch/recon Lambdas to do. The other modes
+# (seed_watermark skips every unsynced order by moving the watermark to now,
+# backfill burns SP-API quota, ...) are ops tools: invoke the Lambda directly.
+_DASHBOARD_SYNC_MODES = ("incremental", "report")
+_DASHBOARD_RECON_MODES = ("invariants", "mtr")
+_DASHBOARD_MAX_BATCH = 200
+# Keys this service writes into the recon bucket, and so may hand out.
+_RECON_DOWNLOAD_PREFIXES = ("recon/", "recon-export/", "inventory-export/")
+
+
+def _bounded_batch(raw: str | None, default: int) -> int:
+    """Batch size from the query string: a garbage value falls back to the
+    default, and nothing above _DASHBOARD_MAX_BATCH is honoured."""
+    try:
+        value = int(raw) if raw else default
+    except (TypeError, ValueError):
+        value = default
+    return max(1, min(value, _DASHBOARD_MAX_BATCH))
+
+
+def _valid_recon_download_key(key: str) -> bool:
+    return key.startswith(_RECON_DOWNLOAD_PREFIXES) and ".." not in key.split("/")
+
+
 def dashboard_handler(event, context):
     method = _http_method(event)
     if method == "OPTIONS":
@@ -876,6 +915,8 @@ def dashboard_handler(event, context):
     try:
         if path.endswith("/v1/amazon/sync-orders") and method == "POST":
             mode = q.get("mode") or "incremental"
+            if mode not in _DASHBOARD_SYNC_MODES:
+                return _json_response(400, {"error": f"mode must be one of {', '.join(_DASHBOARD_SYNC_MODES)}"})
             payload = {"mode": mode}
             if q.get("from_date"):
                 payload["from_date"] = q["from_date"]
@@ -894,7 +935,7 @@ def dashboard_handler(event, context):
             return _json_response(202, {"triggered": "amazonFbaShipSync"})
 
         if path.endswith("/v1/amazon/post-ready") and method == "POST":
-            payload = {"limit": int(q.get("limit") or post_invoices.DEFAULT_LIMIT)}
+            payload = {"limit": _bounded_batch(q.get("limit"), post_invoices.DEFAULT_LIMIT)}
             if q.get("from_date"):
                 payload["ship_date_from"] = q["from_date"]
             if q.get("to_date"):
@@ -904,6 +945,8 @@ def dashboard_handler(event, context):
 
         if path.endswith("/v1/amazon/run-recon") and method == "POST":
             mode = q.get("mode") or "invariants"
+            if mode not in _DASHBOARD_RECON_MODES:
+                return _json_response(400, {"error": f"mode must be one of {', '.join(_DASHBOARD_RECON_MODES)}"})
             payload = {"mode": mode}
             for key in ("s3_bucket", "s3_key", "period_from", "period_to"):
                 if q.get(key):
@@ -929,7 +972,7 @@ def dashboard_handler(event, context):
 
         if path.endswith("/v1/amazon/retry-invoices") and method == "POST":
             with store.connect() as conn:
-                limit = int(q.get("limit") or 50)
+                limit = _bounded_batch(q.get("limit"), 50)
                 return _json_response(200, post_invoices.retry_failed_orders(conn, limit=limit))
 
         if path.endswith("/v1/amazon/retry-cn") and method == "POST":
@@ -947,7 +990,7 @@ def dashboard_handler(event, context):
 
         if path.endswith("/v1/amazon/recon-download") and method == "GET":
             key = (q.get("key") or "").strip()
-            if not key.startswith("recon/"):
+            if not _valid_recon_download_key(key):
                 return _json_response(400, {"error": "invalid key"})
             import boto3
 

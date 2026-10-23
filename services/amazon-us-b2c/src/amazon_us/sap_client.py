@@ -34,7 +34,21 @@ logger = logging.getLogger(__name__)
 
 
 class SapPostError(Exception):
-    """SAP B1 rejected a document. Message carries SAP's error text."""
+    """SAP B1 rejected a document. Message carries SAP's error text.
+
+    `payload` and `response` keep what was sent and SAP's raw answer, so the posting code can store them with
+    the failed attempt instead of only the one-line message."""
+
+    def __init__(self, message: str, *, payload: dict | None = None, response: Any = None):
+        super().__init__(message)
+        self.payload = payload
+        self.response = response
+
+
+def error_response(exc: Exception) -> dict | None:
+    """SAP's raw answer to a rejected post, shaped for the attempt logs; None for errors that are not a rejection."""
+    response = getattr(exc, "response", None)
+    return {"error": response} if response else None
 
 
 # SAP error -5002, "One of the base documents has already been closed":
@@ -113,10 +127,10 @@ def _post_document(endpoint: str, payload: dict, label: str) -> dict:
     try:
         status, body = _request("POST", endpoint, body=payload)
     except RuntimeError as e:
-        raise SapPostError(f"SAP {label} failed: {_sap_error_text(str(e))}") from e
+        raise SapPostError(f"SAP {label} failed: {_sap_error_text(str(e))}", payload=payload, response=str(e)[:4000]) from e
 
     if status not in (200, 201) or not isinstance(body, dict) or not body.get("DocEntry"):
-        raise SapPostError(f"SAP {label} failed: HTTP {status}: {str(body)[:500]}")
+        raise SapPostError(f"SAP {label} failed: HTTP {status}: {str(body)[:500]}", payload=payload, response=body)
     return {
         "doc_entry": int(body["DocEntry"]),
         "doc_num": int(body.get("DocNum") or 0),

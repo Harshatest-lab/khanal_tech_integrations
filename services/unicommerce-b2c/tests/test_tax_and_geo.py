@@ -80,6 +80,28 @@ def test_get_tax_code_raises_when_unmapped():
         assert "18_intra" in str(e)
 
 
+def test_get_tax_code_uses_origin_state_map_when_configured():
+    settings = UnicommerceSettings(
+        tax_code_map={"18_intra": "KACS18", "18_inter": "KAIG18", "0_intra": "KACS0", "0_inter": "KAIG0"},
+        tax_code_map_by_state={"HR": {"18_intra": "HRCS18", "18_inter": "HRIG18", "0_inter": "HRIG0"}},
+    )
+    assert get_tax_code(18, "HR", "HR", settings) == "HRCS18"
+    assert get_tax_code(18, "DL", "HR", settings) == "HRIG18"
+    assert get_tax_code(0, "DL", "HR", settings) == "HRIG0"
+    # state map lacking a key falls back to the flat map
+    assert get_tax_code(0, "HR", "HR", settings) == "KACS0"
+    # origin without a state map keeps the default codes
+    assert get_tax_code(18, "KA", "KA", settings) == "KACS18"
+
+
+def test_default_origin_covers_pnq3_and_flipkart_fa_channels():
+    settings = UnicommerceSettings(origin_state_code="KA")
+    assert resolve_origin_state_code("AMAZON_FBA_IN_PNQ3", settings) == "MH"
+    assert resolve_origin_state_code("FLIPKART_FA_MH_BHIWANDI", settings) == "MH"
+    assert resolve_origin_state_code("FLIPKART_FA_HR_SANPKA", settings) == "HR"
+    assert resolve_origin_state_code("FLIPKART_FA_KA_MALUR_BTS", settings) == "KA"
+
+
 def test_compute_tax_from_line_exclusive():
     # 100 * 2 qty at 18% ex-tax = 200 + 36 tax
     assert compute_tax_from_line(100, 2, 18, tax_inclusive=False) == 36.0

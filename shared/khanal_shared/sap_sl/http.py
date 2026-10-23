@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import functools
+import hashlib
+import http.client
 import http.cookiejar
 import json
+import logging
 import os
+import re
 import ssl
 from http.cookiejar import Cookie
 from typing import Any
@@ -24,10 +29,84 @@ def _sap_sl_ssl_context() -> ssl.SSLContext:
     return ssl.create_default_context()
 
 
+def _pinned_fingerprints() -> frozenset[str]:
+    """SHA-256 fingerprints (hex; colons, spaces and case ignored; comma-separated for a renewal overlap) the
+    Service Layer's certificate must match. Empty = not pinned.
+
+    A malformed value raises rather than being ignored: a typo that silently left the connection unpinned
+    would look exactly like a working pin."""
+    raw = os.environ.get("SAP_SL_PINNED_SHA256") or ""
+    pins: set[str] = set()
+    for part in raw.split(","):
+        pin = re.sub(r"[\s:]", "", part).lower()
+        if not pin:
+            continue
+        if not re.fullmatch(r"[0-9a-f]{64}", pin):
+            raise ValueError("SAP_SL_PINNED_SHA256 must be comma-separated SHA-256 fingerprints (64 hex characters each)")
+        pins.add(pin)
+    return frozenset(pins)
+
+
+logger = logging.getLogger(__name__)
+
+# Fingerprints already reported by observe-only mode, so a busy Lambda logs each certificate once, not per request.
+_observed_fingerprints: set[str] = set()
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """Completes the TLS handshake, then refuses the connection unless the server's certificate is one we pinned.
+
+    With no pins it only observes: it lets the connection through (verification is already off in that mode) and
+    logs the certificate's fingerprint once. The Service Layer only answers from AWS, so this is how the fingerprint
+    to pin gets read from the real network path."""
+
+    def __init__(self, *args: Any, pins: frozenset[str], **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._pins = pins
+
+    def connect(self) -> None:
+        super().connect()
+        der = self.sock.getpeercert(binary_form=True)
+        digest = hashlib.sha256(der).hexdigest() if der else ""
+        if not self._pins:
+            if digest and digest not in _observed_fingerprints:
+                _observed_fingerprints.add(digest)
+                logger.warning(
+                    "SAP Service Layer certificate sha256=%s -- not pinned. Set SAP_SL_PINNED_SHA256 to this value "
+                    "(after checking it against the certificate on the SAP server) to refuse any other certificate.",
+                    digest,
+                )
+            return
+        if digest not in self._pins:
+            self.close()
+            raise ssl.SSLError(f"SAP Service Layer certificate does not match the pinned fingerprint (got {digest[:16] or 'none'}...)")
+
+
+class _PinnedHTTPSHandler(HTTPSHandler):
+    def __init__(self, context: ssl.SSLContext, pins: frozenset[str]) -> None:
+        super().__init__(context=context)
+        self._pins = pins
+
+    def https_open(self, req: Request) -> Any:
+        return self.do_open(functools.partial(_PinnedHTTPSConnection, pins=self._pins), req, context=self._context)
+
+
 def build_sap_cookie_opener_with_jar() -> tuple[Any, http.cookiejar.CookieJar]:
-    ctx = _sap_sl_ssl_context()
+    pins = _pinned_fingerprints()
     jar = http.cookiejar.CookieJar()
-    opener = build_opener(HTTPCookieProcessor(jar), HTTPSHandler(context=ctx))
+    if pins:
+        # The on-prem Service Layer serves a self-signed certificate, so CA validation (and a hostname match
+        # against an IP address) can't work. Trust exactly the pinned certificate instead of any certificate.
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        handler: HTTPSHandler = _PinnedHTTPSHandler(ctx, pins)
+    else:
+        ctx = _sap_sl_ssl_context()
+        # Verification off and nothing pinned: observe the certificate so it can be pinned. A normal verified
+        # connection needs no such help.
+        handler = _PinnedHTTPSHandler(ctx, frozenset()) if ctx.verify_mode == ssl.CERT_NONE else HTTPSHandler(context=ctx)
+    opener = build_opener(HTTPCookieProcessor(jar), handler)
     return opener, jar
 
 

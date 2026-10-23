@@ -6,11 +6,13 @@
   fetch_refunds_handler      Finances API RELEASED refunds -> amazonuk.* (RDS)
   post_credit_notes_handler  Not-yet-posted refunds -> SAP B1 AR Credit Memos
   daily_report_handler       ONE daily counts email (fetched / posted / failed)
-  dashboard_handler          Cognito-protected READ-ONLY /api/* (static frontend lives on S3, calls this cross-origin)
+  dashboard_handler          Cognito-protected /api/* — read-only except POST /api/orders/{id}/post (static frontend lives on S3, calls this cross-origin)
 
-Fetch and post run ONLY from their EventBridge schedules (serverless.yml) —
-the dashboard cannot trigger them. The event modes below (backfill, single
-order, retry) are AWS-side break-glass, invokable only with AWS credentials.
+Fetch and post run from their EventBridge schedules (serverless.yml); the
+dashboard cannot trigger them, except that its per-order "Post to SAP" button
+async-invokes post_invoices_handler for ONE validated order. The other event
+modes below (backfill, retry) are AWS-side break-glass, invokable only with
+AWS credentials.
 
 Fetch and post are separate Lambdas on purpose: the order fetch paces at
 ~180 s/page and the shipment report can poll for ~10 min, so sharing one 900 s

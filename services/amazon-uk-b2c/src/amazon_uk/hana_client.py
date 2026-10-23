@@ -10,9 +10,22 @@ byte-identical to the standalone version.
 
 from __future__ import annotations
 
+from khanal_shared.hana.config import get_hana_params
 from khanal_shared.hana.pool import get_pool
 
 from amazon_uk import config
+
+
+def _schema() -> str:
+    """Schema for fully-qualified queries. Prefer the schema in SSM
+    /sap/uk/hana_config — the same one the pooled connection does
+    SET SCHEMA to, and the same company SAP Service Layer posts into —
+    so queries can't drift to a different company via a CI-injected
+    HANA_SCHEMA env var. Env is only the fallback when SSM has none."""
+    params = get_hana_params()
+    if params is not None and params.schema:
+        return params.schema
+    return config.get("HANA_SCHEMA")
 
 
 class HanaUnavailableError(Exception):
@@ -58,7 +71,7 @@ def find_item_by_amz_sku(cursor, seller_sku: str) -> dict | None:
     Returns {"sap_item_code", "item_description"} or None.
     Raises HanaUnavailableError if the query itself fails.
     """
-    schema = config.get("HANA_SCHEMA")
+    schema = _schema()
     try:
         cursor.execute(
             f"""
@@ -92,7 +105,7 @@ def allocate_batches_fefo(cursor, item_code: str, required_qty: float, warehouse
     still produces `rows` (proving it needs batches) and correctly raises
     ValueError below rather than being mistaken for a non-batch item.
     """
-    schema = config.get("HANA_SCHEMA")
+    schema = _schema()
     try:
         cursor.execute(
             f"""

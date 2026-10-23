@@ -18,7 +18,7 @@ from unicommerce import constants, credit_notes, sap_client  # noqa: E402
 
 
 def test_post_credit_note_raises_when_duplicate_check_fails(monkeypatch):
-    def fake_find(uc_return_id, base_doc_entry=None):
+    def fake_find(uc_return_id, base_doc_entry=None, base_lines=None):
         raise sap_client.SapLookupError("SAP unreachable")
 
     def fail_if_called(*a, **k):
@@ -32,6 +32,56 @@ def test_post_credit_note_raises_when_duplicate_check_fails(monkeypatch):
 
     with pytest.raises(sap_client.SapLookupError):
         credit_notes._post_credit_note(conn=None, uc_return_id="R-1", settings=object())
+
+
+def _stop_after_guard(monkeypatch, seen):
+    """Run _post_credit_note only as far as the duplicate guard."""
+
+    def fake_find(uc_return_id, base_doc_entry=None, base_lines=None):
+        seen.update(base_doc_entry=base_doc_entry, base_lines=base_lines)
+        return {"doc_entry": 9, "doc_num": 9}
+
+    monkeypatch.setattr(credit_notes.sap_client, "find_credit_note_by_return_id", fake_find)
+    monkeypatch.setattr(credit_notes.store, "mark_cn_posted", lambda *a, **k: None)
+
+
+def test_duplicate_guard_is_scoped_to_the_invoice_lines_this_return_reverses(monkeypatch):
+    """Two returns of different lines on one invoice both link to the same
+    invoice. Matching on the invoice alone made the second return look
+    already posted, so it was marked posted with the first CN's DocEntry."""
+    seen = {}
+    _stop_after_guard(monkeypatch, seen)
+    cn = {"uc_order_id": "O1", "items_json": [{"sapBaseLine": 3}, {"sapBaseLine": 1}, {"sapBaseLine": 3}]}
+    monkeypatch.setattr(credit_notes.store, "get_cn", lambda conn, rid: cn)
+    monkeypatch.setattr(credit_notes.store, "get_order", lambda conn, oid: {"sap_ar_invoice_docentry": 500})
+
+    credit_notes._post_credit_note(conn=None, uc_return_id="R-2", settings=object())
+
+    assert seen == {"base_doc_entry": 500, "base_lines": [1, 3]}
+
+
+def test_duplicate_guard_reads_items_json_stored_as_a_string(monkeypatch):
+    seen = {}
+    _stop_after_guard(monkeypatch, seen)
+    cn = {"uc_order_id": "O1", "items_json": '[{"sapBaseLine": 0}]'}
+    monkeypatch.setattr(credit_notes.store, "get_cn", lambda conn, rid: cn)
+    monkeypatch.setattr(credit_notes.store, "get_order", lambda conn, oid: {"sap_ar_invoice_docentry": 500})
+
+    credit_notes._post_credit_note(conn=None, uc_return_id="R-3", settings=object())
+
+    assert seen["base_lines"] == [0]
+
+
+def test_duplicate_guard_falls_back_to_invoice_only_when_no_line_is_resolved(monkeypatch):
+    seen = {}
+    _stop_after_guard(monkeypatch, seen)
+    cn = {"uc_order_id": "O1", "items_json": [{"itemSku": "X"}]}
+    monkeypatch.setattr(credit_notes.store, "get_cn", lambda conn, rid: cn)
+    monkeypatch.setattr(credit_notes.store, "get_order", lambda conn, oid: {"sap_ar_invoice_docentry": 500})
+
+    credit_notes._post_credit_note(conn=None, uc_return_id="R-4", settings=object())
+
+    assert seen["base_lines"] is None
 
 
 def test_post_credit_notes_passes_posting_cutoff_to_get_pending_credit_notes(monkeypatch):

@@ -82,7 +82,13 @@ def get_tracking_by_invoice(series_name: str, doc_number: str) -> dict[str, Any]
     """Tries series-name variants (as-given, upper, lower), or every
     configured prefix when series_name is unknown. Raises
     SafexpressWaybillNotFoundError (not retryable — this is normal for an
-    invoice that hasn't shipped via SafeExpress yet) if none match."""
+    invoice that hasn't shipped via SafeExpress yet) if none match.
+
+    "Not found" is only reported when SafeExpress actually answered (HTTP 200,
+    just without a waybill). A request that fails, a non-200 reply or an
+    unreadable body means we do not know, so that raises a retryable
+    SafexpressAPIError instead — otherwise a SafeExpress outage was recorded as
+    "no waybill" on every invoice, indistinguishable from a real answer."""
     tried: list[str] = []
     for variant in _series_variants(series_name):
         formatted = _format_invoice_number(variant, doc_number)
@@ -91,17 +97,22 @@ def get_tracking_by_invoice(series_name: str, doc_number: str) -> dict[str, Any]
             resp = requests.post(
                 TRACKING_API_URL, headers=_BASE_HEADERS,
                 json={"docNo": formatted, "docType": DOC_TYPE_INVOICE},
-                timeout=DEFAULT_TIMEOUT_SECONDS, verify=False,
+                timeout=DEFAULT_TIMEOUT_SECONDS,
             )
         except requests.exceptions.RequestException as e:
-            logger.warning("Tracking request failed for %s: %s", formatted, e)
-            continue
+            raise SafexpressAPIError(f"Tracking request failed for {formatted}: {e}") from e
 
         if resp.status_code != 200:
-            logger.warning("Tracking API status %d for %s: %s", resp.status_code, formatted, resp.text[:300])
-            continue
+            raise SafexpressAPIError(
+                f"Tracking API answered HTTP {resp.status_code} for {formatted}: {resp.text[:300]}",
+                status_code=resp.status_code,
+                response_text=resp.text[:300],
+            )
 
-        result = resp.json()
+        try:
+            result = resp.json()
+        except ValueError as e:
+            raise SafexpressAPIError(f"Tracking API returned an unreadable body for {formatted}") from e
         shipment = result.get("shipment") or {}
         if shipment.get("waybill"):
             result["_successful_series"] = variant
@@ -119,7 +130,7 @@ def get_tracking_by_waybill(waybill_number: str) -> dict[str, Any]:
         resp = requests.post(
             TRACKING_API_URL, headers=_BASE_HEADERS,
             json={"docNo": waybill_number, "docType": DOC_TYPE_WAYBILL},
-            timeout=DEFAULT_TIMEOUT_SECONDS, verify=False,
+            timeout=DEFAULT_TIMEOUT_SECONDS,
         )
         resp.raise_for_status()
     except requests.exceptions.RequestException as e:
@@ -138,7 +149,7 @@ def get_pod_document(waybill_number: str, pod_base_url: str, auth_headers: dict[
     (not retryable) or SafexpressAPIError (504 is retryable, other codes are not)."""
     url = f"{pod_base_url}{waybill_number}"
     try:
-        resp = requests.get(url, headers=auth_headers, timeout=DEFAULT_POD_FETCH_TIMEOUT_SECONDS, verify=False)
+        resp = requests.get(url, headers=auth_headers, timeout=DEFAULT_POD_FETCH_TIMEOUT_SECONDS)
     except requests.exceptions.RequestException as e:
         raise SafexpressAPIError(f"Request error getting POD for waybill {waybill_number}: {e}") from e
 

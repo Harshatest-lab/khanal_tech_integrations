@@ -712,7 +712,12 @@ def ar_invoice_payload(
     order_has_paid_line = any(_net_line_price(item) > 0 for item in items)
 
     tax_inclusive = bool(resolve_mapped_value(tax_inclusive_map, channel, False))
-    ship_state = extract_shipping_state(uc_data) or ORIGIN_STATE
+    # No fallback to the origin state: a missing state used to book an
+    # out-of-state sale as intra-state CGST/SGST instead of IGST. Refuse and
+    # let the order fail visibly, like a missing ship date.
+    ship_state = extract_shipping_state(uc_data)
+    if not ship_state:
+        raise ValueError(f"No shipping state for order {uniware_id}; refusing to guess the tax bucket")
     origin_state_code = resolve_origin_state_code(channel, settings)
     tax_bucket = classify_tax_bucket(ship_state, None, origin_state_code)
     bill_to_code, ship_to_code = _resolve_bill_ship_codes(settings, channel, tax_bucket)
@@ -991,6 +996,11 @@ def credit_note_payload(cn: dict, parent_order: dict, settings: UnicommerceSetti
             return_wh = CHANNEL_WAREHOUSE_MAP[channel_upper]
         else:
             return_wh = _resolve_sap_warehouse(settings, parent_channel, item_uc_wh, default=RETURN_WAREHOUSE_CODE)
+            # warehouse_map sends the e-commerce shipping warehouse to EC-FG (right for invoices), so a return
+            # resolved there would go straight back into sellable stock. Returns arrive via the in-transit
+            # warehouse; fulfilment-centre warehouses (FKRT-*, AMZ-*) are left as mapped.
+            if return_wh == DEFAULT_WAREHOUSE:
+                return_wh = RETURN_WAREHOUSE_CODE
 
         line = {
             "ItemCode": item_code,

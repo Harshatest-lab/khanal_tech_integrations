@@ -110,6 +110,12 @@ def _prewarm_caches(orders: list[dict], settings) -> tuple[dict, dict]:
             )
 
     batch_managed_cache = hana_access.bulk_manage_batch_numbers(all_item_codes)
+    unknown = sorted(code for code, managed in batch_managed_cache.items() if managed is None)
+    if unknown:
+        # None means the batch-managed lookup failed (HANA down). Posting on
+        # it skips batch allocation, SAP rejects the invoice, and the order
+        # burns a retry attempt for something that is not its fault.
+        raise hana_access.HanaUnavailableError(f"batch-managed lookup failed for {len(unknown)} item(s), e.g. {unknown[:3]}")
     return batch_managed_cache, fefo_cache
 
 
@@ -236,6 +242,32 @@ def _batch_shortage_message(shortages: list[dict]) -> str:
     return " | ".join(lines) + suffix
 
 
+_SNAPSHOT_LINE_KEYS = (
+    "LineNum", "ItemCode", "WarehouseCode", "AccountCode", "Quantity", "UnitPrice",
+    "BatchNumbers", "U_UCOrderItemID", "U_Sale_order_itemcode",
+)
+
+
+def _sap_invoice_snapshot(doc_entry) -> dict | None:
+    """payload_json stand-in for an invoice SAP already had (guard/verify
+    recovery), so we did not build the payload ourselves. Credit notes resolve
+    their BaseLine/batches/CardCode from the parent's payload_json, and a NULL
+    one left every CN on the order unresolved forever. Best effort: if SAP
+    can't be read now the order is still marked posted, as before."""
+    try:
+        doc = sap_client.get_invoice_by_doc_entry(int(doc_entry))
+    except Exception as e:
+        logger.warning("SAP invoice snapshot failed for DocEntry=%s: %s", doc_entry, e)
+        return None
+    lines = [
+        {key: line[key] for key in _SNAPSHOT_LINE_KEYS if key in line}
+        for line in (doc.get("DocumentLines") or [])
+    ]
+    if not lines:
+        return None
+    return {"CardCode": doc.get("CardCode"), "DocumentLines": lines, "_source": "sap_snapshot"}
+
+
 def _post_order(conn, row: dict, settings, batch_managed_cache: dict, fefo_cache: dict, series_cache: dict, reservation_ctx: dict) -> tuple[str, list]:
     """Returns (outcome, shortages) where outcome is 'posted' | 'batch_hold' | 'verify'."""
     uniware_id = row["uniware_id"]
@@ -254,7 +286,10 @@ def _post_order(conn, row: dict, settings, batch_managed_cache: dict, fefo_cache
             else sap_client.find_invoice_by_uc_order_id(uniware_id)
         )
         if existing:
-            store.mark_posted(conn, uniware_id, str(existing["doc_entry"]), str(existing["doc_num"]), existing.get("doc_tax_amount") or 0, None)
+            store.mark_posted(
+                conn, uniware_id, str(existing["doc_entry"]), str(existing["doc_num"]),
+                existing.get("doc_tax_amount") or 0, _sap_invoice_snapshot(existing["doc_entry"]),
+            )
             logger.info("_post_order(%s): SAP invoice already exists (DocEntry=%s); skipping re-post.", uniware_id, existing["doc_entry"])
             return "posted", []
     except sap_client.SapLookupError as e:
@@ -288,6 +323,7 @@ def _post_order(conn, row: dict, settings, batch_managed_cache: dict, fefo_cache
         _release_for_order(reservation_ctx, uniware_id)
         logger.error("_post_order(%s): payload build failed: %s", uniware_id, e)
         store.mark_failed(conn, uniware_id, str(e), settings.max_retry_attempts)
+        store.record_attempt(conn, "invoice", uniware_id, "failed", error=f"payload build failed: {e}")
         return "failed", []
 
     try:
@@ -297,10 +333,12 @@ def _post_order(conn, row: dict, settings, batch_managed_cache: dict, fefo_cache
         _release_for_order(reservation_ctx, uniware_id)
         if "timeout" in err.lower() or "connection" in err.lower():
             store.unclaim_order(conn, uniware_id, "verify")
+            store.record_attempt(conn, "invoice", uniware_id, "deferred", request=payload, error=err)
             logger.warning("_post_order(%s): SAP POST timed out/connection error, deferred to verify: %s", uniware_id, err)
             return "verify", []
         logger.error("_post_order(%s): SAP POST failed: %s", uniware_id, err)
         store.mark_failed(conn, uniware_id, err, settings.max_retry_attempts)
+        store.record_attempt(conn, "invoice", uniware_id, "failed", request=payload, error=err)
         return "failed", []
 
     _consume_for_order(reservation_ctx, uniware_id)
@@ -329,6 +367,10 @@ def _post_order(conn, row: dict, settings, batch_managed_cache: dict, fefo_cache
             f"Comments={response_body.get('Comments')!r}) -- not trusting it",
             settings.max_retry_attempts,
         )
+        store.record_attempt(
+            conn, "invoice", uniware_id, "failed", request=posted_payload, response=response_body,
+            error="SAP's reply did not describe this order; not trusted", sap_doc_entry=str(doc_entry or ""),
+        )
         logger.error(
             "_post_order(%s): POST response mismatch, DocEntry=%s Comments=%r -- treating as failed, not recording",
             uniware_id, doc_entry, response_body.get("Comments"),
@@ -343,6 +385,8 @@ def _post_order(conn, row: dict, settings, batch_managed_cache: dict, fefo_cache
             logger.warning("_post_order(%s): could not fetch invoice detail after posting; recon will lag", uniware_id, exc_info=True)
 
     store.mark_posted(conn, uniware_id, str(doc_entry), str(doc_num), tax_actual, posted_payload)
+    store.save_order_sap_response(conn, uniware_id, response_body)
+    store.record_attempt(conn, "invoice", uniware_id, "posted", request=posted_payload, response=response_body, sap_doc_entry=str(doc_entry))
 
     if invoice_detail:
         payload_lines = posted_payload.get("DocumentLines", [])
@@ -444,7 +488,10 @@ def _verify_posted_orders(conn, limit: int, settings) -> dict:
         try:
             existing = sap_client.find_invoice_by_uc_order_id(uniware_id)
             if existing:
-                store.mark_posted(conn, uniware_id, str(existing["doc_entry"]), str(existing["doc_num"]), existing.get("doc_tax_amount") or 0, None)
+                store.mark_posted(
+                    conn, uniware_id, str(existing["doc_entry"]), str(existing["doc_num"]),
+                    existing.get("doc_tax_amount") or 0, _sap_invoice_snapshot(existing["doc_entry"]),
+                )
                 posted += 1
             else:
                 outcome = store.requeue_or_dead_from_verify(conn, uniware_id, settings.max_retry_attempts, "Invoice not found during verify")
@@ -516,7 +563,14 @@ def post_one_order(conn, uniware_id: str, force: bool = False) -> dict:
     if not store.claim_ready_order(conn, uniware_id):
         return {"status": "already_claimed", "uniware_id": uniware_id}
 
-    batch_managed_cache, fefo_cache = _prewarm_caches([row], settings)
+    try:
+        batch_managed_cache, fefo_cache = _prewarm_caches([row], settings)
+    except hana_access.HanaUnavailableError as e:
+        # Not the order's fault: hand it back untouched instead of leaving it
+        # claimed, and don't burn a retry attempt.
+        store.unclaim_order(conn, uniware_id, "ready")
+        logger.error("post_one_order(%s): HANA unavailable, returned to ready: %s", uniware_id, e)
+        return {"status": "hana_unavailable", "uniware_id": uniware_id, "error": str(e)[:500]}
     reservation_ctx = new_reservation_context()
     series_cache: dict = {}
     try:

@@ -24,7 +24,7 @@ from typing import Any, Callable
 
 from amazon_us import constants
 from amazon_us.finances_api import RefundEvent
-from amazon_us.invoice_payload import BomLookup, build_line_udfs
+from amazon_us.invoice_payload import BomLookup, build_address_extension, build_line_udfs
 from amazon_us.state_codes import US_TERRITORY_COUNTRY_CODES, normalize_us_state_code
 
 AcctResolver = Callable[[str], str]
@@ -144,6 +144,7 @@ def build_credit_note_payload(
             skipped.append(
                 {
                     "seller_sku": adj.seller_sku,
+                    "kind": "zero_qty",
                     "reason": f"Refund amount ({adj.principal_amount}) rounds to <{_MIN_POSTABLE_QTY} qty at unit price {unit_price}",
                 }
             )
@@ -282,9 +283,6 @@ def build_credit_note_payload(
             doc_lines.append(doc_line)
             line_num += 1
 
-    if not doc_lines:
-        return None, skipped
-
     # Net out whatever a prior CN under this refund_id already reversed —
     # only the newly-added remainder should hit the service lines below.
     total_tax = round(total_tax - (already_tax if total_tax >= 0 else -already_tax), 2)
@@ -293,6 +291,15 @@ def build_credit_note_payload(
         total_tax = 0.0
     if abs(total_shipping) < 0.01:
         total_shipping = 0.0
+
+    if not doc_lines:
+        # A shipping-only refund (Amazon returns the shipping charge and its tax with $0 on the item) still has
+        # money to reverse, so it posts as service lines alone -- but only when the zero item refund is the sole
+        # reason nothing matched. Any other skip (unmapped SKU, no invoice line) is a mismatch someone must see,
+        # so it still yields no payload rather than a CN that hides it.
+        zero_item_only = all(s.get("kind") == "zero_qty" for s in skipped)
+        if not (zero_item_only and (total_tax or total_shipping)):
+            return None, skipped
 
     if total_tax:
         doc_lines.append(
@@ -338,8 +345,9 @@ def build_credit_note_payload(
         "U_CreatedBy": constants.SAP_CREATED_BY,
         "DocumentLines": doc_lines,
     }
-    if not is_domestic:
-        payload["AddressExtension"] = {"ShipToCountry": country, "BillToCountry": country}
+    address_extension = build_address_extension(order, country, is_domestic)
+    if address_extension:
+        payload["AddressExtension"] = address_extension
     return payload, skipped
 
 

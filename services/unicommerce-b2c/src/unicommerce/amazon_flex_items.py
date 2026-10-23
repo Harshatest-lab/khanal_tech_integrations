@@ -30,23 +30,14 @@ own sap_payload.py bundle-grouping already use); batch numbers belong on
 the children, never the parent -- sap_payload.py's existing
 bundleSkuCode-grouping already guarantees this (parent line is hardcoded
 BatchNumbers: [], children go through the normal per-line FEFO path).
-resolve_seller_sku returns the CFG parent code as-is; the caller
-(flex_fetch.py) is responsible for calling get_product_tree_children and
-expanding into per-child rows tagged with bundleSkuCode.
+Callers (sap_payload's bundle expansion) call is_cfg_parent, then
+get_product_tree_children, and expand into per-child rows tagged with
+bundleSkuCode.
 """
 
 from __future__ import annotations
 
-import psycopg
-
 from unicommerce import sap_client
-from unicommerce.settings import UnicommerceSettings
-
-
-class SkuUnresolved(Exception):
-    """No override and no live-order-history match for this Amazon seller
-    SKU. Never guess -- callers must flag/skip the line, not post against
-    the wrong item."""
 
 
 class CfgExpansionFailed(Exception):
@@ -55,48 +46,10 @@ class CfgExpansionFailed(Exception):
     bundle contains."""
 
 
-def build_sku_map(conn: psycopg.Connection) -> dict[str, str]:
-    """{seller SKU: SAP FG item code}, sourced from unicommerce-b2c's own
-    already-synced Amazon order history. Load once per fetch run and pass
-    to resolve_seller_sku for every line -- same "load once, resolve many"
-    convention as geo.py/gst.py, not a per-line query."""
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT DISTINCT l.sellerskucode, l.itemsku
-            FROM unicommerce_order_lines l
-            JOIN unicommerce_orders o ON o.uniware_id = l.uniware_id
-            WHERE o.channel_name ILIKE 'AMAZON%%'
-              AND l.sellerskucode != '' AND l.itemsku != ''
-            """
-        )
-        rows = cur.fetchall()
-    return {seller_sku: item_sku for seller_sku, item_sku in rows}
-
-
 def is_cfg_parent(item_code: str) -> bool:
     """SAP Sales-BOM parent naming convention, per the MTR script's
     _is_cfg_parent_item."""
     return (item_code or "").strip().upper().startswith("CFG")
-
-
-def resolve_seller_sku(sku_map: dict[str, str], settings: UnicommerceSettings, seller_sku: str) -> str:
-    """Manual override tier (settings.flex_sku_overrides) wins over the
-    live-order-history map -- same override-wins precedence as
-    khanal-oms's sku_resolver.py. Raises SkuUnresolved if neither covers
-    it. Never guesses. Returns the resolved code as-is, whether plain or a
-    CFG parent -- callers must check is_cfg_parent() and expand via
-    get_product_tree_children() themselves; this function only resolves
-    the seller SKU to a SAP item code."""
-    key = (seller_sku or "").strip()
-    if not key:
-        raise SkuUnresolved("empty seller SKU")
-
-    item_code = settings.flex_sku_overrides.get(key) or sku_map.get(key)
-    if not item_code:
-        raise SkuUnresolved(f"no override and no live-order-history match for seller SKU {key!r}")
-
-    return item_code
 
 
 def get_product_tree_children(parent_item_code: str) -> list[dict]:

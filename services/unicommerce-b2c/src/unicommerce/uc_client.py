@@ -30,6 +30,10 @@ class UcApiError(Exception):
     """Unicommerce returned successful=false in an otherwise-200 response."""
 
 
+# UC's answer for a return it lists in search results but can never serve (seen 2026-10-23 on 3 returns).
+_UC_PERMANENT_RETURN_REJECTION = "Invalid shipping package code"
+
+
 class UcClient:
     def __init__(self, creds: UcCredentials):
         self.base_url = creds.base_url
@@ -218,15 +222,20 @@ class UcClient:
             headers = {**self._headers(), "Facility": facility}
             resp = requests.post(url, headers=headers, json=body, timeout=_TIMEOUT)
 
+        # Raise, never return []: fetch_returns advances its cursor after a
+        # clean run, so a swallowed failure here skipped that window for good.
         if not resp.ok:
-            logger.warning(
-                "UC return/search facility=%s type=%s status=%s", facility, return_type, resp.status_code
+            raise UcApiError(
+                f"UC return/search facility={facility} type={return_type} status={resp.status_code}"
             )
-            return []
         try:
             data = resp.json()
-        except Exception:
-            return []
+        except Exception as e:
+            raise UcApiError(f"UC return/search facility={facility} type={return_type} returned unparseable body") from e
+        if isinstance(data, dict) and data.get("successful") is False:
+            raise UcApiError(
+                f"UC return/search facility={facility} type={return_type} failed: {data.get('errors') or data.get('message')}"
+            )
         rows = data.get("returnOrders") or []
         for row in rows:
             row["_facility"] = facility
@@ -273,13 +282,25 @@ class UcClient:
                         code_to_facility[str(code)] = row.get("_facility") or ""
 
         full_returns: list[dict] = []
+        failed_codes: list[str] = []
         for code, fac in code_to_facility.items():
             try:
                 detail = self.get_return_detail(code, facility=fac or None)
                 if detail:
                     full_returns.append(detail)
             except Exception as e:
+                if isinstance(e, UcApiError) and _UC_PERMANENT_RETURN_REJECTION in str(e):
+                    # UC itself says this return can't be served, and a retry won't change that. Raising would hold
+                    # the returns cursor on this window forever, so skip it loudly instead.
+                    logger.warning("UC return/get permanently rejected code=%s, skipping: %s", code, e)
+                    continue
                 logger.warning("UC return/get failed code=%s error=%s", code, e)
+                failed_codes.append(code)
+        if failed_codes:
+            # Every code was tried first, so one bad return doesn't hide the
+            # rest in the logs; raising keeps the caller's cursor in place so
+            # the window is fetched again next run (staging is idempotent).
+            raise UcApiError(f"UC return/get failed for {len(failed_codes)} return(s): {', '.join(failed_codes[:10])}")
         return full_returns
 
     # ── PoGrn / InventorySync writes ────────────────────────────────────────

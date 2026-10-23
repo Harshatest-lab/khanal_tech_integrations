@@ -16,13 +16,17 @@ Rules enforced at the SQL level:
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
 import psycopg
 
 from amazon_us.credentials import DATABASE_URL
+
+logger = logging.getLogger(__name__)
 
 
 def connect() -> psycopg.Connection:
@@ -260,6 +264,7 @@ def list_ready_orders(
                   AND actual_ship_date IS NOT NULL
                   AND actual_ship_date >= %s::date
                   AND actual_ship_date <= %s::date
+                  AND NOT EXISTS (SELECT 1 FROM amazon_us_period_locks l WHERE l.locked AND l.period = to_char(actual_ship_date, 'YYYY-MM'))
                 ORDER BY actual_ship_date ASC, amazon_order_id ASC
                 LIMIT %s
                 """,
@@ -272,6 +277,7 @@ def list_ready_orders(
                 WHERE stage = 'ready'
                   AND actual_ship_date IS NOT NULL
                   AND actual_ship_date >= %s::date
+                  AND NOT EXISTS (SELECT 1 FROM amazon_us_period_locks l WHERE l.locked AND l.period = to_char(actual_ship_date, 'YYYY-MM'))
                 ORDER BY actual_ship_date ASC, amazon_order_id ASC
                 LIMIT %s
                 """,
@@ -300,6 +306,7 @@ def claim(conn: psycopg.Connection, amazon_order_id: str, from_stage: str, to_st
                 WHERE amazon_order_id = %s
                   AND (stage = %s
                        OR (stage = 'posting' AND updated_at < now() - interval '30 minutes'))
+                  AND NOT EXISTS (SELECT 1 FROM amazon_us_period_locks l WHERE l.locked AND l.period = to_char(actual_ship_date, 'YYYY-MM'))  -- a locked posting period can never be claimed
                 """,
                 (to_stage, amazon_order_id, from_stage),
             )
@@ -512,6 +519,84 @@ def claim_cn(conn: psycopg.Connection, refund_id: str, amazon_order_id: str, pos
     return claimed
 
 
+# --- Posting-period lock (mirrors unicommerce_period_locks) ------------------------------------------------------
+# The real gates are claim()/list_ready_orders above (invoices, by ship date) and post_credit_notes (refunds, by
+# refund date). The relabelling below is only so the dashboard shows WHY a document is stuck.
+
+def is_period_locked(conn: psycopg.Connection, date_val) -> bool:
+    """date_val: the document date about to be used (ship date for an invoice, refund posted date for a credit note)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM amazon_us_period_locks WHERE period = %s AND locked", (str(date_val)[:7],))
+        return cur.fetchone() is not None
+
+
+def list_period_locks(conn: psycopg.Connection) -> list[dict]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT period, locked, locked_by, locked_at, unlocked_by, unlocked_at, note "
+            "FROM amazon_us_period_locks ORDER BY period DESC"
+        )
+        cols = [d.name for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def lock_period(conn: psycopg.Connection, period: str, actor: str, note: str = "") -> dict:
+    """Lock `period` ('YYYY-MM') and relabel its waiting orders and failed credit notes 'period_locked'."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO amazon_us_period_locks (period, locked, locked_by, locked_at, note, updated_at)
+            VALUES (%s, true, %s, now(), %s, now())
+            ON CONFLICT (period) DO UPDATE SET
+              locked = true, locked_by = %s, locked_at = now(), note = %s,
+              unlocked_by = NULL, unlocked_at = NULL, updated_at = now()
+            """,
+            (period, actor, note, actor, note),
+        )
+        cur.execute(
+            "UPDATE amazon_us_orders SET stage = 'period_locked', updated_at = now() "
+            "WHERE stage = 'ready' AND to_char(actual_ship_date, 'YYYY-MM') = %s",
+            (period,),
+        )
+        orders_held = cur.rowcount
+        # Only 'failed' refunds are relabelled: a 'skipped' one carries its own reason (pre-cutoff, nothing to
+        # reverse) which the label would hide, and it is reclaimable anyway.
+        cur.execute(
+            "UPDATE amazon_us_cn_log SET status = 'period_locked', updated_at = now() "
+            "WHERE status = 'failed' AND left(posted_date::text, 7) = %s",
+            (period,),
+        )
+        cns_held = cur.rowcount
+    conn.commit()
+    return {"period": period, "locked": True, "orders_held": orders_held, "credit_notes_held": cns_held}
+
+
+def unlock_period(conn: psycopg.Connection, period: str, actor: str) -> dict:
+    """Unlock `period`; its held orders go back to 'ready' and credit notes to 'failed' (reclaimable), so the next
+    scheduled run picks them up."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE amazon_us_period_locks SET locked = false, unlocked_by = %s, unlocked_at = now(), updated_at = now() "
+            "WHERE period = %s",
+            (actor, period),
+        )
+        found = cur.rowcount == 1
+        cur.execute(
+            "UPDATE amazon_us_orders SET stage = 'ready', updated_at = now() "
+            "WHERE stage = 'period_locked' AND to_char(actual_ship_date, 'YYYY-MM') = %s",
+            (period,),
+        )
+        orders_resumed = cur.rowcount
+        cur.execute(
+            "UPDATE amazon_us_cn_log SET status = 'failed', updated_at = now() "
+            "WHERE status = 'period_locked' AND left(posted_date::text, 7) = %s",
+            (period,),
+        )
+        cns_resumed = cur.rowcount
+    conn.commit()
+    return {"period": period, "locked": False, "found": found, "orders_resumed": orders_resumed, "credit_notes_resumed": cns_resumed}
+
+
 def requeue_failed_permanent_cns(conn: psycopg.Connection, refund_ids: list[str]) -> list[str]:
     """Ops helper: move exactly these refund_ids from 'failed_permanent' back
     to 'failed' so claim_cn will reclaim them. Only for when the cause of the
@@ -584,6 +669,76 @@ def upsert_cn_log(
             ),
         )
     conn.commit()
+    record_cn_attempt(
+        conn, refund_id, amazon_order_id, status,
+        doc_entry=doc_entry, doc_num=doc_num, payload=payload, response=response, error=error or skip_reason,
+    )
+
+
+def save_raw(conn: psycopg.Connection, source: str, ref: str, payload: Any) -> None:
+    """Keep what Amazon sent, exactly as received, in amazon_us_raw_events.
+
+    Append-only and de-duplicated by content: the same record fetched again adds nothing, but a changed one
+    (status moved, items added) is kept as a new version, so history is never overwritten the way
+    amazon_us_orders.raw_payload is. Best effort: a failure here must never stop the sync that called it."""
+    if not payload:
+        return
+    body = json.dumps(payload, default=str, sort_keys=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO amazon_us_raw_events (source, ref, payload_hash, payload)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (source, ref, payload_hash) DO NOTHING
+                """,
+                (source, ref, hashlib.sha256(body.encode()).hexdigest(), body),
+            )
+        conn.commit()
+    except Exception:  # noqa: BLE001 -- see docstring
+        conn.rollback()
+        logger.exception("could not save raw %s record for %s", source, ref)
+
+
+def record_cn_attempt(
+    conn: psycopg.Connection, refund_id: str, amazon_order_id: str, status: str, *,
+    doc_entry: int | None, doc_num: int | None, payload: dict | None, response: dict | None, error: str | None,
+) -> None:
+    """One row per credit-note attempt in amazon_us_cn_attempts. amazon_us_cn_log keeps only the latest state of
+    a refund; this keeps every try with what was sent and SAP's answer. Best effort, like save_raw.
+
+    The credit-note run re-reads a 45-day window every few hours, so a refund that stays skipped (or keeps
+    failing the same way) would add an identical row each time. A try is recorded only when it differs from the
+    refund's previous one in status, error or SAP document, so the table holds changes, not repeats."""
+    message = error[:2000] if error else None
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO amazon_us_cn_attempts
+                  (refund_id, amazon_order_id, status, sap_doc_entry, sap_doc_num, sap_payload, sap_response, error_message)
+                SELECT %(refund)s, %(order)s, %(status)s, %(entry)s, %(num)s, %(payload)s, %(response)s, %(message)s
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM (
+                    SELECT status, sap_doc_entry, error_message FROM amazon_us_cn_attempts
+                    WHERE refund_id = %(refund)s ORDER BY id DESC LIMIT 1
+                  ) last
+                  WHERE last.status = %(status)s
+                    AND last.sap_doc_entry IS NOT DISTINCT FROM %(entry)s
+                    AND last.error_message IS NOT DISTINCT FROM %(message)s
+                )
+                """,
+                {
+                    "refund": refund_id, "order": amazon_order_id, "status": status, "entry": doc_entry, "num": doc_num,
+                    "payload": json.dumps(payload, default=str) if payload else None,
+                    "response": json.dumps(response, default=str) if response else None,
+                    "message": message,
+                },
+            )
+        conn.commit()
+    except Exception:  # noqa: BLE001
+        conn.rollback()
+        logger.exception("could not record credit note attempt for %s", refund_id)
 
 
 # ── SKU map ──────────────────────────────────────────────────────────────
