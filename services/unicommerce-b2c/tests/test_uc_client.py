@@ -204,6 +204,43 @@ def test_get_returns_between_raises_when_a_detail_fetch_fails_after_trying_all()
     assert fetched == ["R1", "R2"]  # one bad code does not stop the rest being tried
 
 
+def test_get_returns_between_skips_returns_uc_permanently_rejects_but_keeps_the_rest():
+    """UC answers "Invalid shipping package code" for a return it can never serve. That will not heal on a retry, so
+    treating it like an outage would hold the returns cursor on the same window forever."""
+    client = _client()
+    client._search_returns_by_type = lambda rtype, *a, **k: (
+        [{"code": "BAD1", "_facility": "F"}, {"code": "R2", "_facility": "F"}] if rtype == "CIR" else []
+    )
+
+    def detail(code, facility=None):
+        if code == "BAD1":
+            raise UcApiError("services/rest/v1/oms/return/get: Invalid shipping package code for this facility")
+        return {"code": code}
+
+    client.get_return_detail = detail
+    got = client.get_returns_between("2026-10-01 00:00:00", "2026-10-02 00:00:00")
+    assert got == [{"code": "R2"}]
+
+
+def test_get_returns_between_still_raises_for_other_uc_errors_and_transient_failures():
+    client = _client()
+    client._search_returns_by_type = lambda rtype, *a, **k: (
+        [{"code": "BAD1", "_facility": "F"}, {"code": "R2", "_facility": "F"}] if rtype == "CIR" else []
+    )
+
+    def detail(code, facility=None):
+        if code == "BAD1":
+            raise UcApiError("services/rest/v1/oms/return/get: RATE_LIMIT_EXCEEDED")
+        raise ConnectionError("reset by peer")
+
+    client.get_return_detail = detail
+    try:
+        client.get_returns_between("2026-10-01 00:00:00", "2026-10-02 00:00:00")
+        assert False, "expected UcApiError"
+    except UcApiError as e:
+        assert "BAD1" in str(e) and "R2" in str(e)
+
+
 # ── PoGrn / InventorySync write methods ─────────────────────────────────
 
 def _capture_post(monkeypatch, response_body):
