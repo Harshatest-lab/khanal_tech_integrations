@@ -40,6 +40,26 @@ _WATERMARK_ORDERS = "orders"
 _WATERMARK_RETURNS = "returns"
 _DEFAULT_LOOKBACK_DAYS = 60
 _DEFAULT_RETURN_LOOKBACK_DAYS = 90
+# A scheduled returns fetch asks UC for returns *updated* since its cursor, so a stale cursor would re-stage every
+# old return that changed since. It may never reach back further than this; a longer gap is filled by hand with an
+# explicit from_date/to_date window.
+MAX_RETURN_LOOKBACK_DAYS = 7
+
+
+def incremental_returns_since(watermark: str | None, now: datetime) -> str:
+    """Start of the incremental returns window: the stored cursor, but never older than MAX_RETURN_LOOKBACK_DAYS."""
+    floor = _format(now - timedelta(days=MAX_RETURN_LOOKBACK_DAYS))
+    cursor = (watermark or "").strip()[:19]
+    if not cursor:
+        return floor
+    if cursor < floor:  # same fixed-width UTC format, so string order is time order
+        logger.warning(
+            "returns cursor %s is stale (older than %d days); starting from %s instead. Fill any gap with an "
+            "explicit from_date/to_date window.",
+            cursor, MAX_RETURN_LOOKBACK_DAYS, floor,
+        )
+        return floor
+    return cursor
 
 
 def _order_event_timestamp(order: dict):
@@ -275,7 +295,6 @@ def fetch_returns(
     uc.login()
 
     explicit_range = bool(from_date)
-    default_since = (datetime.now(timezone.utc) - timedelta(days=_DEFAULT_RETURN_LOOKBACK_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
     cycle_ended_at = datetime.now(timezone.utc)
 
     if explicit_range:
@@ -286,7 +305,7 @@ def fetch_returns(
         if len(end) == 10:
             end += " 23:59:59"
     else:
-        since = store.get_watermark(conn, _WATERMARK_RETURNS) or default_since
+        since = incremental_returns_since(store.get_watermark(conn, _WATERMARK_RETURNS), cycle_ended_at)
         end = _format(cycle_ended_at)
 
     run_id = store.start_sync_log(conn, "fetch_returns", since, end)

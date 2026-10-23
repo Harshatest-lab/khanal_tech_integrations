@@ -290,6 +290,15 @@ functions:
       - schedule:
           rate: cron(2,32 * * * ? *)
           enabled: ${self:custom.currentSchedulesEnabled}
+      # Returns (-> staged credit notes), 5 min before unicommercePostCreditNotes (17,47) and 10 min after the
+      # orders fetch, so a return's parent order is already staged. Cursor-driven; the cursor never reaches back
+      # more than MAX_RETURN_LOOKBACK_DAYS (fetch_sync.incremental_returns_since). Scheduled 2026-10-23 -- until
+      # then returns were fetched by hand with an explicit from_date/to_date window.
+      - schedule:
+          rate: cron(12,42 * * * ? *)
+          input:
+            mode: returns
+          enabled: ${self:custom.currentSchedulesEnabled}
 
   debugFindInvoiceByOrder:
     handler: src.handlers.debug_find_invoice_by_order_handler
