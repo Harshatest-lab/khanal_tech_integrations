@@ -16,6 +16,7 @@ This can run for many minutes (SP-API's orders endpoint paces at ~180s/page
 to amazonuk.sync_log in RDS, and echoed to stdout/CloudWatch.
 """
 
+import time
 from datetime import datetime, timedelta, timezone
 
 from amazon_uk import applog
@@ -45,6 +46,20 @@ INITIAL_LOOKBACK_DAYS = 7
 # (each run moves it forward by MAX_WINDOW_HOURS - INCREMENTAL_LOOKBACK_HOURS).
 MAX_WINDOW_HOURS = 48
 
+# The window is fetched in slices of this many hours, each stored and its
+# watermark saved as soon as it completes. Before slicing, a run stored
+# NOTHING until every page was fetched — so a window with more orders than
+# one Lambda can page through (~100 orders / 180 s / 900 s budget) timed out
+# every time, lost all work and left the watermark where it was (the
+# 2026-10-07 dev outage). Now a run keeps whatever slices it finished and the
+# next run (or chained invocation) resumes from the last saved slice end.
+SLICE_HOURS = 6
+
+# Time kept free at the end of a run for the shipment report (it polls
+# every 30 s, up to 20 times) plus its DB writes.
+SHIPMENT_RESERVE_SECONDS = 240
+SHIPMENT_POLL_SECONDS = 30
+
 
 def fetch_and_store_orders(start: str, end: str) -> dict:
     """Step 1: fetch every order (each already carries its items embedded,
@@ -59,9 +74,9 @@ def fetch_and_store_orders(start: str, end: str) -> dict:
     return {"orders": len(orders), "items_stored": items_stored}
 
 
-def fetch_and_store_shipments(start: str, end: str) -> dict:
+def fetch_and_store_shipments(start: str, end: str, max_polls: int = 20) -> dict:
     """Step 2: fetch the shipment report and append the actual ship date."""
-    report_rows = fetch_shipment_report.fetch(start, end)
+    report_rows = fetch_shipment_report.fetch(start, end, max_polls=max_polls)
     shipments_stored = store.upsert_shipment_rows(report_rows)
     log.info(f"Shipment rows stored: {shipments_stored}")
 
@@ -95,7 +110,8 @@ def sync(start_date: str, end_date: str) -> dict:
     return {**order_result, **shipment_result}
 
 
-def sync_incremental(initial_lookback_days: int | None = None) -> dict:
+def sync_incremental(initial_lookback_days: int | None = None, time_budget_seconds: float | None = None,
+                     until: datetime | None = None, resume_exact: bool = False) -> dict:
     """Incremental sync — scheduled daily via EventBridge.
     Fetches every order UPDATED since the last successful run (fetch_orders_by_update, lastUpdatedAfter) instead of
     orders created "today" — so an order purchased days ago that just
@@ -106,22 +122,41 @@ def sync_incremental(initial_lookback_days: int | None = None) -> dict:
 
     Watermark = MAX(watermark) from amazonuk.fetch_log for source='orders'.
     First-ever run (no watermark yet) catches up initial_lookback_days
-    (defaults to INITIAL_LOOKBACK_DAYS, 7). Because one run's window is
-    capped at MAX_WINDOW_HOURS, that catch-up (like any gap after downtime)
-    drains automatically over consecutive scheduled runs — no manual seeding
-    or backfill needed. Pass a smaller initial_lookback_days only to get a
-    first watermark sooner.
+    (defaults to INITIAL_LOOKBACK_DAYS, 7). One run's window is capped at
+    MAX_WINDOW_HOURS and fetched in SLICE_HOURS slices; each slice is stored
+    and its end saved as the watermark as soon as it completes, so a gap
+    drains over consecutive runs and a run that runs out of time keeps
+    everything it finished.
 
-    New watermark is saved AFTER the fetch completes — not before — as "now"
-    for an uncapped run, or the window's end for a capped one — so the next
-    run's INCREMENTAL_LOOKBACK_HOURS buffer covers anything updated while
-    this run's (possibly slow, paginated) fetch was still in flight. Same
-    pattern as the sibling Amazon US pipeline's sync_watermark.
+    time_budget_seconds (the Lambda's remaining time, minus safety): when
+    given, no page is started that cannot finish inside it, and
+    SHIPMENT_RESERVE_SECONDS are kept for the shipment report. The result
+    then has budget_exhausted=True and more remains to fetch — the caller
+    should run again (handlers.fetch_handler chains itself). None = no
+    limit (local/manual runs).
+
+    until: stop the window at this UTC datetime instead of "now"; the
+    watermark stops there too, so the next run continues from it.
+    resume_exact: skip the INCREMENTAL_LOOKBACK_HOURS buffer. Only for a run
+    chained from one that ran out of time: its watermark is an exact slice
+    boundary, so there is no gap to cover — and re-fetching the buffer would
+    spend the whole budget on slices already stored (a chain that never
+    advances).
+
+    The final slice of an uncapped window is open-ended (no
+    lastUpdatedBefore) and its watermark is "now" when it completes, so the
+    next run's INCREMENTAL_LOOKBACK_HOURS buffer covers anything updated
+    while it was in flight. Same pattern as the sibling Amazon US
+    pipeline's sync_watermark.
 
     Also re-fetches the shipment report for a trailing window, since the
     Reports API has no equivalent incremental cursor — shipment data for a
     recently-shipped order can land a day or two after the ship date.
     """
+    started = time.monotonic()
+    deadline = started + time_budget_seconds if time_budget_seconds is not None else None
+    orders_deadline = deadline - SHIPMENT_RESERVE_SECONDS if deadline is not None else None
+
     lookback_days = initial_lookback_days if initial_lookback_days is not None else INITIAL_LOOKBACK_DAYS
     last_watermark = store.get_last_watermark("orders")
     now = datetime.now(timezone.utc)
@@ -129,37 +164,70 @@ def sync_incremental(initial_lookback_days: int | None = None) -> dict:
         fetch_from = now - timedelta(days=lookback_days)
         log.info(f"No watermark found — first run, catching up {lookback_days} days")
     else:
-        fetch_from = last_watermark - timedelta(hours=INCREMENTAL_LOOKBACK_HOURS)
+        fetch_from = last_watermark - timedelta(hours=0 if resume_exact else INCREMENTAL_LOOKBACK_HOURS)
 
-    # Cap the window (see MAX_WINDOW_HOURS). Uncapped runs stay open-ended
-    # (no lastUpdatedBefore) and the watermark becomes "now", exactly as
-    # before; capped runs bound the query and the watermark becomes the
-    # window's end, so the next run continues from there.
     window_end = fetch_from + timedelta(hours=MAX_WINDOW_HOURS)
     capped = window_end < now
-    fetch_from_str = fetch_from.strftime("%Y-%m-%dT%H:%M:%SZ")
-    fetch_to_str = window_end.strftime("%Y-%m-%dT%H:%M:%SZ") if capped else None
-    log.info(f"LastUpdatedAfter={fetch_from_str} LastUpdatedBefore={fetch_to_str or 'now'} "
-             f"(watermark={last_watermark}, lookback={INCREMENTAL_LOOKBACK_HOURS}h)")
+    cap_end = window_end if capped else now
+    if until is not None and until < cap_end:
+        limit, bounded = until, True
+    else:
+        limit, bounded = cap_end, capped
+    fmt = lambda dt: dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    log.info(f"LastUpdatedAfter={fmt(fetch_from)} LastUpdatedBefore={fmt(limit) if bounded else 'now'} "
+             f"(watermark={last_watermark}, lookback={0 if resume_exact else INCREMENTAL_LOOKBACK_HOURS}h, slices of {SLICE_HOURS}h)")
     if capped:
         log.info(f"Window capped at {MAX_WINDOW_HOURS}h — catching up; the next run continues from "
                  f"{window_end.isoformat()}")
 
-    orders = fetch_orders.fetch_orders_by_update(fetch_from_str, fetch_to_str)
-    log.info(f"Got {len(orders)} orders to process")
+    total_orders = total_items = slices_done = 0
+    new_watermark = last_watermark
+    budget_exhausted = False
+    cursor = fetch_from
+    while cursor < limit:
+        slice_end = min(cursor + timedelta(hours=SLICE_HOURS), limit)
+        final = slice_end >= limit
+        open_ended = final and not bounded         # final slice of an uncapped window: no lastUpdatedBefore
+        try:
+            orders = fetch_orders.fetch_orders_by_update(fmt(cursor), None if open_ended else fmt(slice_end),
+                                                         orders_deadline)
+        except fetch_orders.FetchBudgetExceeded as exc:
+            if exc.partial:                         # idempotent upsert; watermark stays at the last finished slice
+                store.upsert_orders(exc.partial)
+                log.info(f"Budget hit mid-slice: stored {len(exc.partial)} partial orders (watermark not advanced)")
+            budget_exhausted = True
+            break
+        items_stored = store.upsert_orders(orders)
+        new_watermark = datetime.now(timezone.utc) if open_ended else slice_end
+        store.record_fetch_log("orders", new_watermark, len(orders), items_stored)
+        total_orders += len(orders)
+        total_items += items_stored
+        slices_done += 1
+        log.info(f"Slice {fmt(cursor)} -> {'now' if open_ended else fmt(slice_end)}: "
+                 f"{len(orders)} orders, {items_stored} items stored, watermark→{new_watermark.isoformat()}")
+        cursor = slice_end
 
-    items_stored = store.upsert_orders(orders)
-    log.info(f"Order items stored: {items_stored}")
+    if budget_exhausted:
+        log.info(f"Out of time budget after {slices_done} slice(s) — more remains; run again to continue "
+                 f"from {new_watermark.isoformat() if new_watermark else fmt(fetch_from)}")
 
-    new_watermark = window_end if capped else datetime.now(timezone.utc)
-    store.record_fetch_log("orders", new_watermark, len(orders), items_stored)
+    shipment_result = {"shipments_stored": 0}
+    if slices_done and new_watermark is not None:
+        max_polls = 20
+        if deadline is not None:
+            max_polls = int((deadline - time.monotonic() - 45) // SHIPMENT_POLL_SECONDS)
+        if max_polls >= 2:
+            shipment_end = new_watermark.strftime("%Y-%m-%dT%H:%M:%SZ")
+            shipment_start = (new_watermark - timedelta(days=INITIAL_LOOKBACK_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            shipment_result = fetch_and_store_shipments(shipment_start, shipment_end, max_polls=min(20, max_polls))
+        else:
+            log.info("Skipping shipment report this run (no time left); the next run re-fetches a trailing window")
 
-    shipment_end = new_watermark.strftime("%Y-%m-%dT%H:%M:%SZ")
-    shipment_start = (new_watermark - timedelta(days=INITIAL_LOOKBACK_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    shipment_result = fetch_and_store_shipments(shipment_start, shipment_end)
+    log.info(f"Done. orders={total_orders} items_stored={total_items} slices={slices_done} "
+             f"shipments={shipment_result['shipments_stored']} budget_exhausted={budget_exhausted} "
+             f"watermark→{new_watermark.isoformat() if new_watermark else None}")
 
-    log.info(f"Done. orders={len(orders)} items_stored={items_stored} "
-             f"shipments={shipment_result['shipments_stored']} watermark→{new_watermark.isoformat()}")
-
-    return {"orders": len(orders), "items_stored": items_stored,
-            "watermark": new_watermark.isoformat(), "window_capped": capped, **shipment_result}
+    return {"orders": total_orders, "items_stored": total_items,
+            "watermark": new_watermark.isoformat() if new_watermark else None,
+            "window_capped": bounded, "slices": slices_done, "budget_exhausted": budget_exhausted,
+            **shipment_result}

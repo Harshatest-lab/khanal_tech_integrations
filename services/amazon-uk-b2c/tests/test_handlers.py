@@ -129,3 +129,64 @@ def test_crash_alert_scrubs_secrets_and_reraises(monkeypatch, alerts):
         handlers.fetch_handler({}, None)
     subject, body = alerts[0]
     assert "hunter2-secret" not in body and "***" in body
+
+
+# ── fetch chaining / time budget ───────────────────────────────────────────
+
+class _Ctx:
+    function_name = "amazon-uk-b2c-dev-amazonUkFetch"
+
+    def get_remaining_time_in_millis(self):
+        return 900_000
+
+
+def test_fetch_passes_time_budget_from_context(monkeypatch, alerts):
+    seen = {}
+    monkeypatch.setattr(handlers.sync_amazonuk, "sync_incremental",
+                        lambda lb=None, time_budget_seconds=None, **kw: seen.update(b=time_budget_seconds) or {})
+    handlers.fetch_handler({}, _Ctx())
+    assert seen["b"] == 900 - handlers.LAMBDA_SAFETY_SECONDS
+
+
+def test_fetch_chains_itself_when_out_of_time(monkeypatch, alerts):
+    import json
+    import sys
+    import types
+
+    invoked = []
+    fake = types.SimpleNamespace(client=lambda svc: types.SimpleNamespace(invoke=lambda **kw: invoked.append(kw)))
+    monkeypatch.setitem(sys.modules, "boto3", fake)
+    monkeypatch.setattr(handlers.sync_amazonuk, "sync_incremental",
+                        lambda lb=None, **kw: {"budget_exhausted": True})
+    handlers.fetch_handler({"mode": "incremental", "chain_depth": 2}, _Ctx())
+    assert len(invoked) == 1 and invoked[0]["InvocationType"] == "Event"
+    assert invoked[0]["FunctionName"] == _Ctx.function_name
+    assert json.loads(invoked[0]["Payload"])["chain_depth"] == 3
+
+
+def test_fetch_does_not_chain_when_finished_or_at_depth_cap(monkeypatch, alerts):
+    import sys
+    import types
+
+    invoked = []
+    fake = types.SimpleNamespace(client=lambda svc: types.SimpleNamespace(invoke=lambda **kw: invoked.append(kw)))
+    monkeypatch.setitem(sys.modules, "boto3", fake)
+    monkeypatch.setattr(handlers.sync_amazonuk, "sync_incremental",
+                        lambda lb=None, **kw: {"budget_exhausted": False})
+    handlers.fetch_handler({}, _Ctx())
+    monkeypatch.setattr(handlers.sync_amazonuk, "sync_incremental",
+                        lambda lb=None, **kw: {"budget_exhausted": True})
+    handlers.fetch_handler({"chain_depth": handlers.MAX_CHAIN_DEPTH}, _Ctx())
+    assert invoked == [] and any("not drained" in subj for subj, _ in alerts)
+
+
+def test_chained_run_resumes_exactly_and_until_is_parsed(monkeypatch, alerts):
+    seen = {}
+    monkeypatch.setattr(handlers.sync_amazonuk, "sync_incremental",
+                        lambda lb=None, **kw: seen.update(kw) or {})
+    handlers.fetch_handler({"chain_depth": 1, "until": "2026-10-08T00:00:00Z"}, None)
+    assert seen["resume_exact"] is True
+    assert seen["until"].isoformat() == "2026-10-08T00:00:00+00:00"
+    seen.clear()
+    handlers.fetch_handler({}, None)                       # the scheduled run: buffer kept, no until
+    assert "resume_exact" not in seen and "until" not in seen
