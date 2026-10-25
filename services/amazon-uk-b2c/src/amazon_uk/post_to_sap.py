@@ -60,7 +60,7 @@ def _shipped_orders_not_posted(start_date: str, end_date: str) -> list[str]:
                 SELECT DISTINCT oi.amazon_order_id
                 FROM amazonuk.order_items oi
                 LEFT JOIN amazonuk.sap_postings sp
-                    ON sp.amazon_order_id = oi.amazon_order_id AND sp.status = 'posted'
+                    ON sp.amazon_order_id = oi.amazon_order_id AND (sp.status = 'posted' OR sp.dead)
                 WHERE oi.order_status = 'Shipped'
                   AND oi.purchase_date::date BETWEEN %(start)s AND %(end)s
                   AND sp.amazon_order_id IS NULL
@@ -88,7 +88,7 @@ def _shipped_orders_not_posted_all(cutoff: str) -> list[str]:
                 SELECT DISTINCT oi.amazon_order_id
                 FROM amazonuk.order_items oi
                 LEFT JOIN amazonuk.sap_postings sp
-                    ON sp.amazon_order_id = oi.amazon_order_id AND sp.status = 'posted'
+                    ON sp.amazon_order_id = oi.amazon_order_id AND (sp.status = 'posted' OR sp.dead)
                 WHERE oi.order_status = 'Shipped'
                   AND oi.shipment_date::date >= %(cutoff)s
                   AND sp.amazon_order_id IS NULL
@@ -111,7 +111,7 @@ def _failed_order_ids(cutoff: str) -> list[str]:
                 """
                 SELECT sp.amazon_order_id
                 FROM amazonuk.sap_postings sp
-                WHERE sp.status = 'failed'
+                WHERE sp.status = 'failed' AND NOT sp.dead
                   AND EXISTS (SELECT 1 FROM amazonuk.order_items oi
                               WHERE oi.amazon_order_id = sp.amazon_order_id
                                 AND oi.shipment_date::date >= %(cutoff)s)
@@ -145,7 +145,11 @@ def _order_rows(amazon_order_id: str) -> list[dict]:
 
 
 def _record(amazon_order_id: str, status: str, doc_entry: str = None, doc_num: str = None, error: str = None,
-            sap_response: dict = None) -> None:
+            sap_response: dict = None) -> dict:
+    """Upsert the posting row. A 'failed' record counts one attempt and turns
+    the row dead at store.MAX_POST_ATTEMPTS. Returns {"attempts", "dead"} for a
+    failure, {} otherwise."""
+    failed = status == "failed"
     conn = store.connect()
     try:
         with conn:
@@ -153,18 +157,30 @@ def _record(amazon_order_id: str, status: str, doc_entry: str = None, doc_num: s
                 cur.execute(
                     """
                     INSERT INTO amazonuk.sap_postings
-                        (amazon_order_id, sap_doc_entry, sap_doc_num, status, error, sap_response, posted_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, now())
+                        (amazon_order_id, sap_doc_entry, sap_doc_num, status, error, sap_response, posted_at,
+                         attempts, dead)
+                    VALUES (%(id)s, %(entry)s, %(num)s, %(status)s, %(error)s, %(resp)s, now(),
+                            %(first)s, %(failed)s AND %(first)s >= %(max)s)
                     ON CONFLICT (amazon_order_id) DO UPDATE SET
                         sap_doc_entry = EXCLUDED.sap_doc_entry, sap_doc_num = EXCLUDED.sap_doc_num,
                         status = EXCLUDED.status, error = EXCLUDED.error,
-                        sap_response = EXCLUDED.sap_response, posted_at = now()
+                        sap_response = EXCLUDED.sap_response, posted_at = now(),
+                        attempts = amazonuk.sap_postings.attempts + %(first)s,
+                        dead = %(failed)s AND amazonuk.sap_postings.attempts + %(first)s >= %(max)s
+                    RETURNING attempts, dead
                     """,
-                    (amazon_order_id, doc_entry, doc_num, status, error,
-                     Json(sap_response) if sap_response is not None else None),
+                    {"id": amazon_order_id, "entry": doc_entry, "num": doc_num, "status": status,
+                     "error": error, "resp": Json(sap_response) if sap_response is not None else None,
+                     "first": 1 if failed else 0, "failed": failed, "max": store.MAX_POST_ATTEMPTS},
                 )
+                attempts, dead = cur.fetchone()
     finally:
         conn.close()
+    if failed:
+        if dead:
+            log.error(f"{amazon_order_id}: failed {attempts} times - marked dead, automated runs will skip it: {error}")
+        return {"attempts": attempts, "dead": dead}
+    return {}
 
 
 def _get_posted_locally(amazon_order_id: str) -> dict | None:
@@ -211,21 +227,21 @@ def _post_one_order(amazon_order_id: str, hana_cursor, sku_map: dict) -> dict:
     rows = _order_rows(amazon_order_id)
     if not rows:
         error = "Order not found"
-        _record(amazon_order_id, "failed", error=error)
-        return {"order": amazon_order_id, "status": "failed", "error": error}
+        info = _record(amazon_order_id, "failed", error=error)
+        return {"order": amazon_order_id, "status": "failed", "error": error, **info}
 
     payload, skipped = build_invoice_payload(rows, hana_cursor, WAREHOUSE, CARD_CODE, SERIES, sku_map)
     if payload is None:
         error = f"No postable lines: {skipped}"
-        _record(amazon_order_id, "failed", error=error)
-        return {"order": amazon_order_id, "status": "failed", "error": error}
+        info = _record(amazon_order_id, "failed", error=error)
+        return {"order": amazon_order_id, "status": "failed", "error": error, **info}
 
     try:
         sap_result = sap_client.post_invoice(payload)
     except sap_client.SapPostError as e:
         error = str(e)[:1000]
-        _record(amazon_order_id, "failed", error=error, sap_response=e.response_body)
-        return {"order": amazon_order_id, "status": "failed", "error": error}
+        info = _record(amazon_order_id, "failed", error=error, sap_response=e.response_body)
+        return {"order": amazon_order_id, "status": "failed", "error": error, **info}
 
     _record(amazon_order_id, "posted", sap_result["doc_entry"], sap_result["doc_num"],
             sap_response=sap_result["response"])
@@ -259,9 +275,9 @@ def _post_order_ids(order_ids: list[str]) -> dict:
 
             except Exception as e:
                 error = str(e)[:1000]
-                _record(amazon_order_id, "failed", error=error)
+                info = _record(amazon_order_id, "failed", error=error)
                 failed += 1
-                results.append({"order": amazon_order_id, "status": "failed", "error": error})
+                results.append({"order": amazon_order_id, "status": "failed", "error": error, **info})
     finally:
         hana_client.close(hana_conn, hana_cursor)
 
@@ -306,7 +322,7 @@ def post_single_order(amazon_order_id: str) -> dict:
         return {"order": amazon_order_id, "status": "hana_down", "error": str(e)}
     except Exception as e:
         error = str(e)[:1000]
-        _record(amazon_order_id, "failed", error=error)
-        return {"order": amazon_order_id, "status": "failed", "error": error}
+        info = _record(amazon_order_id, "failed", error=error)
+        return {"order": amazon_order_id, "status": "failed", "error": error, **info}
     finally:
         hana_client.close(hana_conn, hana_cursor)

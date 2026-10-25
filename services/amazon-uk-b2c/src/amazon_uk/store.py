@@ -40,6 +40,14 @@ SHIPMENT_COLUMNS = [
 ]
 
 
+# A failed order / credit note is retried by every scheduled run; after this
+# many failed attempts it is marked dead and automated runs skip it (a manual
+# "Post to SAP" from the dashboard still tries it). Without a limit a
+# permanent failure (unmapped SKU, locked period, no stock) would fail and
+# be re-emailed forever.
+MAX_POST_ATTEMPTS = 5
+
+
 def _upsert_sql(columns: list[str]) -> str:
     cols = ", ".join(columns)
     placeholders = ", ".join(f"%({c})s" for c in columns)

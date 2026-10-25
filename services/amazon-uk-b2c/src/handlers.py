@@ -39,7 +39,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from amazon_uk import daily_report, dashboard, post_credit_notes_to_sap, post_to_sap, sync_amazonuk, sync_refunds  # noqa: E402
-from amazon_uk.alerts import scrub, send_alert, send_failure_alert  # noqa: E402
+from amazon_uk.alerts import scrub, send_alert, send_dead_alert, send_failure_alert  # noqa: E402
 
 configure_logging()  # LOG_LEVEL-aware; handles the Lambda root-logger pitfall
 logger = logging.getLogger("amz_sync")
@@ -53,6 +53,7 @@ def _run(label: str, fn):
         send_alert(f"{label} crashed", scrub(f"{e}\n\n{traceback.format_exc()[-3000:]}"))
         raise
     send_failure_alert(label, result)  # posting runs only; best-effort, never raises
+    send_dead_alert(label, result)     # same: items that just hit the retry limit
     return result
 
 
