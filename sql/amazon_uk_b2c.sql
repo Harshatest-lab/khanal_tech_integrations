@@ -105,7 +105,11 @@ CREATE TABLE IF NOT EXISTS amazonuk.sap_postings (
     -- a short human-readable summary for lists/tooltips; this is the raw
     -- response for full inspection (dashboard "View SAP Response" modal).
     sap_response      JSONB,
-    posted_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+    posted_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- failed attempts so far; dead = gave up after 5 (automated runs skip it,
+    -- the dashboard's manual Post still tries). See amazon_uk_posting_attempts.sql.
+    attempts          INTEGER NOT NULL DEFAULT 0,
+    dead              BOOLEAN NOT NULL DEFAULT false
 );
 
 -- One row per incremental fetch run. Next run's lastUpdatedAfter cursor is
@@ -215,7 +219,9 @@ CREATE TABLE IF NOT EXISTS amazonuk.sap_credit_notes (
     status            TEXT NOT NULL,  -- 'posted' or 'failed'
     error             TEXT,
     sap_response      JSONB,
-    posted_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+    posted_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    attempts          INTEGER NOT NULL DEFAULT 0,
+    dead              BOOLEAN NOT NULL DEFAULT false
 );
 
 CREATE INDEX IF NOT EXISTS idx_amazonuk_sap_credit_notes_order ON amazonuk.sap_credit_notes (amazon_order_id);

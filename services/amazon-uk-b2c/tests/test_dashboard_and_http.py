@@ -319,7 +319,8 @@ def test_daily_report_one_mail_to_varshap(monkeypatch):
     monkeypatch.setattr(daily_report, "collect_counts", lambda hours=24: {
         "orders_fetched": 12, "refunds_fetched": 2, "invoices_posted": 9, "invoices_failed": 1,
         "credit_notes_posted": 1, "credit_notes_failed": 0,
-        "invoices_failed_total": 3, "credit_notes_failed_total": 0})
+        "invoices_failed_total": 3, "credit_notes_failed_total": 0,
+        "invoices_dead": 2, "credit_notes_dead": 0})
     monkeypatch.setattr(alerts, "send_alert", lambda s, b, to="": sent.append((s, b, to)) or True)
     monkeypatch.setattr(alerts, "scrub", lambda t: t)
     out = daily_report.run()
@@ -339,3 +340,29 @@ def test_default_sender(monkeypatch):
     monkeypatch.setitem(sys.modules, "boto3", fake)
     assert alerts.send_alert("s", "b") is True
     assert calls["Source"] == "varshap@khanalfoods.com"
+
+
+def test_daily_report_mentions_dead(monkeypatch):
+    from amazon_uk import daily_report
+    counts = {"orders_fetched": 1, "refunds_fetched": 0, "invoices_posted": 0, "invoices_failed": 0,
+              "credit_notes_posted": 0, "credit_notes_failed": 0, "invoices_failed_total": 2,
+              "credit_notes_failed_total": 0, "invoices_dead": 2, "credit_notes_dead": 1}
+    _, body = daily_report.build(counts)
+    assert "invoices=2, credit notes=1" in body and "Dead" in body
+
+
+def test_dead_alert_only_for_dead_rows(monkeypatch):
+    sent = []
+    monkeypatch.setattr(alerts, "send_alert", lambda s, b, to="": sent.append((s, b, to)) or True)
+    monkeypatch.setattr(alerts, "scrub", lambda t: t)
+    result = {"results": [
+        {"order": "A", "status": "failed", "error": "boom", "attempts": 5, "dead": True},
+        {"order": "B", "status": "failed", "error": "boom", "attempts": 2, "dead": False},
+        {"order": "C", "status": "posted"},
+    ]}
+    assert alerts.send_dead_alert("post_invoices[post]", result) is True
+    assert "A (5 attempts)" in sent[0][1] and "B" not in sent[0][1]
+    sent.clear()
+    assert alerts.send_dead_alert("post_invoices[post]", {"results": [{"order": "B", "status": "failed", "dead": False}]}) is False
+    assert alerts.send_dead_alert("fetch[incremental]", {"orders": 3}) is False
+    assert not sent

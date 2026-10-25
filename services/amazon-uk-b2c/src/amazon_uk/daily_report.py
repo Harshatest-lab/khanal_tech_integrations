@@ -31,6 +31,8 @@ def collect_counts(hours: int = WINDOW_HOURS) -> dict:
                 "invoices_failed": _one(cur, f"SELECT COUNT(*) FROM amazonuk.sap_postings WHERE status='failed' AND posted_at >= {w}"),
                 "credit_notes_posted": _one(cur, f"SELECT COUNT(*) FROM amazonuk.sap_credit_notes WHERE status='posted' AND posted_at >= {w}"),
                 "credit_notes_failed": _one(cur, f"SELECT COUNT(*) FROM amazonuk.sap_credit_notes WHERE status='failed' AND posted_at >= {w}"),
+                "invoices_dead": _one(cur, "SELECT COUNT(*) FROM amazonuk.sap_postings WHERE dead"),
+                "credit_notes_dead": _one(cur, "SELECT COUNT(*) FROM amazonuk.sap_credit_notes WHERE dead"),
                 "invoices_failed_total": _one(cur, "SELECT COUNT(*) FROM amazonuk.sap_postings WHERE status='failed'"),
                 "credit_notes_failed_total": _one(cur, "SELECT COUNT(*) FROM amazonuk.sap_credit_notes WHERE status='failed'"),
             }
@@ -54,6 +56,8 @@ def build(counts: dict, hours: int = WINDOW_HOURS) -> tuple[str, str]:
         "",
         f"Still failed overall (retried each run): invoices={c['invoices_failed_total']}, "
         f"credit notes={c['credit_notes_failed_total']}",
+        f"Dead (gave up after {store.MAX_POST_ATTEMPTS} attempts, not retried): invoices={c['invoices_dead']}, "
+        f"credit notes={c['credit_notes_dead']}",
     ])
     return subject, body
 

@@ -390,7 +390,7 @@ function sapCell(o) {
   }
   if (o.sap_status) {
     return `<div class="sap-cell">
-      <span class="pill Canceled">Failed</span>
+      <span class="pill Canceled">${o.sap_dead ? `Dead (${o.sap_attempts} tries)` : "Failed"}</span>
       <span class="sap-error-text" title="${escapeHtml(o.sap_error)}">${escapeHtml(o.sap_error)}</span>
     </div>`;
   }

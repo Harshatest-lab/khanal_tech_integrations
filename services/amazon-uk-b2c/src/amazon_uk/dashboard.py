@@ -166,7 +166,7 @@ SELECT o.amazon_order_id, o.purchase_date, o.shipment_date, o.last_update_date, 
            WHERE x.amazon_order_id = o.amazon_order_id) AS skus,
        (SELECT STRING_AGG(DISTINCT x.title, ' | ') FROM amazonuk.order_items x
            WHERE x.amazon_order_id = o.amazon_order_id) AS titles,
-       sp.status AS sap_status, sp.sap_doc_num, sp.error AS sap_error,
+       sp.status AS sap_status, sp.sap_doc_num, sp.error AS sap_error, sp.attempts AS sap_attempts, sp.dead AS sap_dead,
        (SELECT COUNT(*) FROM amazonuk.refund_events re
            WHERE re.amazon_order_id = o.amazon_order_id) AS refund_count
 FROM orders o

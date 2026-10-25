@@ -72,7 +72,7 @@ def _refunds_not_posted(conn, start_date: str, end_date: str) -> list[str]:
             JOIN amazonuk.sap_postings sp
                 ON sp.amazon_order_id = re.amazon_order_id AND sp.status = 'posted'
             LEFT JOIN amazonuk.sap_credit_notes cn
-                ON cn.transaction_id = re.transaction_id AND cn.status = 'posted'
+                ON cn.transaction_id = re.transaction_id AND (cn.status = 'posted' OR cn.dead)
             WHERE re.transaction_status = 'RELEASED'
               AND re.posted_date::date BETWEEN %(start)s AND %(end)s
               AND cn.transaction_id IS NULL
@@ -95,7 +95,7 @@ def _refunds_not_posted_all(conn, cutoff: str) -> list[str]:
             JOIN amazonuk.sap_postings sp
                 ON sp.amazon_order_id = re.amazon_order_id AND sp.status = 'posted'
             LEFT JOIN amazonuk.sap_credit_notes cn
-                ON cn.transaction_id = re.transaction_id AND cn.status = 'posted'
+                ON cn.transaction_id = re.transaction_id AND (cn.status = 'posted' OR cn.dead)
             WHERE re.transaction_status = 'RELEASED'
               AND re.posted_date::date >= %(cutoff)s
               AND cn.transaction_id IS NULL
@@ -160,23 +160,39 @@ def _bulk_locally_posted(conn, transaction_ids: list[str]) -> dict[str, dict]:
 
 
 def _record(conn, transaction_id: str, amazon_order_id: str, status: str, doc_entry: str = None,
-            doc_num: str = None, error: str = None, sap_response: dict = None) -> None:
+            doc_num: str = None, error: str = None, sap_response: dict = None) -> dict:
+    """Upsert the credit-note row. A 'failed' record counts one attempt and
+    turns the row dead at MAX_POST_ATTEMPTS (store.MAX_POST_ATTEMPTS).
+    Returns {"attempts", "dead"} for a failure, {} otherwise."""
+    failed = status == "failed"
     with conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO amazonuk.sap_credit_notes
                     (transaction_id, amazon_order_id, sap_doc_entry, sap_doc_num, status, error,
-                     sap_response, posted_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, now())
+                     sap_response, posted_at, attempts, dead)
+                VALUES (%(id)s, %(order)s, %(entry)s, %(num)s, %(status)s, %(error)s, %(resp)s, now(),
+                        %(first)s, %(failed)s AND %(first)s >= %(max)s)
                 ON CONFLICT (transaction_id) DO UPDATE SET
                     sap_doc_entry = EXCLUDED.sap_doc_entry, sap_doc_num = EXCLUDED.sap_doc_num,
                     status = EXCLUDED.status, error = EXCLUDED.error,
-                    sap_response = EXCLUDED.sap_response, posted_at = now()
+                    sap_response = EXCLUDED.sap_response, posted_at = now(),
+                    attempts = amazonuk.sap_credit_notes.attempts + %(first)s,
+                    dead = %(failed)s AND amazonuk.sap_credit_notes.attempts + %(first)s >= %(max)s
+                RETURNING attempts, dead
                 """,
-                (transaction_id, amazon_order_id, doc_entry, doc_num, status, error,
-                 Json(sap_response) if sap_response is not None else None),
+                {"id": transaction_id, "order": amazon_order_id, "entry": doc_entry, "num": doc_num,
+                 "status": status, "error": error,
+                 "resp": Json(sap_response) if sap_response is not None else None,
+                 "first": 1 if failed else 0, "failed": failed, "max": store.MAX_POST_ATTEMPTS},
             )
+            attempts, dead = cur.fetchone()
+    if failed:
+        if dead:
+            log.error(f"{transaction_id}: failed {attempts} times - marked dead, automated runs will skip it: {error}")
+        return {"attempts": attempts, "dead": dead}
+    return {}
 
 
 def _document_signature(doc: dict) -> tuple:
@@ -222,8 +238,8 @@ def _post_one_refund(conn, transaction_id: str, sku_map: dict, event: dict | Non
     {"posted", "recovered", "failed"}."""
     if event is None:
         error = "Refund transaction not found"
-        _record(conn, transaction_id, "", "failed", error=error)
-        return {"transaction_id": transaction_id, "status": "failed", "error": error}
+        info = _record(conn, transaction_id, "", "failed", error=error)
+        return {"transaction_id": transaction_id, "status": "failed", "error": error, **info}
 
     amazon_order_id = event["amazon_order_id"]
 
@@ -232,16 +248,16 @@ def _post_one_refund(conn, transaction_id: str, sku_map: dict, event: dict | Non
 
     if not invoice_doc_entry:
         error = "No posted AR Invoice for this order yet — nothing to credit against"
-        _record(conn, transaction_id, amazon_order_id, "failed", error=error)
-        return {"transaction_id": transaction_id, "order": amazon_order_id, "status": "failed", "error": error}
+        info = _record(conn, transaction_id, amazon_order_id, "failed", error=error)
+        return {"transaction_id": transaction_id, "order": amazon_order_id, "status": "failed", "error": error, **info}
 
     invoice = sap_client.get_invoice(invoice_doc_entry)
     payload, skipped = build_credit_note_payload(
         invoice, items, amazon_order_id, transaction_id, event["posted_date"], CREDIT_NOTE_SERIES, sku_map)
     if payload is None:
         error = f"No postable lines: {skipped}"
-        _record(conn, transaction_id, amazon_order_id, "failed", error=error)
-        return {"transaction_id": transaction_id, "order": amazon_order_id, "status": "failed", "error": error}
+        info = _record(conn, transaction_id, amazon_order_id, "failed", error=error)
+        return {"transaction_id": transaction_id, "order": amazon_order_id, "status": "failed", "error": error, **info}
 
     existing = _find_existing_credit_note(amazon_order_id, payload)
     if existing:
@@ -254,8 +270,8 @@ def _post_one_refund(conn, transaction_id: str, sku_map: dict, event: dict | Non
         sap_result = sap_client.post_credit_note(payload)
     except sap_client.SapPostError as e:
         error = str(e)[:1000]
-        _record(conn, transaction_id, amazon_order_id, "failed", error=error, sap_response=e.response_body)
-        return {"transaction_id": transaction_id, "order": amazon_order_id, "status": "failed", "error": error}
+        info = _record(conn, transaction_id, amazon_order_id, "failed", error=error, sap_response=e.response_body)
+        return {"transaction_id": transaction_id, "order": amazon_order_id, "status": "failed", "error": error, **info}
 
     _record(conn, transaction_id, amazon_order_id, "posted", sap_result["doc_entry"], sap_result["doc_num"],
             sap_response=sap_result["response"])
@@ -291,9 +307,9 @@ def _post_refund_ids(conn, transaction_ids: list[str], sku_map: dict) -> dict:
                 failed += 1
         except Exception as e:
             error = str(e)[:1000]
-            _record(conn, transaction_id, event["amazon_order_id"] if event else "", "failed", error=error)
+            info = _record(conn, transaction_id, event["amazon_order_id"] if event else "", "failed", error=error)
             failed += 1
-            results.append({"transaction_id": transaction_id, "status": "failed", "error": error})
+            results.append({"transaction_id": transaction_id, "status": "failed", "error": error, **info})
 
     return {"total": posted + failed, "posted": posted, "failed": failed, "results": results}
 
@@ -334,7 +350,7 @@ def retry_failed_refunds() -> dict:
                 SELECT cn.transaction_id
                 FROM amazonuk.sap_credit_notes cn
                 JOIN amazonuk.refund_events re ON re.transaction_id = cn.transaction_id
-                WHERE cn.status = 'failed'
+                WHERE cn.status = 'failed' AND NOT cn.dead
                   AND re.posted_date::date >= %(cutoff)s
                 ORDER BY 1
                 """,
@@ -387,7 +403,7 @@ def post_single_refund(transaction_id: str) -> dict:
         return {"transaction_id": transaction_id, "status": "failed", "error": "Refund transaction not found"}
     except Exception as e:
         error = str(e)[:1000]
-        _record(conn, transaction_id, "", "failed", error=error)
-        return {"transaction_id": transaction_id, "status": "failed", "error": error}
+        info = _record(conn, transaction_id, "", "failed", error=error)
+        return {"transaction_id": transaction_id, "status": "failed", "error": error, **info}
     finally:
         conn.close()

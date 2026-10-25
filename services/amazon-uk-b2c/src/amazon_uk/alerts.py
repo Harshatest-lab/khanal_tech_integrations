@@ -164,6 +164,30 @@ def send_failure_alert(label: str, result) -> bool:
         return False
 
 
+def send_dead_alert(label: str, result) -> bool:
+    """Email the admin when a posting run just gave up on orders / refunds
+    (failed store.MAX_POST_ATTEMPTS times, now skipped by automated runs).
+    Any failure reason; the item-mapping / period-lock alert is separate."""
+    try:
+        rows = result.get("results") if isinstance(result, dict) else None
+        if not isinstance(rows, list):
+            return False
+        dead = [r for r in rows if r.get("dead")]
+        if not dead:
+            return False
+        lines = [f"Amazon UK {label}: {len(dead)} item(s) failed repeatedly and are now DEAD",
+                 "Automated runs will no longer retry them. Fix the cause, then use the "
+                 "dashboard's Post to SAP button on each.", ""]
+        lines += [f"  {r.get('order') or r.get('transaction_id')} ({r.get('attempts')} attempts): {r.get('error')}"
+                  for r in dead[:100]]
+        if len(dead) > 100:
+            lines.append(f"  ... and {len(dead) - 100} more (see dashboard)")
+        return send_alert(f"{label}: {len(dead)} gave up after repeated failures", scrub("\n".join(lines)))
+    except Exception:
+        logger.error("dead alert email failed for %r", label, exc_info=True)
+        return False
+
+
 def send_daily_report(text: str, subject: str) -> bool:
     """Best-effort daily counts email to AMZ_UK_REPORT_EMAILS."""
     return send_alert(subject, scrub(text), to=_env("AMZ_UK_REPORT_EMAILS", DEFAULT_REPORT_EMAILS))

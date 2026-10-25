@@ -227,3 +227,15 @@ All sent via SES from `AMZ_UK_ALERT_FROM_EMAIL` (default varshap@khanalfoods.com
 | Daily counts | `AMZ_UK_REPORT_EMAILS` (varshap@) | `amazonUkDailyReport`, once a day |
 
 Failed orders are retried every run, so unresolved failures re-alert daily.
+
+## Retry limit (dead state)
+
+A failed invoice / credit note is retried by each scheduled run, up to
+`store.MAX_POST_ATTEMPTS` (5) failed attempts. The 5th failure marks the row
+`dead`: automated runs (post and retry) skip it, the dashboard shows
+"Dead (5 tries)", the admin gets one email listing what gave up, and the daily
+report counts dead items. A manual **Post to SAP** from the dashboard still
+tries a dead item (success -> posted; failure keeps it dead).
+Run `sql/amazon_uk_posting_attempts.sql` once per environment BEFORE
+deploying this (adds `attempts` / `dead` to `sap_postings` and
+`sap_credit_notes`).
