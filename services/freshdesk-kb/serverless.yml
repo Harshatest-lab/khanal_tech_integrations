@@ -1,0 +1,83 @@
+service: freshdesk-kb
+
+frameworkVersion: "3"
+
+provider:
+  name: aws
+  runtime: python3.12
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'ap-south-1'}
+  memorySize: 256
+  timeout: 20
+  iam:
+    role:
+      statements:
+        # Freshdesk domain + API key + knowledge base category IDs (read-only).
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+          Resource:
+            - arn:aws:ssm:${self:provider.region}:*:parameter${self:custom.credentialsParam}
+  environment:
+    STAGE: ${self:provider.stage}
+    LOG_LEVEL: ${env:LOG_LEVEL, 'INFO'}
+    FRESHDESK_CREDENTIALS_PARAM: ${self:custom.credentialsParam}
+    FRESHDESK_KB_CACHE_MINUTES: "60"
+  httpApi:
+    cors:
+      allowedOrigins: ${self:custom.allowedOriginsByStage.${self:provider.stage}, self:custom.allowedOriginsByStage.dev}
+      allowedHeaders:
+        - Content-Type
+        - Accept
+      allowedMethods:
+        - GET
+        - OPTIONS
+      maxAge: 3600
+
+custom:
+  credentialsParam: ${env:FRESHDESK_CREDENTIALS_PARAM, '/freshdesk/credentials'}
+  # Storefronts allowed to call this API from the browser. Shopify theme
+  # previews are served from the store's own domain, so these cover previews too.
+  allowedOriginsByStage:
+    dev:
+      - https://dogseeindiaqa.myshopify.com
+    prod:
+      - https://dogseechew.com
+      - https://www.dogseechew.com
+      - https://gfuf7k-fe.myshopify.com
+
+layers:
+  shared:
+    name: ${self:service}-${self:provider.stage}-shared
+    path: ../../layers/build
+    package:
+      patterns:
+        - "python/**"
+    compatibleRuntimes:
+      - python3.12
+
+package:
+  patterns:
+    - "!**"
+    - "src/**"
+    - "!**/__pycache__/**"
+    - "!**/*.pyc"
+
+functions:
+  kb:
+    handler: src.handlers.kb_handler
+    layers: [{ Ref: SharedLambdaLayer }]
+    events:
+      - httpApi:
+          path: /v1/freshdesk/kb
+          method: get
+
+resources:
+  extensions:
+    # Public, unauthenticated endpoint: cap request rate so a bot can't run up
+    # Lambda cost or burn the Freshdesk API rate limit (the KB cache absorbs normal traffic).
+    HttpApiStage:
+      Properties:
+        DefaultRouteSettings:
+          ThrottlingBurstLimit: 50
+          ThrottlingRateLimit: 20
