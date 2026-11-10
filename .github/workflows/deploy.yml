@@ -8,7 +8,7 @@ on:
         required: true
         default: dev
       service:
-        description: "Service folder: delivery-api | B2C_Invoice | amazon-us-b2c | dogseeus-invoice | unicommerce-b2c | safexpress | B2B_so | amazon-uk-b2c"
+        description: "Service folder: delivery-api | B2C_Invoice | amazon-us-b2c | dogseeus-invoice | unicommerce-b2c | safexpress | B2B_so | amazon-uk-b2c | freshdesk-kb"
         required: true
         default: delivery-api
 

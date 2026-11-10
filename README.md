@@ -8,6 +8,7 @@
 |-----------|---------|
 | [services/delivery-api](services/delivery-api) | Shipments, carrier webhooks, **Delhivery ingest + webhooks** — [README](services/delivery-api/README.md), [DELHIVERY](docs/DELHIVERY.md) |
 | [services/dogseeus-invoice](services/dogseeus-invoice) | **Dogseeus_Invoice** (stub) — own stack — [README](services/dogseeus-invoice/README.md) |
+| [services/freshdesk-kb](services/freshdesk-kb) | **Freshdesk knowledge base** read API for the Shopify help chat panel — [README](services/freshdesk-kb/README.md) |
 
 ### Python vs Node in this repo
 
